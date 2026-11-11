@@ -1,4 +1,6 @@
-# Copy to config.toml next to this file. config.toml is not committed.
+# Copy to config.toml next to the program. config.toml is not committed.
+# `cargo run` and `cargo test` still read this folder.
+# A shipped exe reads config.toml in the folder that contains the exe.
 # The password is the Navidrome admin password.
 server = "http://192.168.1.51:4533"
 user = ""

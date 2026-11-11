@@ -14,7 +14,7 @@ pub struct Place {
 }
 
 pub fn path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("window-place.toml")
+    crate::paths::dir().join("window-place.toml")
 }
 
 pub fn load() -> Option<Place> {

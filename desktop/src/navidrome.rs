@@ -2,9 +2,7 @@
 //! Errors returned from here are short and never include the password or the stream URL.
 
 use std::fmt;
-use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -44,7 +42,7 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     pub fn load() -> Self {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let path = crate::paths::dir().join("config.toml");
         match std::fs::read_to_string(&path) {
             Ok(text) => parse_config(&text),
             Err(_) => Self::default(),
@@ -666,16 +664,39 @@ fn encode(text: &str) -> String {
 
 fn random_salt() -> String {
     let mut bytes = [0u8; 8];
-    if let Ok(mut file) = File::open("/dev/urandom") {
-        if file.read_exact(&mut bytes).is_ok() {
-            return bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        }
+    if fill_salt(&mut bytes) {
+        return bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}")
+}
+
+fn fill_salt(bytes: &mut [u8; 8]) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
+            return file.read_exact(bytes).is_ok();
+        }
+        false
+    }
+    #[cfg(windows)]
+    {
+        // RtlGenRandom. advapi32 is always present; /dev/urandom is not.
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn SystemFunction036(buffer: *mut u8, length: u32) -> u8;
+        }
+        unsafe { SystemFunction036(bytes.as_mut_ptr(), bytes.len() as u32) != 0 }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = bytes;
+        false
+    }
 }
 
 #[cfg(test)]

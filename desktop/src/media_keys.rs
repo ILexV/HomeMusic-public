@@ -1,15 +1,17 @@
-//! System media keys. Linux uses MPRIS. A missing session bus must not stop the player.
-//! Windows needs a window handle; that attachment is step 8. Until then this fails softly there too.
+//! System media keys. Linux uses MPRIS and ignores the window handle.
+//! A missing session bus must not stop the player.
+//! Windows needs the real HWND. The backend panics if it is missing, so this
+//! returns None until the handle exists and the player keeps running.
 
 use std::sync::mpsc::Sender;
 
 use crate::commands::{self, Command, MediaKind};
 
-pub fn attach(tx: Sender<Command>) -> Option<souvlaki::MediaControls> {
+pub fn attach(tx: Sender<Command>, hwnd: Option<isize>) -> Option<souvlaki::MediaControls> {
     let config = souvlaki::PlatformConfig {
         dbus_name: "homemusic",
         display_name: "HomeMusic",
-        hwnd: None,
+        hwnd: platform_hwnd(hwnd)?,
     };
     let mut controls = souvlaki::MediaControls::new(config).ok()?;
     if controls
@@ -23,6 +25,23 @@ pub fn attach(tx: Sender<Command>) -> Option<souvlaki::MediaControls> {
         return None;
     }
     Some(controls)
+}
+
+/// Linux always asks MPRIS with no handle. Windows refuses to ask until the HWND exists.
+fn platform_hwnd(hwnd: Option<isize>) -> Option<Option<*mut std::ffi::c_void>> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = hwnd?;
+        if hwnd == 0 {
+            return None;
+        }
+        Some(Some(hwnd as *mut std::ffi::c_void))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+        Some(None)
+    }
 }
 
 fn map_event(event: souvlaki::MediaControlEvent) -> Option<Command> {

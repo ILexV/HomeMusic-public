@@ -1,6 +1,9 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod commands;
 mod media_keys;
 mod navidrome;
+mod paths;
 mod player;
 mod queue;
 mod wave;
@@ -370,7 +373,10 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let (media_tx, media_rx) = mpsc::channel();
-    let media = Rc::new(RefCell::new(media_keys::attach(media_tx)));
+    // Linux attaches MPRIS now. Windows has no HWND until the event loop shows the window.
+    #[cfg(target_os = "windows")]
+    let media_tx_win = media_tx.clone();
+    let media = Rc::new(RefCell::new(media_keys::attach(media_tx, None)));
     let ui_tick = ui.as_weak();
     let player_tick = player.clone();
     let queue_tick = queue.clone();
@@ -387,10 +393,22 @@ fn main() -> Result<(), slint::PlatformError> {
     let media_watch = Rc::new(RefCell::new(MediaWatch::default()));
     let media_watch_tick = media_watch.clone();
     let timer = slint::Timer::default();
+    #[cfg(target_os = "windows")]
+    let mut windows_media_tried = false;
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(200),
         move || {
+            #[cfg(target_os = "windows")]
+            if !windows_media_tried {
+                if let Some(ui) = ui_tick.upgrade() {
+                    if let Some(hwnd) = window_hwnd(&ui) {
+                        windows_media_tried = true;
+                        *media_tick.borrow_mut() =
+                            media_keys::attach(media_tx_win.clone(), Some(hwnd));
+                    }
+                }
+            }
             while let Ok(command) = media_rx.try_recv() {
                 if let Some(ui) = ui_tick.upgrade() {
                     dispatch(
@@ -594,6 +612,17 @@ struct MediaWatch {
     ready: bool,
 }
 
+#[cfg(target_os = "windows")]
+fn window_hwnd(ui: &AppWindow) -> Option<isize> {
+    use raw_window_handle::HasWindowHandle;
+    let handle = ui.window().window_handle();
+    let raw = handle.window_handle().ok()?;
+    match raw.as_raw() {
+        raw_window_handle::RawWindowHandle::Win32(win) => Some(win.hwnd.get()),
+        _ => None,
+    }
+}
+
 fn publish_media(
     media: &mut Option<souvlaki::MediaControls>,
     ui: &AppWindow,
@@ -608,7 +637,7 @@ fn publish_media(
     let idle = player.is_idle();
     let title = ui.get_track_title().to_string();
     if !watch.ready || (volume - watch.volume).abs() > 0.01 {
-        if media.set_volume(f64::from(volume)).is_ok() {
+        if publish_volume(media, volume) {
             watch.volume = volume;
         }
     }
@@ -638,6 +667,19 @@ fn publish_media(
         watch.title = title;
     }
     watch.ready = true;
+}
+
+/// souvlaki 0.8 publishes volume on MPRIS. Its Windows backend has no `set_volume`.
+fn publish_volume(media: &mut souvlaki::MediaControls, volume: f32) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    {
+        media.set_volume(f64::from(volume)).is_ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (media, volume);
+        true
+    }
 }
 
 fn dispatch(
