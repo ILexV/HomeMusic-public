@@ -1,9 +1,8 @@
-import { EqButton, IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { EqButton, Glyph, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
     in property <string> track-artist;
-    in property <string> error;
     in property <string> time-label;
     in property <string> duration-label;
     in property <float> position;
@@ -11,28 +10,32 @@ export component Mini inherits Rectangle {
     in property <float> volume;
     in property <[float]> wave;
     in property <bool> playing;
-    in property <int> mode;
     in property <bool> eq-on;
+    in property <bool> liked;
+    in property <bool> disliked;
     callback play-pause();
     callback stop();
+    callback prev();
     callback next();
     callback seek(float);
     callback set-volume(float);
-    callback set-mode(int);
     callback toggle-eq();
+    callback toggle-like();
+    callback toggle-dislike();
 
     background: Theme.bg;
 
     VerticalLayout {
         padding-left: 10px;
         padding-right: 10px;
-        padding-top: 8px;
-        padding-bottom: 8px;
+        padding-top: 6px;
+        padding-bottom: 6px;
         spacing: 4px;
+        alignment: center;
 
         HorizontalLayout {
             spacing: 8px;
-            alignment: center;
+            cross-axis-alignment: center;
 
             if root.track-artist != "" : Text {
                 text: root.track-artist;
@@ -40,12 +43,13 @@ export component Mini inherits Rectangle {
                 font-size: 12px;
                 overflow: elide;
                 vertical-alignment: center;
-                max-width: 150px;
+                max-width: 140px;
             }
             Text {
                 text: root.track-title;
                 color: Theme.text;
                 font-size: 13px;
+                font-weight: 600;
                 overflow: elide;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
@@ -56,39 +60,41 @@ export component Mini inherits Rectangle {
                 font-size: 12px;
                 vertical-alignment: center;
             }
-            ModeSwitch {
-                mode: root.mode;
-                set-mode(mode) => { root.set-mode(mode); }
-            }
-        }
-
-        SeekBar {
-            position: root.position;
-            duration: root.duration;
-            wave: root.wave;
-            seek(ratio) => { root.seek(ratio); }
         }
 
         HorizontalLayout {
-            spacing: 4px;
-            alignment: center;
+            spacing: 8px;
+            cross-axis-alignment: center;
 
+            SeekBar {
+                bar-height: 32px;
+                position: root.position;
+                duration: root.duration;
+                wave: root.wave;
+                seek(ratio) => { root.seek(ratio); }
+            }
+            Glyph { kind: "speaker"; tint: Theme.muted; }
             VolumeBar {
-                stretch: true;
                 volume: root.volume;
                 set-volume(value) => { root.set-volume(value); }
             }
-            IconButton { glyph: root.playing ? "⏸" : "▶"; clicked => { root.play-pause(); } }
-            IconButton { glyph: "⏹"; clicked => { root.stop(); } }
-            IconButton { glyph: "⏭"; clicked => { root.next(); } }
-            EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
         }
 
-        if root.error != "" : Text {
-            text: root.error;
-            color: Theme.orange;
-            font-size: 12px;
-            overflow: elide;
+        HorizontalLayout {
+            spacing: 2px;
+            alignment: start;
+
+            TransportButton { kind: "prev"; clicked => { root.prev(); } }
+            TransportButton {
+                kind: root.playing ? "pause" : "play";
+                primary: true;
+                clicked => { root.play-pause(); }
+            }
+            TransportButton { kind: "stop"; clicked => { root.stop(); } }
+            TransportButton { kind: "next"; clicked => { root.next(); } }
+            EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
+            EqButton { label: "♥"; active: root.liked; clicked => { root.toggle-like(); } }
+            EqButton { label: "нет"; active: root.disliked; clicked => { root.toggle-dislike(); } }
         }
     }
 }

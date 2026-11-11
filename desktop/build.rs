@@ -1,11 +1,71 @@
 fn main() {
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("assets/icon.png").display()
+    );
     slint_build::compile("ui/app.slint").unwrap();
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("windows") {
+        compile_windows_icon(&manifest);
         link_windows_mpv();
     } else {
         link_host_mpv();
     }
+}
+
+fn compile_windows_icon(manifest: &std::path::Path) {
+    let ico = manifest.join("assets").join("icon.ico");
+    println!("cargo:rerun-if-changed={}", ico.display());
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let rc_path = out_dir.join("icon.rc");
+    let obj_path = out_dir.join("icon.o");
+    let ico_str = ico.display().to_string().replace('\\', "\\\\");
+    std::fs::write(&rc_path, format!("1 ICON \"{ico_str}\"\n")).expect("write icon.rc");
+    let windres = windres_program();
+    let status = std::process::Command::new(&windres)
+        .args(["--output-format", "coff", "--input"])
+        .arg(&rc_path)
+        .arg("--output")
+        .arg(&obj_path)
+        .status()
+        .unwrap_or_else(|err| panic!("{windres} failed to start: {err}"));
+    if !status.success() {
+        panic!("{windres} failed to embed {}", ico.display());
+    }
+    println!("cargo:rustc-link-arg={}", obj_path.display());
+}
+
+fn windres_program() -> String {
+    if let Ok(path) = std::env::var("WINDRES") {
+        if !path.is_empty() {
+            return path;
+        }
+    }
+    if let Ok(linker) = std::env::var("CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER") {
+        if let Some(dir) = std::path::Path::new(&linker).parent() {
+            if dir.as_os_str().is_empty() {
+                return linker_to_windres(&linker);
+            }
+            let file = std::path::Path::new(&linker)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            return dir.join(linker_to_windres(file)).display().to_string();
+        }
+        return linker_to_windres(&linker);
+    }
+    "x86_64-w64-mingw32-windres".into()
+}
+
+fn linker_to_windres(linker: &str) -> String {
+    if let Some(prefix) = linker.strip_suffix("-gcc") {
+        return format!("{prefix}-windres");
+    }
+    if let Some(prefix) = linker.strip_suffix("gcc") {
+        return format!("{prefix}windres");
+    }
+    "x86_64-w64-mingw32-windres".into()
 }
 
 fn link_host_mpv() {

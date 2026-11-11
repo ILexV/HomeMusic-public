@@ -75,6 +75,14 @@ impl Queue {
         true
     }
 
+    /// Put a track after the current one and make it current. An idle queue starts with it.
+    pub fn play_inserted(&mut self, item: Item) -> bool {
+        let at = self.index.map(|index| index + 1).unwrap_or(0);
+        self.items.insert(at, item);
+        self.index = Some(at);
+        true
+    }
+
     pub fn next(&mut self) -> bool {
         match self.index {
             Some(index) if index + 1 < self.items.len() => {
@@ -188,6 +196,16 @@ mod tests {
         assert_eq!(queue.index(), Some(1));
         assert!(!queue.select(3));
         assert_eq!(queue.index(), Some(1));
+    }
+
+    #[test]
+    fn an_inserted_track_plays_after_the_current_one() {
+        let mut queue = sample();
+        assert!(queue.select(0));
+        assert!(queue.play_inserted(item("z", "Новый", 10)));
+        assert_eq!(queue.current().unwrap().id, "z");
+        assert_eq!(queue.items()[0].id, "a");
+        assert_eq!(queue.items()[1].id, "z");
     }
 
     #[test]

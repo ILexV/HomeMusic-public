@@ -1,14 +1,15 @@
 import { Large } from "large.slint";
 import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
-import { Equalizer, Theme, TitleButton } from "theme.slint";
+import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
 
-import { AlbumItem, ArtistItem, QueueItem } from "types.slint";
+import { AlbumItem, ArtistItem, CatalogHit, QueueItem } from "types.slint";
 
 export enum Mode { mini, medium, large }
 
 export component AppWindow inherits Window {
     title: "HomeMusic";
+    icon: @image-url("../assets/icon.png");
     background: Theme.bg;
     default-font-size: 14px;
     no-frame: true;
@@ -43,6 +44,13 @@ export component AppWindow inherits Window {
     in-out property <[ArtistItem]> artists;
     in-out property <[AlbumItem]> albums;
     in-out property <string> search;
+    in-out property <bool> liked;
+    in-out property <bool> disliked;
+    in-out property <bool> album-known;
+    in-out property <bool> album-liked;
+    in-out property <bool> catalog-open;
+    in-out property <string> catalog-note: "Поиск в сети";
+    in-out property <[CatalogHit]> hits;
 
     callback play-pause();
     callback stop();
@@ -60,6 +68,12 @@ export component AppWindow inherits Window {
     callback search-edited(string);
     callback pick-artist(int);
     callback open-album(int);
+    callback toggle-like();
+    callback toggle-dislike();
+    callback toggle-album-like();
+    callback toggle-catalog();
+    callback pick-hit(int);
+    callback star-album(int);
     callback minimize();
     callback close-window();
     // text, control, alt, shift, meta. True when the player handled the key.
@@ -91,33 +105,53 @@ export component AppWindow inherits Window {
 
                     WindowMoveArea {
                         HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 4px;
-                            spacing: 2px;
-                            alignment: center;
+                            padding-left: 8px;
+                            padding-right: 2px;
+                            spacing: 8px;
+                            cross-axis-alignment: center;
 
+                            HorizontalLayout {
+                                spacing: 6px;
+                                cross-axis-alignment: center;
+                                Image {
+                                    source: @image-url("../assets/icon.png");
+                                    width: 16px;
+                                    height: 16px;
+                                }
+                                Text {
+                                    text: "HomeMusic";
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                            }
                             Text {
-                                text: "HomeMusic";
-                                color: Theme.muted;
-                                font-size: 12px;
+                                text: root.error != "" ? root.error : root.status;
+                                color: root.error != "" ? Theme.orange : Theme.dim;
+                                font-size: 11px;
+                                overflow: elide;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
-                            TitleButton { glyph: "–"; clicked => { root.minimize(); } }
-                            TitleButton { glyph: "×"; clicked => { root.close-window(); } }
+                            ModeSwitch {
+                                mode: root.mode-index;
+                                set-mode(mode) => { root.set-mode(mode); }
+                            }
+                            TitleButton { glyph: "–"; tip: "Свернуть"; clicked => { root.minimize(); } }
+                            TitleButton { glyph: "×"; tip: "Закрыть"; clicked => { root.close-window(); } }
                         }
                     }
                 }
 
                 Rectangle {
                     vertical-stretch: 1;
+                    clip: true;
 
                     if root.mode == Mode.mini : Mini {
                         width: 100%;
                         height: 100%;
                         track-title: root.track-title;
                         track-artist: root.track-artist;
-                        error: root.error;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
                         position: root.position;
@@ -125,15 +159,18 @@ export component AppWindow inherits Window {
                         volume: root.volume;
                         wave: root.wave;
                         playing: root.playing;
-                        mode: root.mode-index;
                         play-pause => { root.play-pause(); }
                         stop => { root.stop(); }
+                        prev => { root.prev(); }
                         next => { root.next(); }
                         seek(ratio) => { root.seek(ratio); }
                         set-volume(value) => { root.set-volume(value); }
-                        set-mode(mode) => { root.set-mode(mode); }
                         eq-on: root.eq-on;
                         toggle-eq => { root.toggle-eq(); }
+                        liked: root.liked;
+                        disliked: root.disliked;
+                        toggle-like => { root.toggle-like(); }
+                        toggle-dislike => { root.toggle-dislike(); }
                     }
                     if root.mode == Mode.medium : Medium {
                         width: 100%;
@@ -146,13 +183,11 @@ export component AppWindow inherits Window {
                         has-cover: root.has-cover;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
-                        status: root.status;
                         position: root.position;
                         duration: root.duration;
                         volume: root.volume;
                         wave: root.wave;
                         playing: root.playing;
-                        mode: root.mode-index;
                         queue: root.queue;
                         queue-title: root.queue-title;
                         queue-total: root.queue-total;
@@ -164,10 +199,21 @@ export component AppWindow inherits Window {
                         play-row(index) => { root.play-row(index); }
                         seek(ratio) => { root.seek(ratio); }
                         set-volume(value) => { root.set-volume(value); }
-                        set-mode(mode) => { root.set-mode(mode); }
                         search-edited(text) => { root.search-edited(text); }
                         eq-on: root.eq-on;
                         toggle-eq => { root.toggle-eq(); }
+                        liked: root.liked;
+                        disliked: root.disliked;
+                        album-known: root.album-known;
+                        album-liked: root.album-liked;
+                        catalog-open: root.catalog-open;
+                        catalog-note: root.catalog-note;
+                        hits: root.hits;
+                        toggle-like => { root.toggle-like(); }
+                        toggle-dislike => { root.toggle-dislike(); }
+                        toggle-album-like => { root.toggle-album-like(); }
+                        toggle-catalog => { root.toggle-catalog(); }
+                        pick-hit(index) => { root.pick-hit(index); }
                     }
                     if root.mode == Mode.large : Large {
                         width: 100%;
@@ -178,13 +224,11 @@ export component AppWindow inherits Window {
                         track-meta: root.track-meta;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
-                        status: root.status;
                         position: root.position;
                         duration: root.duration;
                         volume: root.volume;
                         wave: root.wave;
                         playing: root.playing;
-                        mode: root.mode-index;
                         queue: root.queue;
                         queue-title: root.queue-title;
                         queue-total: root.queue-total;
@@ -200,12 +244,24 @@ export component AppWindow inherits Window {
                         play-row(index) => { root.play-row(index); }
                         seek(ratio) => { root.seek(ratio); }
                         set-volume(value) => { root.set-volume(value); }
-                        set-mode(mode) => { root.set-mode(mode); }
                         search-edited(text) => { root.search-edited(text); }
                         pick-artist(index) => { root.pick-artist(index); }
                         open-album(index) => { root.open-album(index); }
                         eq-on: root.eq-on;
                         toggle-eq => { root.toggle-eq(); }
+                        liked: root.liked;
+                        disliked: root.disliked;
+                        album-known: root.album-known;
+                        album-liked: root.album-liked;
+                        catalog-open: root.catalog-open;
+                        catalog-note: root.catalog-note;
+                        hits: root.hits;
+                        toggle-like => { root.toggle-like(); }
+                        toggle-dislike => { root.toggle-dislike(); }
+                        toggle-album-like => { root.toggle-album-like(); }
+                        toggle-catalog => { root.toggle-catalog(); }
+                        pick-hit(index) => { root.pick-hit(index); }
+                        star-album(index) => { root.star-album(index); }
                     }
                 }
 

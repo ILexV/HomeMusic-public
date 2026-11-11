@@ -2,6 +2,7 @@
 
 mod commands;
 mod eq;
+mod hub;
 mod media_keys;
 mod navidrome;
 mod paths;
@@ -13,6 +14,7 @@ mod window_place;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use player::{Player, PlayerOptions};
@@ -20,6 +22,83 @@ use slint::ComponentHandle;
 use slint::Model;
 
 slint::include_modules!();
+
+enum HubEvent {
+    Marks(hub::Marks),
+    Note(String),
+    Hits {
+        ticket: u64,
+        hits: Vec<hub::CatalogHit>,
+    },
+    Miss {
+        ticket: u64,
+        message: String,
+    },
+    SongStar {
+        id: String,
+        starred: bool,
+    },
+    AlbumStar {
+        id: String,
+        starred: bool,
+    },
+    SongDislike {
+        id: String,
+        disliked: bool,
+    },
+    Download {
+        reference: String,
+        message: String,
+        failed: bool,
+    },
+}
+
+struct HubState {
+    hub: Arc<hub::Hub>,
+    marks: RefCell<hub::Marks>,
+    hits: RefCell<Vec<hub::CatalogHit>>,
+    album_id: RefCell<String>,
+    catalog_open: Cell<bool>,
+    events: Arc<Mutex<Vec<HubEvent>>>,
+    hub_note: RefCell<String>,
+    search_generation: Rc<Cell<u64>>,
+}
+
+impl HubState {
+    fn start(config: &navidrome::ServerConfig) -> Self {
+        let hub = Arc::new(hub::Hub::from_config(config));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let client = Arc::clone(&hub);
+        let pending = Arc::clone(&events);
+        std::thread::spawn(move || {
+            if let Ok(marks) = client.load_marks() {
+                push_event(&pending, HubEvent::Marks(marks));
+            }
+        });
+        Self {
+            hub,
+            marks: RefCell::new(hub::Marks::default()),
+            hits: RefCell::new(Vec::new()),
+            album_id: RefCell::new(String::new()),
+            catalog_open: Cell::new(false),
+            events,
+            hub_note: RefCell::new(String::new()),
+            search_generation: Rc::new(Cell::new(0)),
+        }
+    }
+}
+
+fn push_event(events: &Mutex<Vec<HubEvent>>, event: HubEvent) {
+    events
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(event);
+}
+
+fn take_events(events: &Mutex<Vec<HubEvent>>) -> Vec<HubEvent> {
+    let mut guard = events.lock().unwrap_or_else(|poison| poison.into_inner());
+    std::mem::take(&mut *guard)
+}
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
@@ -42,13 +121,14 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_eq_on(player.borrow().eq().enabled);
     let waves = wave::WaveHub::shared();
     let config = Rc::new(navidrome::ServerConfig::load());
+    let hub_state = Rc::new(HubState::start(&config));
     let queue = Rc::new(RefCell::new(queue::Queue::from_tracks("", Vec::new())));
     let browser = Rc::new(RefCell::new(Browser::empty()));
     let playback_status = if let Some(target) = std::env::args().nth(1) {
         let (title, meta) = track_label(&target);
         *queue.borrow_mut() = queue::Queue::from_path(&target, &title, &meta);
         let _ = queue.borrow_mut().select(0);
-        match play_current(&ui, &player, &queue, &config, &waves) {
+        match play_current(&ui, &player, &queue, &config, &waves, &hub_state) {
             Ok(()) => config.status_line(),
             Err(err) => err,
         }
@@ -63,7 +143,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     err
                 } else {
                     let _ = queue.borrow_mut().select(0);
-                    match play_current(&ui, &player, &queue, &config, &waves) {
+                    match play_current(&ui, &player, &queue, &config, &waves, &hub_state) {
                         Ok(()) => "Navidrome подключён".into(),
                         Err(err) => err,
                     }
@@ -82,7 +162,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut browser = browser.borrow_mut();
             browser.catalog = catalog.clone();
             browser.shown = catalog;
-            show_browser(&ui, &mut browser);
+            show_browser(&ui, &mut browser, &hub_state.marks.borrow());
             playback_status
         }
         Err(err) => {
@@ -95,7 +175,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     let config_status = Rc::new(library_status);
-    ui.set_status(player.borrow().status_or(&config_status).into());
+    show_status(&ui, &player.borrow(), &hub_state, &config_status);
     push_playback(&ui, &player.borrow().snapshot());
     apply_session(&ui, session);
 
@@ -105,18 +185,26 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_play = config.clone();
     let status_play = config_status.clone();
     let waves_play = waves.clone();
+    let hub_play = hub_state.clone();
     ui.on_play_pause(move || {
         let Some(ui) = ui_play.upgrade() else {
             return;
         };
         if player_play.borrow().is_idle() {
-            let _ = play_current(&ui, &player_play, &queue_play, &config_play, &waves_play);
+            let _ = play_current(
+                &ui,
+                &player_play,
+                &queue_play,
+                &config_play,
+                &waves_play,
+                &hub_play,
+            );
         } else {
             player_play.borrow_mut().toggle();
         }
         let player = player_play.borrow();
         push_playback(&ui, &player.snapshot());
-        ui.set_status(player.status_or(&status_play).into());
+        show_status(&ui, &player, &hub_play, &status_play);
     });
 
     let ui_stop = ui.as_weak();
@@ -209,6 +297,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_prev = config.clone();
     let status_prev = config_status.clone();
     let waves_prev = waves.clone();
+    let hub_prev = hub_state.clone();
     ui.on_prev(move || {
         let moved = queue_prev.borrow_mut().prev();
         let Some(ui) = ui_prev.upgrade() else {
@@ -221,6 +310,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &config_prev,
             &status_prev,
             &waves_prev,
+            &hub_prev,
             moved,
         );
     });
@@ -231,6 +321,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_next = config.clone();
     let status_next = config_status.clone();
     let waves_next = waves.clone();
+    let hub_next = hub_state.clone();
     ui.on_next(move || {
         let moved = queue_next.borrow_mut().next();
         let Some(ui) = ui_next.upgrade() else {
@@ -243,6 +334,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &config_next,
             &status_next,
             &waves_next,
+            &hub_next,
             moved,
         );
     });
@@ -253,6 +345,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_row = config.clone();
     let status_row = config_status.clone();
     let waves_row = waves.clone();
+    let hub_row = hub_state.clone();
     ui.on_play_row(move |index| {
         if index < 0 {
             return;
@@ -268,11 +361,12 @@ fn main() -> Result<(), slint::PlatformError> {
             &config_row,
             &status_row,
             &waves_row,
+            &hub_row,
             moved,
         );
     });
 
-    let search_generation = Rc::new(Cell::new(0u64));
+    let search_generation = hub_state.search_generation.clone();
     let search_timer = Rc::new(slint::Timer::default());
     let ui_search = ui.as_weak();
     let browser_search = browser.clone();
@@ -280,15 +374,50 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_search = config.clone();
     let generation_search = search_generation.clone();
     let timer_search = search_timer.clone();
+    let hub_search = hub_state.clone();
     ui.on_search_edited(move |text| {
         let text = text.to_string();
         let ticket = generation_search.get().wrapping_add(1);
         generation_search.set(ticket);
+        let Some(ui) = ui_search.upgrade() else {
+            return;
+        };
+        if hub_search.catalog_open.get() {
+            if text.trim().is_empty() {
+                clear_catalog(&ui, &hub_search);
+                show_queue(&ui, &queue_search.borrow(), &hub_search);
+            } else {
+                let ui_later = ui_search.clone();
+                let hub_later = hub_search.clone();
+                let generation_later = generation_search.clone();
+                let text_later = text;
+                timer_search.start(
+                    slint::TimerMode::SingleShot,
+                    Duration::from_millis(300),
+                    move || {
+                        if generation_later.get() != ticket {
+                            return;
+                        }
+                        let Some(ui) = ui_later.upgrade() else {
+                            return;
+                        };
+                        if hub_later.catalog_open.get() {
+                            begin_catalog_query(&ui, &hub_later, ticket, &text_later);
+                        }
+                    },
+                );
+            }
+            return;
+        }
         if text.trim().is_empty() {
-            let Some(ui) = ui_search.upgrade() else {
-                return;
-            };
-            apply_search(&ui, &browser_search, &queue_search, &config_search, "");
+            apply_search(
+                &ui,
+                &browser_search,
+                &queue_search,
+                &config_search,
+                &hub_search,
+                "",
+            );
             return;
         }
         let ui_later = ui_search.clone();
@@ -296,6 +425,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let queue_later = queue_search.clone();
         let config_later = config_search.clone();
         let generation_later = generation_search.clone();
+        let hub_later = hub_search.clone();
         let text_later = text;
         timer_search.start(
             slint::TimerMode::SingleShot,
@@ -307,19 +437,25 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some(ui) = ui_later.upgrade() else {
                     return;
                 };
-                apply_search(
-                    &ui,
-                    &browser_later,
-                    &queue_later,
-                    &config_later,
-                    &text_later,
-                );
+                if hub_later.catalog_open.get() {
+                    begin_catalog_query(&ui, &hub_later, ticket, &text_later);
+                } else {
+                    apply_search(
+                        &ui,
+                        &browser_later,
+                        &queue_later,
+                        &config_later,
+                        &hub_later,
+                        &text_later,
+                    );
+                }
             },
         );
     });
 
     let ui_artist = ui.as_weak();
     let browser_artist = browser.clone();
+    let hub_artist = hub_state.clone();
     ui.on_pick_artist(move |index| {
         if index < 0 {
             return;
@@ -339,7 +475,8 @@ fn main() -> Result<(), slint::PlatformError> {
         };
         let mut browser = browser_artist.borrow_mut();
         browser.artist_id = id;
-        show_browser(&ui, &mut browser);
+        let marks = hub_artist.marks.borrow().clone();
+        show_browser(&ui, &mut browser, &marks);
     });
 
     let ui_album = ui.as_weak();
@@ -350,6 +487,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let status_album = config_status.clone();
     let generation_album = search_generation.clone();
     let waves_album = waves.clone();
+    let hub_album = hub_state.clone();
     ui.on_open_album(move |index| {
         if index < 0 {
             return;
@@ -373,8 +511,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     let mut browser = browser_album.borrow_mut();
                     browser.query.clear();
                     browser.shown = browser.catalog.clone();
-                    show_browser(&ui, &mut browser);
+                    let marks = hub_album.marks.borrow().clone();
+                    show_browser(&ui, &mut browser, &marks);
                 }
+                if hub_album.catalog_open.get() {
+                    clear_catalog(&ui, &hub_album);
+                }
+                *hub_album.album_id.borrow_mut() = album.id;
                 *queue_album.borrow_mut() = library_to_queue(library);
                 let moved = queue_album.borrow_mut().select(0);
                 jump(
@@ -384,12 +527,417 @@ fn main() -> Result<(), slint::PlatformError> {
                     &config_album,
                     &status_album,
                     &waves_album,
+                    &hub_album,
                     moved,
                 );
             }
             Err(err) => {
                 ui.set_error(err.clone().into());
                 ui.set_status(err.into());
+            }
+        }
+    });
+
+    let ui_like = ui.as_weak();
+    let hub_like = hub_state.clone();
+    let queue_like = queue.clone();
+    let player_like = player.clone();
+    let status_like = config_status.clone();
+    ui.on_toggle_like(move || {
+        let Some(ui) = ui_like.upgrade() else {
+            return;
+        };
+        let item = queue_like.borrow().current().cloned();
+        let Some(item) = item else {
+            remember_note(
+                &ui,
+                &player_like.borrow(),
+                &hub_like,
+                &status_like,
+                "Нет трека",
+            );
+            return;
+        };
+        if item.id.is_empty() {
+            remember_note(
+                &ui,
+                &player_like.borrow(),
+                &hub_like,
+                &status_like,
+                "Лайк только у треков библиотеки",
+            );
+            return;
+        }
+        let was = hub_like.marks.borrow().songs.contains(&item.id);
+        {
+            let mut marks = hub_like.marks.borrow_mut();
+            if was {
+                marks.songs.remove(&item.id);
+            } else {
+                marks.songs.insert(item.id.clone());
+            }
+        }
+        paint_track_marks(&ui, &queue_like.borrow(), &hub_like);
+        let id = item.id;
+        let client = Arc::clone(&hub_like.hub);
+        let events = Arc::clone(&hub_like.events);
+        std::thread::spawn(move || {
+            if let Err(message) = client.star_song(&id, was) {
+                push_event(&events, HubEvent::SongStar { id, starred: was });
+                push_event(&events, HubEvent::Note(message));
+            }
+        });
+    });
+
+    let ui_dislike = ui.as_weak();
+    let hub_dislike = hub_state.clone();
+    let queue_dislike = queue.clone();
+    let player_dislike = player.clone();
+    let config_dislike = config.clone();
+    let status_dislike = config_status.clone();
+    let waves_dislike = waves.clone();
+    ui.on_toggle_dislike(move || {
+        let Some(ui) = ui_dislike.upgrade() else {
+            return;
+        };
+        let item = queue_dislike.borrow().current().cloned();
+        let Some(item) = item else {
+            remember_note(
+                &ui,
+                &player_dislike.borrow(),
+                &hub_dislike,
+                &status_dislike,
+                "Нет трека",
+            );
+            return;
+        };
+        if item.id.is_empty() {
+            remember_note(
+                &ui,
+                &player_dislike.borrow(),
+                &hub_dislike,
+                &status_dislike,
+                "Дизлайк только у треков библиотеки",
+            );
+            return;
+        }
+        let was = hub_dislike.marks.borrow().disliked.contains(&item.id);
+        {
+            let mut marks = hub_dislike.marks.borrow_mut();
+            if was {
+                marks.disliked.remove(&item.id);
+            } else {
+                marks.disliked.insert(item.id.clone());
+            }
+        }
+        let id = item.id.clone();
+        let artist = item.artist.clone();
+        let title = item.title.clone();
+        if was {
+            paint_track_marks(&ui, &queue_dislike.borrow(), &hub_dislike);
+        } else {
+            let moved = queue_dislike.borrow_mut().next();
+            if moved {
+                jump(
+                    &ui,
+                    &player_dislike,
+                    &queue_dislike,
+                    &config_dislike,
+                    &status_dislike,
+                    &waves_dislike,
+                    &hub_dislike,
+                    true,
+                );
+            } else {
+                paint_track_marks(&ui, &queue_dislike.borrow(), &hub_dislike);
+            }
+        }
+        let client = Arc::clone(&hub_dislike.hub);
+        let events = Arc::clone(&hub_dislike.events);
+        std::thread::spawn(move || {
+            let result = if was {
+                client.undislike_song(&id)
+            } else {
+                client.dislike_song(&id, &artist, &title)
+            };
+            if let Err(message) = result {
+                push_event(&events, HubEvent::SongDislike { id, disliked: was });
+                push_event(&events, HubEvent::Note(message));
+            }
+        });
+    });
+
+    let ui_album_like = ui.as_weak();
+    let hub_album_like = hub_state.clone();
+    let browser_album_like = browser.clone();
+    let queue_album_like = queue.clone();
+    ui.on_toggle_album_like(move || {
+        let Some(ui) = ui_album_like.upgrade() else {
+            return;
+        };
+        let id = hub_album_like.album_id.borrow().clone();
+        if id.is_empty() {
+            return;
+        }
+        let was = hub_album_like.marks.borrow().albums.contains(&id);
+        {
+            let mut marks = hub_album_like.marks.borrow_mut();
+            if was {
+                marks.albums.remove(&id);
+            } else {
+                marks.albums.insert(id.clone());
+            }
+        }
+        let marks = hub_album_like.marks.borrow().clone();
+        show_browser(&ui, &mut browser_album_like.borrow_mut(), &marks);
+        paint_track_marks(&ui, &queue_album_like.borrow(), &hub_album_like);
+        let client = Arc::clone(&hub_album_like.hub);
+        let events = Arc::clone(&hub_album_like.events);
+        std::thread::spawn(move || {
+            if let Err(message) = client.star_album(&id, was) {
+                push_event(&events, HubEvent::AlbumStar { id, starred: was });
+                push_event(&events, HubEvent::Note(message));
+            }
+        });
+    });
+
+    let ui_star_row = ui.as_weak();
+    let hub_star_row = hub_state.clone();
+    let browser_star_row = browser.clone();
+    let queue_star_row = queue.clone();
+    ui.on_star_album(move |index| {
+        if index < 0 {
+            return;
+        }
+        let Some(ui) = ui_star_row.upgrade() else {
+            return;
+        };
+        let album = browser_star_row
+            .borrow()
+            .visible_albums
+            .get(index as usize)
+            .cloned();
+        let Some(album) = album else {
+            return;
+        };
+        let was = hub_star_row.marks.borrow().albums.contains(&album.id);
+        {
+            let mut marks = hub_star_row.marks.borrow_mut();
+            if was {
+                marks.albums.remove(&album.id);
+            } else {
+                marks.albums.insert(album.id.clone());
+            }
+        }
+        let marks = hub_star_row.marks.borrow().clone();
+        show_browser(&ui, &mut browser_star_row.borrow_mut(), &marks);
+        paint_track_marks(&ui, &queue_star_row.borrow(), &hub_star_row);
+        let id = album.id;
+        let client = Arc::clone(&hub_star_row.hub);
+        let events = Arc::clone(&hub_star_row.events);
+        std::thread::spawn(move || {
+            if let Err(message) = client.star_album(&id, was) {
+                push_event(&events, HubEvent::AlbumStar { id, starred: was });
+                push_event(&events, HubEvent::Note(message));
+            }
+        });
+    });
+
+    let ui_catalog = ui.as_weak();
+    let hub_catalog = hub_state.clone();
+    let queue_catalog = queue.clone();
+    ui.on_toggle_catalog(move || {
+        let open = !hub_catalog.catalog_open.get();
+        hub_catalog.catalog_open.set(open);
+        let Some(ui) = ui_catalog.upgrade() else {
+            return;
+        };
+        ui.set_catalog_open(open);
+        if open {
+            let text = ui.get_search().to_string();
+            if text.trim().is_empty() {
+                clear_catalog(&ui, &hub_catalog);
+            } else {
+                let ticket = hub_catalog.search_generation.get().wrapping_add(1);
+                hub_catalog.search_generation.set(ticket);
+                begin_catalog_query(&ui, &hub_catalog, ticket, &text);
+            }
+        }
+        show_queue(&ui, &queue_catalog.borrow(), &hub_catalog);
+    });
+
+    let ui_hit = ui.as_weak();
+    let hub_hit = hub_state.clone();
+    let queue_hit = queue.clone();
+    let player_hit = player.clone();
+    let config_hit = config.clone();
+    let status_hit = config_status.clone();
+    let waves_hit = waves.clone();
+    ui.on_pick_hit(move |index| {
+        if index < 0 {
+            return;
+        }
+        let Some(ui) = ui_hit.upgrade() else {
+            return;
+        };
+        let hit = hub_hit.hits.borrow().get(index as usize).cloned();
+        let Some(hit) = hit else {
+            return;
+        };
+        match hit.kind {
+            hub::HitKind::Album if hit.owned => {
+                remember_note(
+                    &ui,
+                    &player_hit.borrow(),
+                    &hub_hit,
+                    &status_hit,
+                    "Альбом уже в библиотеке",
+                );
+            }
+            hub::HitKind::Album if hit.downloading => {
+                remember_note(
+                    &ui,
+                    &player_hit.borrow(),
+                    &hub_hit,
+                    &status_hit,
+                    "Уже качается",
+                );
+            }
+            hub::HitKind::Album => {
+                if hit.reference.is_empty() {
+                    remember_note(
+                        &ui,
+                        &player_hit.borrow(),
+                        &hub_hit,
+                        &status_hit,
+                        "Нет ссылки на альбом",
+                    );
+                    return;
+                }
+                {
+                    let mut hits = hub_hit.hits.borrow_mut();
+                    if let Some(row) = hits.iter_mut().find(|row| row.reference == hit.reference) {
+                        row.downloading = true;
+                    }
+                }
+                show_hits(&ui, &hub_hit.hits.borrow());
+                remember_note(
+                    &ui,
+                    &player_hit.borrow(),
+                    &hub_hit,
+                    &status_hit,
+                    "Отправляем альбом…",
+                );
+                let reference = hit.reference;
+                let client = Arc::clone(&hub_hit.hub);
+                let events = Arc::clone(&hub_hit.events);
+                std::thread::spawn(move || match client.download_album(&reference) {
+                    Ok(message) => push_event(
+                        &events,
+                        HubEvent::Download {
+                            reference,
+                            message,
+                            failed: false,
+                        },
+                    ),
+                    Err(message) => push_event(
+                        &events,
+                        HubEvent::Download {
+                            reference,
+                            message,
+                            failed: true,
+                        },
+                    ),
+                });
+            }
+            hub::HitKind::Track if hit.owned => {
+                if hit.nd_song_id.is_empty() {
+                    remember_note(
+                        &ui,
+                        &player_hit.borrow(),
+                        &hub_hit,
+                        &status_hit,
+                        "Трек без номера в библиотеке",
+                    );
+                    return;
+                }
+                let item = queue::Item {
+                    id: hit.nd_song_id,
+                    path: String::new(),
+                    title: hit.title,
+                    artist: hit.artist,
+                    album: hit.album,
+                    meta: String::new(),
+                    duration_s: hit.duration_s,
+                };
+                *hub_hit.album_id.borrow_mut() = String::new();
+                let moved = queue_hit.borrow_mut().play_inserted(item);
+                jump(
+                    &ui,
+                    &player_hit,
+                    &queue_hit,
+                    &config_hit,
+                    &status_hit,
+                    &waves_hit,
+                    &hub_hit,
+                    moved,
+                );
+            }
+            hub::HitKind::Track if hit.downloading => {
+                remember_note(
+                    &ui,
+                    &player_hit.borrow(),
+                    &hub_hit,
+                    &status_hit,
+                    "Уже качается",
+                );
+            }
+            hub::HitKind::Track => {
+                if hit.reference.is_empty() {
+                    remember_note(
+                        &ui,
+                        &player_hit.borrow(),
+                        &hub_hit,
+                        &status_hit,
+                        "Нет ссылки на трек",
+                    );
+                    return;
+                }
+                {
+                    let mut hits = hub_hit.hits.borrow_mut();
+                    if let Some(row) = hits.iter_mut().find(|row| row.reference == hit.reference) {
+                        row.downloading = true;
+                    }
+                }
+                show_hits(&ui, &hub_hit.hits.borrow());
+                remember_note(
+                    &ui,
+                    &player_hit.borrow(),
+                    &hub_hit,
+                    &status_hit,
+                    "Отправляем…",
+                );
+                let reference = hit.reference;
+                let client = Arc::clone(&hub_hit.hub);
+                let events = Arc::clone(&hub_hit.events);
+                std::thread::spawn(move || match client.download_track(&reference) {
+                    Ok(message) => push_event(
+                        &events,
+                        HubEvent::Download {
+                            reference,
+                            message,
+                            failed: false,
+                        },
+                    ),
+                    Err(message) => push_event(
+                        &events,
+                        HubEvent::Download {
+                            reference,
+                            message,
+                            failed: true,
+                        },
+                    ),
+                });
             }
         }
     });
@@ -413,6 +961,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_keys = config.clone();
     let status_keys = config_status.clone();
     let waves_keys = waves.clone();
+    let hub_keys = hub_state.clone();
     ui.on_shortcut(move |text, control, alt, shift, meta| {
         let Some(command) = commands::shortcut_command(&text, control, alt, shift, meta) else {
             return false;
@@ -427,6 +976,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &config_keys,
             &status_keys,
             &waves_keys,
+            &hub_keys,
             command,
         );
         true
@@ -443,6 +993,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_tick = config.clone();
     let status_tick = config_status.clone();
     let waves_tick = waves.clone();
+    let hub_tick = hub_state.clone();
+    let browser_tick = browser.clone();
     let media_tick = media.clone();
     let place_watch = Rc::new(RefCell::new(PlaceWatch {
         started: Instant::now(),
@@ -478,6 +1030,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         &config_tick,
                         &status_tick,
                         &waves_tick,
+                        &hub_tick,
                         command,
                     );
                 }
@@ -489,16 +1042,24 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             if moved {
                 if let Some(ui) = ui_tick.upgrade() {
-                    let _ = play_current(&ui, &player_tick, &queue_tick, &config_tick, &waves_tick);
+                    let _ = play_current(
+                        &ui,
+                        &player_tick,
+                        &queue_tick,
+                        &config_tick,
+                        &waves_tick,
+                        &hub_tick,
+                    );
                 }
             }
             if let Some(ui) = ui_tick.upgrade() {
+                apply_hub_events(&ui, &hub_tick, &browser_tick, &queue_tick);
                 if let Some(peaks) = waves_tick.poll() {
                     show_wave(&ui, &peaks);
                 }
                 let player = player_tick.borrow();
                 push_playback(&ui, &player.snapshot());
-                ui.set_status(player.status_or(&status_tick).into());
+                show_status(&ui, &player, &hub_tick, &status_tick);
                 publish_media(
                     &mut media_tick.borrow_mut(),
                     &ui,
@@ -766,13 +1327,14 @@ fn dispatch(
     config: &navidrome::ServerConfig,
     status: &str,
     waves: &std::sync::Arc<wave::WaveHub>,
+    hub: &HubState,
     command: commands::Command,
 ) {
     use commands::Command;
     match command {
         Command::Toggle => {
             if player.borrow().is_idle() {
-                let _ = play_current(ui, player, queue, config, waves);
+                let _ = play_current(ui, player, queue, config, waves, hub);
             } else {
                 player.borrow_mut().toggle();
             }
@@ -783,7 +1345,7 @@ fn dispatch(
                 (player.is_idle(), player.snapshot().playing)
             };
             if idle {
-                let _ = play_current(ui, player, queue, config, waves);
+                let _ = play_current(ui, player, queue, config, waves, hub);
             } else if !playing {
                 player.borrow_mut().toggle();
             }
@@ -796,12 +1358,12 @@ fn dispatch(
         Command::Stop => player.borrow_mut().stop(),
         Command::Next => {
             let moved = queue.borrow_mut().next();
-            jump(ui, player, queue, config, status, waves, moved);
+            jump(ui, player, queue, config, status, waves, hub, moved);
             return;
         }
         Command::Previous => {
             let moved = queue.borrow_mut().prev();
-            jump(ui, player, queue, config, status, waves, moved);
+            jump(ui, player, queue, config, status, waves, hub, moved);
             return;
         }
         Command::VolumeUp | Command::VolumeDown | Command::SetVolume(_) => {
@@ -813,7 +1375,7 @@ fn dispatch(
     }
     let player = player.borrow();
     push_playback(ui, &player.snapshot());
-    ui.set_status(player.status_or(status).into());
+    show_status(ui, &player, hub, status);
 }
 
 fn shutdown(ui: &slint::Weak<AppWindow>, tray: &slint::Weak<PlayerTray>) {
@@ -843,24 +1405,16 @@ fn show_wave(ui: &AppWindow, peaks: &[f32]) {
 }
 
 fn tray_icon() -> slint::Image {
-    let size = 32u32;
-    let mut pixels = vec![0u8; (size * size * 4) as usize];
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as i32 - 16;
-            let dy = y as i32 - 16;
-            if dx * dx + dy * dy > 13 * 13 {
-                continue;
-            }
-            let index = ((y * size + x) * 4) as usize;
-            pixels[index] = 0xe8;
-            pixels[index + 1] = 0x87;
-            pixels[index + 2] = 0x2a;
-            pixels[index + 3] = 255;
-        }
-    }
-    let buffer =
-        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&pixels, size, size);
+    let png = include_bytes!("../assets/icon.png");
+    let image = image::load_from_memory(png)
+        .expect("embedded app icon")
+        .resize(64, 64, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+    );
     slint::Image::from_rgba8(buffer)
 }
 
@@ -999,7 +1553,187 @@ impl Browser {
     }
 }
 
-fn show_browser(ui: &AppWindow, browser: &mut Browser) {
+fn show_status(ui: &AppWindow, player: &Player, hub: &HubState, fallback: &str) {
+    let text = if player.notice().is_some() {
+        player.status_or(fallback)
+    } else {
+        let note = hub.hub_note.borrow();
+        if note.is_empty() {
+            fallback.to_string()
+        } else {
+            note.clone()
+        }
+    };
+    ui.set_status(text.into());
+}
+
+fn remember_note(ui: &AppWindow, player: &Player, hub: &HubState, fallback: &str, text: &str) {
+    *hub.hub_note.borrow_mut() = text.to_string();
+    show_status(ui, player, hub, fallback);
+}
+
+fn begin_catalog_query(ui: &AppWindow, hub: &HubState, ticket: u64, query: &str) {
+    hub.hub_note.borrow_mut().clear();
+    ui.set_error(String::new().into());
+    ui.set_catalog_note("Ищем…".into());
+    spawn_catalog_search(hub, ticket, query.to_string());
+}
+
+fn spawn_catalog_search(hub: &HubState, ticket: u64, query: String) {
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || match client.search(&query) {
+        Ok(hits) => push_event(&events, HubEvent::Hits { ticket, hits }),
+        Err(message) => push_event(&events, HubEvent::Miss { ticket, message }),
+    });
+}
+
+fn clear_catalog(ui: &AppWindow, hub: &HubState) {
+    hub.hits.borrow_mut().clear();
+    hub.hub_note.borrow_mut().clear();
+    ui.set_hits(slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<
+        CatalogHit,
+    >::new(
+    )))));
+    ui.set_catalog_note("Поиск в сети".into());
+    ui.set_error(String::new().into());
+}
+
+fn show_hits(ui: &AppWindow, hits: &[hub::CatalogHit]) {
+    let rows = hits
+        .iter()
+        .map(|hit| CatalogHit {
+            title: hit.title.clone().into(),
+            artist: hit.artist.clone().into(),
+            detail: hit.detail.clone().into(),
+            action: hit.action().into(),
+        })
+        .collect::<Vec<_>>();
+    ui.set_hits(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+    let note = if hits.is_empty() {
+        "Ничего не найдено".to_string()
+    } else {
+        format!("{} найдено", hits.len())
+    };
+    ui.set_catalog_note(note.into());
+}
+
+fn paint_track_marks(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
+    let id = queue
+        .current()
+        .map(|item| item.id.clone())
+        .unwrap_or_default();
+    let marks = hub.marks.borrow();
+    ui.set_liked(!id.is_empty() && marks.songs.contains(&id));
+    ui.set_disliked(!id.is_empty() && marks.disliked.contains(&id));
+    let album_id = hub.album_id.borrow();
+    ui.set_album_known(!album_id.is_empty());
+    ui.set_album_liked(!album_id.is_empty() && marks.albums.contains(album_id.as_str()));
+}
+
+fn apply_hub_events(
+    ui: &AppWindow,
+    hub: &HubState,
+    browser: &RefCell<Browser>,
+    queue: &RefCell<queue::Queue>,
+) {
+    let events = take_events(&hub.events);
+    if events.is_empty() {
+        return;
+    }
+    let mut refresh_marks = false;
+    let mut refresh_hits = false;
+    for event in events {
+        match event {
+            HubEvent::Marks(marks) => {
+                *hub.marks.borrow_mut() = marks;
+                refresh_marks = true;
+            }
+            HubEvent::Note(text) => {
+                *hub.hub_note.borrow_mut() = text;
+            }
+            HubEvent::Hits { ticket, hits } => {
+                if hub.catalog_open.get() && ticket == hub.search_generation.get() {
+                    *hub.hits.borrow_mut() = hits;
+                    hub.hub_note.borrow_mut().clear();
+                    ui.set_error(String::new().into());
+                    refresh_hits = true;
+                }
+            }
+            HubEvent::Miss { ticket, message } => {
+                if hub.catalog_open.get() && ticket == hub.search_generation.get() {
+                    *hub.hub_note.borrow_mut() = message.clone();
+                    ui.set_error(message.into());
+                }
+            }
+            HubEvent::SongStar { id, starred } => {
+                let mut marks = hub.marks.borrow_mut();
+                if starred {
+                    marks.songs.insert(id);
+                } else {
+                    marks.songs.remove(&id);
+                }
+                refresh_marks = true;
+            }
+            HubEvent::AlbumStar { id, starred } => {
+                let mut marks = hub.marks.borrow_mut();
+                if starred {
+                    marks.albums.insert(id);
+                } else {
+                    marks.albums.remove(&id);
+                }
+                refresh_marks = true;
+            }
+            HubEvent::SongDislike { id, disliked } => {
+                let mut marks = hub.marks.borrow_mut();
+                if disliked {
+                    marks.disliked.insert(id);
+                } else {
+                    marks.disliked.remove(&id);
+                }
+                refresh_marks = true;
+            }
+            HubEvent::Download {
+                reference,
+                message,
+                failed,
+            } => {
+                *hub.hub_note.borrow_mut() = message;
+                if failed {
+                    if let Some(hit) = hub
+                        .hits
+                        .borrow_mut()
+                        .iter_mut()
+                        .find(|hit| hit.reference == reference)
+                    {
+                        hit.downloading = false;
+                    }
+                    refresh_hits = true;
+                }
+            }
+        }
+    }
+    if refresh_marks {
+        let marks = hub.marks.borrow().clone();
+        show_browser(ui, &mut browser.borrow_mut(), &marks);
+        paint_track_marks(ui, &queue.borrow(), hub);
+    }
+    if refresh_hits && hub.catalog_open.get() {
+        show_hits(ui, &hub.hits.borrow());
+    }
+}
+
+fn album_line(album: &navidrome::Album) -> String {
+    if album.song_count <= 1 {
+        return album.artist.clone();
+    }
+    if album.artist.is_empty() {
+        return album.song_count.to_string();
+    }
+    format!("{} · {}", album.artist, album.song_count)
+}
+
+fn show_browser(ui: &AppWindow, browser: &mut Browser, marks: &hub::Marks) {
     let name = browser.artist_name();
     browser.visible_albums =
         navidrome::albums_for_artist(&browser.shown.albums, &browser.artist_id, &name);
@@ -1022,7 +1756,8 @@ fn show_browser(ui: &AppWindow, browser: &mut Browser) {
         .map(|album| AlbumItem {
             id: album.id.clone().into(),
             title: album.name.clone().into(),
-            artist: album.artist.clone().into(),
+            artist: album_line(album).into(),
+            starred: marks.albums.contains(&album.id),
         })
         .collect::<Vec<_>>();
     ui.set_artists(slint::ModelRc::from(Rc::new(slint::VecModel::from(
@@ -1036,6 +1771,7 @@ fn apply_search(
     browser: &RefCell<Browser>,
     queue: &RefCell<queue::Queue>,
     config: &navidrome::ServerConfig,
+    hub: &HubState,
     query: &str,
 ) {
     let query = query.trim();
@@ -1067,9 +1803,10 @@ fn apply_search(
                 }
             }
         }
-        show_browser(ui, &mut browser);
+        let marks = hub.marks.borrow().clone();
+        show_browser(ui, &mut browser, &marks);
     }
-    show_queue(ui, &queue.borrow());
+    show_queue(ui, &queue.borrow(), hub);
 }
 
 fn matches_query(item: &queue::Item, query: &str) -> bool {
@@ -1116,6 +1853,7 @@ fn play_current(
     queue: &RefCell<queue::Queue>,
     config: &navidrome::ServerConfig,
     waves: &std::sync::Arc<wave::WaveHub>,
+    hub: &HubState,
 ) -> Result<(), String> {
     let (target, cover_id) = {
         let queue = queue.borrow();
@@ -1127,7 +1865,7 @@ fn play_current(
     };
     {
         let queue = queue.borrow();
-        show_queue(ui, &queue);
+        show_queue(ui, &queue, hub);
     }
     ui.set_wave(empty_wave());
     waves.load(target.clone());
@@ -1167,15 +1905,16 @@ fn jump(
     config: &navidrome::ServerConfig,
     status: &str,
     waves: &std::sync::Arc<wave::WaveHub>,
+    hub: &HubState,
     moved: bool,
 ) {
     if !moved {
         return;
     }
-    let _ = play_current(ui, player, queue, config, waves);
+    let _ = play_current(ui, player, queue, config, waves, hub);
     let player = player.borrow();
     push_playback(ui, &player.snapshot());
-    ui.set_status(player.status_or(status).into());
+    show_status(ui, &player, hub, status);
 }
 
 /// The timer and the end-of-file test share this. A stop leaves the index where it is.
@@ -1183,8 +1922,12 @@ fn take_queue_step(player: &mut Player, queue: &mut queue::Queue) -> bool {
     player.take_natural_end() && queue.next()
 }
 
-fn show_queue(ui: &AppWindow, queue: &queue::Queue) {
-    let query = ui.get_search().to_string();
+fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
+    let query = if ui.get_catalog_open() {
+        String::new()
+    } else {
+        ui.get_search().to_string()
+    };
     let current = queue.index();
     let rows: Vec<QueueItem> = queue
         .items()
@@ -1208,6 +1951,7 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue) {
     };
     ui.set_queue_title(title.into());
     ui.set_queue_total(queue.total_label().into());
+    paint_track_marks(ui, queue, hub);
     let Some(item) = queue.current() else {
         return;
     };
@@ -1273,6 +2017,28 @@ fn cover_image(bytes: &[u8]) -> Option<slint::Image> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_icon_is_the_brand_mark() {
+        let image = cover_image(include_bytes!("../assets/icon.png")).expect("icon");
+        let pixels = image.to_rgba8().expect("pixels");
+        assert_eq!((pixels.width(), pixels.height()), (512, 512));
+        let raw = pixels.as_bytes();
+        // Cream disc, left of the green play triangle.
+        let cream = ((256 * 512 + 216) * 4) as usize;
+        assert!(raw[cream] > 240 && raw[cream + 1] > 230 && raw[cream + 2] > 210);
+        // Green field above the vinyl ring.
+        let field = ((40 * 512 + 256) * 4) as usize;
+        assert!(raw[field] < 40 && raw[field + 1] > 120 && raw[field + 2] < 100);
+        assert_eq!(raw[field + 3], 255);
+        // Rounded corner stays transparent.
+        assert_eq!(raw[3], 0);
+        let tray = tray_icon().to_rgba8().expect("tray");
+        assert_eq!((tray.width(), tray.height()), (64, 64));
+        let tray_raw = tray.as_bytes();
+        let top = ((5 * 64 + 32) * 4) as usize;
+        assert!(tray_raw[top + 1] > tray_raw[top] + 40);
+    }
 
     #[test]
     fn decodes_a_png_cover() {

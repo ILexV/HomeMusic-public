@@ -12,6 +12,14 @@ export struct AlbumItem {
     id: string,
     title: string,
     artist: string,
+    starred: bool,
+}
+
+export struct CatalogHit {
+    title: string,
+    artist: string,
+    detail: string,
+    action: string,
 }
 
 export struct ArtistItem {

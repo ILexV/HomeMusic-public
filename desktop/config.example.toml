@@ -3,5 +3,7 @@
 # A shipped exe reads config.toml in the folder that contains the exe.
 # The password is the Navidrome admin password.
 server = "http://192.168.1.51:4533"
+# Hub. Empty uses the Navidrome host on port 8080.
+hub = ""
 user = ""
 password = ""

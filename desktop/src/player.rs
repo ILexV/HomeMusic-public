@@ -76,6 +76,10 @@ impl Player {
         self.notice.clone().unwrap_or_else(|| fallback.to_string())
     }
 
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
     pub fn load(&mut self, target: &str) -> Result<(), String> {
         if self.mpv.is_none() {
             let err = self

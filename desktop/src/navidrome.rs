@@ -13,6 +13,7 @@ const CLIENT_NAME: &str = "homemusic-desktop";
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub server: String,
+    pub hub: String,
     pub user: String,
     pub password: String,
     pub loaded: bool,
@@ -22,6 +23,7 @@ impl fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServerConfig")
             .field("server", &self.server)
+            .field("hub", &self.hub)
             .field("user", &self.user)
             .field("password", &"<скрыт>")
             .field("loaded", &self.loaded)
@@ -33,6 +35,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             server: "http://127.0.0.1:4533".into(),
+            hub: String::new(),
             user: String::new(),
             password: String::new(),
             loaded: false,
@@ -117,6 +120,8 @@ pub struct Album {
     pub artist: String,
     pub artist_id: String,
     pub song_count: u32,
+    /// `single` when Navidrome says so. Empty when the server did not say.
+    pub release: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +146,7 @@ pub fn parse_config(text: &str) -> ServerConfig {
         let value = value.trim().trim_matches('"').to_string();
         match key.trim() {
             "server" => cfg.server = value,
+            "hub" => cfg.hub = value,
             "user" => cfg.user = value,
             "password" => cfg.password = value,
             _ => {}
@@ -566,11 +572,15 @@ fn artist_parts(value: &Value) -> Option<Artist> {
 }
 
 fn album_list(value: &Value) -> Vec<Album> {
-    if let Some(rows) = value.as_array() {
-        rows.iter().filter_map(album_parts).collect()
+    let rows = if let Some(rows) = value.as_array() {
+        rows.iter().filter_map(album_parts).collect::<Vec<_>>()
     } else {
         album_parts(value).into_iter().collect()
-    }
+    };
+    // A single is one track under its own title. The album column keeps albums, EPs, and compilations.
+    rows.into_iter()
+        .filter(|album| album.release != "single")
+        .collect()
 }
 
 fn album_parts(value: &Value) -> Option<Album> {
@@ -589,7 +599,34 @@ fn album_parts(value: &Value) -> Option<Album> {
         artist: text_field(value, "artist"),
         artist_id: text_field(value, "artistId"),
         song_count: number_field(value, "songCount"),
+        release: release_kind(value),
     })
+}
+
+/// `single` hides the row. `album` covers an album, an EP, and a compilation. Empty keeps the row.
+fn release_kind(value: &Value) -> String {
+    let mut kinds = Vec::new();
+    match value.get("releaseTypes") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Some(text) = item.as_str() {
+                    kinds.push(text.to_ascii_lowercase());
+                }
+            }
+        }
+        Some(Value::String(text)) => kinds.push(text.to_ascii_lowercase()),
+        _ => {}
+    }
+    if kinds
+        .iter()
+        .any(|kind| kind == "album" || kind == "ep" || kind == "compilation")
+    {
+        return "album".into();
+    }
+    if kinds.iter().any(|kind| kind == "single") {
+        return "single".into();
+    }
+    String::new()
 }
 
 fn album_name(value: &Value) -> String {
@@ -720,6 +757,7 @@ mod tests {
     fn missing_login_stays_local_and_hides_the_password() {
         let cfg = ServerConfig {
             server: "http://127.0.0.1:1".into(),
+            hub: String::new(),
             user: String::new(),
             password: "secret".into(),
             loaded: true,
@@ -752,6 +790,7 @@ mod tests {
     fn ping_url_keeps_the_password_out() {
         let cfg = ServerConfig {
             server: "http://192.168.1.51:4533".into(),
+            hub: String::new(),
             user: "lex".into(),
             password: "secret".into(),
             loaded: true,
@@ -864,6 +903,7 @@ mod tests {
 
         let cfg = ServerConfig {
             server: "http://192.168.1.51:4533".into(),
+            hub: String::new(),
             user: "lex".into(),
             password: "secret".into(),
             loaded: true,
@@ -892,13 +932,16 @@ mod tests {
 
         let albums = serde_json::json!({
             "subsonic-response": {"status": "ok", "albumList2": {"album": [
-                {"id": "al1", "name": "Visions", "artist": "Damned Anthem", "artistId": "ar1", "songCount": 8},
-                {"id": "al2", "title": "Клуб", "artist": "Escala", "artistId": "ar3", "songCount": 1}
+                {"id": "al1", "name": "Visions", "artist": "Damned Anthem", "artistId": "ar1", "songCount": 8, "releaseTypes": ["album"]},
+                {"id": "al2", "title": "Клуб", "artist": "Escala", "artistId": "ar3", "songCount": 1},
+                {"id": "al4", "name": "Один трек", "artist": "Escala", "songCount": 1, "releaseTypes": ["single"]}
             ]}}
         });
         let albums = albums_from_list(&albums);
+        assert_eq!(albums.len(), 2);
         assert_eq!(albums[0].name, "Visions");
         assert_eq!(albums[0].song_count, 8);
+        assert_eq!(albums[0].release, "album");
         assert_eq!(albums[1].name, "Клуб");
         let owned = albums_for_artist(&albums, "ar1", "Damned Anthem");
         assert_eq!(owned.len(), 1);
@@ -910,6 +953,7 @@ mod tests {
                 artist: "Damned Anthem".into(),
                 artist_id: String::new(),
                 song_count: 1,
+                release: String::new(),
             }],
             "ar1",
             "Damned Anthem",

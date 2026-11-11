@@ -12,7 +12,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-pub const BARS: usize = 48;
+pub const BARS: usize = 120;
 const HTTP_CAP: u64 = 20 * 1024 * 1024;
 const FILE_CAP: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 256;
