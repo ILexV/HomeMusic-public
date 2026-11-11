@@ -102,7 +102,7 @@ export component Large inherits Rectangle {
                                 padding-left: 6px;
                                 alignment: center;
                                 Text {
-                                    text: item.title;
+                                    text: item.number == "" ? item.title : item.number + "  " + item.title;
                                     color: item.current ? #1b1b1b : Theme.text;
                                     font-size: 12px;
                                     overflow: elide;

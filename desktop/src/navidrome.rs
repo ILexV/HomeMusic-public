@@ -65,20 +65,24 @@ impl ServerConfig {
 
 /// One library track ready for mpv. `stream_url` carries the Subsonic token.
 pub struct Track {
+    pub id: String,
     pub title: String,
     pub artist: String,
     pub album: String,
     pub meta: String,
+    pub duration_s: u32,
     pub stream_url: String,
 }
 
 impl fmt::Debug for Track {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Track")
+            .field("id", &self.id)
             .field("title", &self.title)
             .field("artist", &self.artist)
             .field("album", &self.album)
             .field("meta", &self.meta)
+            .field("duration_s", &self.duration_s)
             .field("stream_url", &"<скрыт>")
             .finish()
     }
@@ -144,12 +148,46 @@ pub fn first_track(config: &ServerConfig) -> Result<Track, String> {
     };
     let stream_url = view_url(config, "stream.view", &format!("id={}", encode(&song.id)));
     Ok(Track {
+        id: song.id,
         title: song.title,
         artist: song.artist,
         album: song.album,
         meta: song.meta,
+        duration_s: song.duration_s,
         stream_url,
     })
+}
+
+/// Album art for a song id. `None` when the server has no picture or cannot be reached.
+/// The returned bytes are a JPEG or a PNG, never an error page.
+pub fn cover_art(config: &ServerConfig, song_id: &str) -> Option<Vec<u8>> {
+    if !config.loaded || config.password.is_empty() || song_id.is_empty() {
+        return None;
+    }
+    let url = view_url(
+        config,
+        "getCoverArt.view",
+        &format!("id={}&size=256", encode(song_id)),
+    );
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(3))
+        .timeout_read(Duration::from_secs(8))
+        .build();
+    let response = agent.get(&url).call().ok()?;
+    if response.status() != 200 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(2_000_000)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    is_cover_image(&bytes).then_some(bytes)
+}
+
+pub fn is_cover_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
 }
 
 struct SongParts {
@@ -158,6 +196,7 @@ struct SongParts {
     artist: String,
     album: String,
     meta: String,
+    duration_s: u32,
 }
 
 fn view_url(config: &ServerConfig, view: &str, extra: &str) -> String {
@@ -239,7 +278,15 @@ fn one_song(body: &Value) -> Option<SongParts> {
         artist,
         album,
         meta,
+        duration_s: number_field(song, "duration"),
     })
+}
+
+fn number_field(song: &Value, name: &str) -> u32 {
+    match song.get(name) {
+        Some(Value::Number(value)) => value.as_u64().unwrap_or(0).min(u64::from(u32::MAX)) as u32,
+        _ => 0,
+    }
 }
 
 fn text_field(song: &Value, name: &str) -> String {
@@ -341,7 +388,8 @@ mod tests {
                     "title": "За речкою",
                     "artist": "FOLKBEAT",
                     "album": "За речкою",
-                    "suffix": "mp3"
+                    "suffix": "mp3",
+                    "duration": 197
                 }]}
             }
         });
@@ -350,6 +398,9 @@ mod tests {
         assert_eq!(song.title, "За речкою");
         assert_eq!(song.artist, "FOLKBEAT");
         assert_eq!(song.meta, "MP3");
+        assert_eq!(song.duration_s, 197);
+        assert!(is_cover_image(&[0xFF, 0xD8, 0xFF, 0xD9]));
+        assert!(!is_cover_image(br#"{"error":"no"}"#));
 
         let single = serde_json::json!({
             "subsonic-response": {"status": "ok", "randomSongs": {"song": {

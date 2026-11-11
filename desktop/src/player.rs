@@ -329,6 +329,20 @@ mod tests {
         });
         assert!(state.position_s < state.duration_s);
         eprintln!("playing: {} — {}", track.artist, track.title);
+        let mut cover = crate::navidrome::cover_art(&config, &track.id)
+            .map(|bytes| (track.artist.clone(), track.title.clone(), bytes.len()));
+        if cover.is_none() {
+            for _ in 0..5 {
+                let candidate =
+                    crate::navidrome::first_track(&config).unwrap_or_else(|err| panic!("{err}"));
+                if let Some(bytes) = crate::navidrome::cover_art(&config, &candidate.id) {
+                    cover = Some((candidate.artist, candidate.title, bytes.len()));
+                    break;
+                }
+            }
+        }
+        let (artist, title, len) = cover.expect("no cover in the sampled tracks");
+        eprintln!("cover: {artist} — {title} ({len} bytes)");
     }
 
     #[test]

@@ -22,6 +22,8 @@ export component AppWindow inherits Window {
     in-out property <string> duration-label;
     in-out property <string> status;
     in-out property <string> error;
+    in-out property <image> cover;
+    in-out property <bool> has-cover: false;
     in-out property <float> position;
     in-out property <float> duration;
     in-out property <float> volume;
@@ -71,6 +73,8 @@ export component AppWindow inherits Window {
             track-artist: root.track-artist;
             track-album: root.track-album;
             track-meta: root.track-meta;
+            cover: root.cover;
+            has-cover: root.has-cover;
             time-label: root.time-label;
             duration-label: root.duration-label;
             status: root.status;

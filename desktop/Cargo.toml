@@ -6,6 +6,7 @@ publish = false
 description = "Compact desktop player for HomeMusic"
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2"
 libmpv2 = "7"
 md-5 = "0.10"

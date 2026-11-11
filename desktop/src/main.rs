@@ -17,12 +17,14 @@ fn main() -> Result<(), slint::PlatformError> {
         null_audio: false,
     })));
     let config = navidrome::ServerConfig::load();
+    let mut queue = Vec::new();
     let library_status = if let Some(target) = std::env::args().nth(1) {
         let (title, meta) = track_label(&target);
-        ui.set_track_title(title.into());
+        ui.set_track_title(title.clone().into());
         ui.set_track_artist(String::new().into());
         ui.set_track_album(String::new().into());
         ui.set_track_meta(meta.into());
+        queue.push(playing_row("1", &title, "—"));
         if let Err(err) = player.borrow_mut().load(&target) {
             ui.set_error(err.clone().into());
             err
@@ -32,10 +34,21 @@ fn main() -> Result<(), slint::PlatformError> {
     } else {
         match navidrome::first_track(&config) {
             Ok(track) => {
-                ui.set_track_title(track.title.into());
+                ui.set_track_title(track.title.clone().into());
                 ui.set_track_artist(track.artist.into());
                 ui.set_track_album(track.album.into());
                 ui.set_track_meta(track.meta.into());
+                queue.push(playing_row(
+                    "1",
+                    &track.title,
+                    &clock(track.duration_s as f32),
+                ));
+                if let Some(bytes) = navidrome::cover_art(&config, &track.id) {
+                    if let Some(image) = cover_image(&bytes) {
+                        ui.set_cover(image);
+                        ui.set_has_cover(true);
+                    }
+                }
                 match player.borrow_mut().load(&track.stream_url) {
                     Ok(()) => "Navidrome подключён".into(),
                     Err(err) => {
@@ -56,7 +69,7 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     let config_status = Rc::new(library_status);
     ui.set_status(player.borrow().status_or(&config_status).into());
-    ui.set_queue(slint::ModelRc::from(Rc::new(demo_queue())));
+    ui.set_queue(slint::ModelRc::from(Rc::new(slint::VecModel::from(queue))));
     ui.set_albums(slint::ModelRc::from(Rc::new(demo_albums())));
     push_playback(&ui, &player.borrow().snapshot());
     resize(&ui, 0);
@@ -231,27 +244,50 @@ fn clock(seconds: f32) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-fn demo_queue() -> slint::VecModel<QueueItem> {
-    slint::VecModel::from(vec![
-        QueueItem {
-            title: "1. Каркас".into(),
-            meta: "демо, без звука".into(),
-            duration: "3:20".into(),
-            current: true,
-        },
-        QueueItem {
-            title: "2. Очередь с сервера".into(),
-            meta: "появится на шаге 5".into(),
-            duration: "4:01".into(),
-            current: false,
-        },
-        QueueItem {
-            title: "3. Следующий трек".into(),
-            meta: "кнопки пока ничего не переключают".into(),
-            duration: "2:48".into(),
-            current: false,
-        },
-    ])
+fn playing_row(number: &str, title: &str, duration: &str) -> QueueItem {
+    QueueItem {
+        number: number.into(),
+        title: title.into(),
+        meta: String::new().into(),
+        duration: duration.into(),
+        current: true,
+    }
+}
+
+fn cover_image(bytes: &[u8]) -> Option<slint::Image> {
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+        image.as_raw(),
+        width,
+        height,
+    );
+    Some(slint::Image::from_rgba8(buffer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_a_png_cover() {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&[10, 20, 30, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let image = cover_image(&bytes).expect("png");
+        let pixels = image.to_rgba8().expect("pixels");
+        assert_eq!((pixels.width(), pixels.height()), (1, 1));
+    }
+
+    #[test]
+    fn a_json_error_is_not_a_cover() {
+        assert!(cover_image(br#"{"status":"failed"}"#).is_none());
+    }
 }
 
 fn demo_albums() -> slint::VecModel<AlbumItem> {
