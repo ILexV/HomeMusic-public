@@ -1,6 +1,6 @@
 # HomeMusic: Navidrome (library + streaming) + Hub (search, downloads, uploads, AI) + reverse SSH tunnel to the VPS.
 # Start / update:  docker compose up -d --build        Stop: docker compose down
-# Settings come from .env (copy .env.example). MUSIC_ROOT is a Windows folder, e.g. B:\Music.
+# Settings come from .env (copy .env.example). MUSIC_ROOT is the host music directory, e.g. /srv/music.
 name: homemusic
 
 x-logging: &logging
@@ -22,9 +22,9 @@ services:
       ND_DATAFOLDER: /data
       ND_DEFAULTLANGUAGE: ru
       ND_LASTFM_LANGUAGE: ru  # artist bios from Last.fm in Russian where they exist
-      # inotify events don't cross the Windows -> WSL2 bind mount; the Hub calls startScan after every import
+      # Native Linux bind mount: inotify reaches the container. The Hub still calls startScan after every import.
       ND_SCANSCHEDULE: 1h
-      ND_SCANNER_WATCHERENABLED: "false"
+      ND_SCANNER_WATCHERENABLED: "true"
       ND_AUTOIMPORTPLAYLISTS: "false"
       ND_ENABLEINSIGHTSCOLLECTOR: "false"
       ND_ENABLESHARING: "true"

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import DownloadIn, RetryIn
 from app.catalog.models import split_ref
+from app.ai.llm import completion_limit
 from app.config import get_settings
 from app.events import bus
 from app.library.owned import annotate_albums, annotate_tracks
@@ -580,8 +581,8 @@ async def run_chat(s: AsyncSession, user: User, messages: list[dict[str, str]],
         for _step in range(MAX_STEPS):
             try:
                 resp = await client.chat.completions.create(model=settings.llm_model, messages=convo, tools=TOOLS,
-                                                            tool_choice="auto", max_tokens=2500,
-                                                            extra_body=extra_body)
+                                                            tool_choice="auto", extra_body=extra_body,
+                                                            **completion_limit(settings.llm_base_url, 2500))
             except Exception as e:
                 if not tools.done and not tools.proposal:
                     raise

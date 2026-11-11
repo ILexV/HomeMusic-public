@@ -24,7 +24,15 @@ from app.ai.extract import (
     parse_track_list,
     tile_image,
 )
-from app.ai.llm import LLMClient, LLMError, LLMUsage, configured, extract_json_object, image_part
+from app.ai.llm import (
+    LLMClient,
+    LLMError,
+    LLMUsage,
+    completion_limit,
+    configured,
+    extract_json_object,
+    image_part,
+)
 from app.config import Settings
 
 BASE = "https://openrouter.ai/api/v1"
@@ -192,6 +200,12 @@ def test_merge_context_from_first_tile_with_it() -> None:
 
 
 # --------------------------------------------------------------------------- LLM client (mocked endpoint)
+
+
+def test_completion_limit_uses_openai_parameter() -> None:
+    assert completion_limit("https://api.openai.com/v1", 2500) == {"max_completion_tokens": 2500}
+    assert completion_limit("https://openrouter.ai/api/v1", 2500) == {"max_tokens": 2500}
+    assert completion_limit("http://host.docker.internal:11434/v1", 2500) == {"max_tokens": 2500}
 
 
 def test_image_part_and_configured() -> None:

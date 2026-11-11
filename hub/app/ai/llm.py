@@ -78,6 +78,17 @@ def is_openrouter(base_url: str) -> bool:
     return _host(base_url).endswith("openrouter.ai")
 
 
+def completion_limit(base_url: str, limit: int) -> dict[str, int]:
+    """Token cap for one chat completion.
+
+    GPT-5 on api.openai.com rejects `max_tokens` and requires `max_completion_tokens`.
+    OpenRouter, Ollama and the other OpenAI-compatible servers still take `max_tokens`.
+    """
+    if _host(base_url) == "api.openai.com":
+        return {"max_completion_tokens": limit}
+    return {"max_tokens": limit}
+
+
 def is_local(base_url: str) -> bool:
     """A local OpenAI-compatible server (Ollama and friends) that needs no API key."""
     p = urlparse(base_url)
@@ -236,7 +247,7 @@ class LLMClient:
         max_tokens: int,
     ) -> tuple[dict, LLMUsage]:
         messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
-        kwargs: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens}
+        kwargs: dict[str, Any] = {"messages": messages, **completion_limit(self.base_url, max_tokens)}
         if mode == "tools":
             kwargs["tools"] = [{
                 "type": "function",
