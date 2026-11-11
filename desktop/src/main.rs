@@ -1,10 +1,14 @@
+mod commands;
+mod media_keys;
 mod navidrome;
 mod player;
 mod queue;
+mod wave;
 mod window_place;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use player::{Player, PlayerOptions};
@@ -17,6 +21,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let player = Rc::new(RefCell::new(Player::open(PlayerOptions {
         null_audio: false,
     })));
+    let session = window_place::load();
+    if let Some(volume) = session.as_ref().and_then(|place| place.volume) {
+        player.borrow_mut().set_volume(volume);
+    }
+    let waves = wave::WaveHub::shared();
     let config = Rc::new(navidrome::ServerConfig::load());
     let queue = Rc::new(RefCell::new(queue::Queue::from_tracks("", Vec::new())));
     let browser = Rc::new(RefCell::new(Browser::empty()));
@@ -24,7 +33,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let (title, meta) = track_label(&target);
         *queue.borrow_mut() = queue::Queue::from_path(&target, &title, &meta);
         let _ = queue.borrow_mut().select(0);
-        match play_current(&ui, &player, &queue, &config) {
+        match play_current(&ui, &player, &queue, &config, &waves) {
             Ok(()) => config.status_line(),
             Err(err) => err,
         }
@@ -39,7 +48,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     err
                 } else {
                     let _ = queue.borrow_mut().select(0);
-                    match play_current(&ui, &player, &queue, &config) {
+                    match play_current(&ui, &player, &queue, &config, &waves) {
                         Ok(()) => "Navidrome подключён".into(),
                         Err(err) => err,
                     }
@@ -73,23 +82,20 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_status = Rc::new(library_status);
     ui.set_status(player.borrow().status_or(&config_status).into());
     push_playback(&ui, &player.borrow().snapshot());
-    resize(&ui, 0);
-    if let Some(place) = window_place::load() {
-        ui.window()
-            .set_position(slint::LogicalPosition::new(place.x, place.y));
-    }
+    apply_session(&ui, session);
 
     let ui_play = ui.as_weak();
     let player_play = player.clone();
     let queue_play = queue.clone();
     let config_play = config.clone();
     let status_play = config_status.clone();
+    let waves_play = waves.clone();
     ui.on_play_pause(move || {
         let Some(ui) = ui_play.upgrade() else {
             return;
         };
         if player_play.borrow().is_idle() {
-            let _ = play_current(&ui, &player_play, &queue_play, &config_play);
+            let _ = play_current(&ui, &player_play, &queue_play, &config_play, &waves_play);
         } else {
             player_play.borrow_mut().toggle();
         }
@@ -139,6 +145,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let queue_prev = queue.clone();
     let config_prev = config.clone();
     let status_prev = config_status.clone();
+    let waves_prev = waves.clone();
     ui.on_prev(move || {
         let moved = queue_prev.borrow_mut().prev();
         let Some(ui) = ui_prev.upgrade() else {
@@ -150,6 +157,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &queue_prev,
             &config_prev,
             &status_prev,
+            &waves_prev,
             moved,
         );
     });
@@ -159,6 +167,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let queue_next = queue.clone();
     let config_next = config.clone();
     let status_next = config_status.clone();
+    let waves_next = waves.clone();
     ui.on_next(move || {
         let moved = queue_next.borrow_mut().next();
         let Some(ui) = ui_next.upgrade() else {
@@ -170,6 +179,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &queue_next,
             &config_next,
             &status_next,
+            &waves_next,
             moved,
         );
     });
@@ -179,6 +189,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let queue_row = queue.clone();
     let config_row = config.clone();
     let status_row = config_status.clone();
+    let waves_row = waves.clone();
     ui.on_play_row(move |index| {
         if index < 0 {
             return;
@@ -193,6 +204,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &queue_row,
             &config_row,
             &status_row,
+            &waves_row,
             moved,
         );
     });
@@ -274,6 +286,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_album = config.clone();
     let status_album = config_status.clone();
     let generation_album = search_generation.clone();
+    let waves_album = waves.clone();
     ui.on_open_album(move |index| {
         if index < 0 {
             return;
@@ -307,6 +320,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     &queue_album,
                     &config_album,
                     &status_album,
+                    &waves_album,
                     moved,
                 );
             }
@@ -330,21 +344,66 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let ui_keys = ui.as_weak();
+    let player_keys = player.clone();
+    let queue_keys = queue.clone();
+    let config_keys = config.clone();
+    let status_keys = config_status.clone();
+    let waves_keys = waves.clone();
+    ui.on_shortcut(move |text, control, alt, shift, meta| {
+        let Some(command) = commands::shortcut_command(&text, control, alt, shift, meta) else {
+            return false;
+        };
+        let Some(ui) = ui_keys.upgrade() else {
+            return false;
+        };
+        dispatch(
+            &ui,
+            &player_keys,
+            &queue_keys,
+            &config_keys,
+            &status_keys,
+            &waves_keys,
+            command,
+        );
+        true
+    });
+
+    let (media_tx, media_rx) = mpsc::channel();
+    let media = Rc::new(RefCell::new(media_keys::attach(media_tx)));
     let ui_tick = ui.as_weak();
     let player_tick = player.clone();
     let queue_tick = queue.clone();
     let config_tick = config.clone();
     let status_tick = config_status.clone();
+    let waves_tick = waves.clone();
+    let media_tick = media.clone();
     let place_watch = Rc::new(RefCell::new(PlaceWatch {
         started: Instant::now(),
         last: None,
+        loaded_xy: session.map(|place| (place.x, place.y)),
     }));
     let watch_tick = place_watch.clone();
+    let media_watch = Rc::new(RefCell::new(MediaWatch::default()));
+    let media_watch_tick = media_watch.clone();
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(200),
         move || {
+            while let Ok(command) = media_rx.try_recv() {
+                if let Some(ui) = ui_tick.upgrade() {
+                    dispatch(
+                        &ui,
+                        &player_tick,
+                        &queue_tick,
+                        &config_tick,
+                        &status_tick,
+                        &waves_tick,
+                        command,
+                    );
+                }
+            }
             let moved = {
                 let mut player = player_tick.borrow_mut();
                 let mut queue = queue_tick.borrow_mut();
@@ -352,23 +411,66 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             if moved {
                 if let Some(ui) = ui_tick.upgrade() {
-                    let _ = play_current(&ui, &player_tick, &queue_tick, &config_tick);
+                    let _ = play_current(&ui, &player_tick, &queue_tick, &config_tick, &waves_tick);
                 }
             }
             if let Some(ui) = ui_tick.upgrade() {
+                if let Some(peaks) = waves_tick.poll() {
+                    show_wave(&ui, &peaks);
+                }
                 let player = player_tick.borrow();
                 push_playback(&ui, &player.snapshot());
                 ui.set_status(player.status_or(&status_tick).into());
+                publish_media(
+                    &mut media_tick.borrow_mut(),
+                    &ui,
+                    &player,
+                    &mut media_watch_tick.borrow_mut(),
+                );
                 remember_place(&ui, &mut watch_tick.borrow_mut());
             }
         },
     );
 
-    let ui_close = ui.as_weak();
-    ui.window().on_close_requested(move || {
-        if let Some(ui) = ui_close.upgrade() {
-            save_place(&ui);
+    let tray = PlayerTray::new()?;
+    tray.set_tray_icon(tray_icon());
+    let click_origin = Instant::now();
+    let last_click = Rc::new(Cell::new(None::<u128>));
+    let ui_tray_click = ui.as_weak();
+    tray.on_icon_clicked(move || {
+        let now = click_origin.elapsed().as_millis();
+        let (restore, next) = commands::tray_click(last_click.get(), now);
+        last_click.set(next);
+        if restore {
+            if let Some(ui) = ui_tray_click.upgrade() {
+                reveal(&ui);
+            }
         }
+    });
+    let ui_show = ui.as_weak();
+    tray.on_show_window(move || {
+        if let Some(ui) = ui_show.upgrade() {
+            reveal(&ui);
+        }
+    });
+    let ui_quit = ui.as_weak();
+    let tray_quit = tray.as_weak();
+    tray.on_quit(move || shutdown(&ui_quit, &tray_quit));
+
+    let ui_min = ui.as_weak();
+    ui.on_minimize(move || {
+        if let Some(ui) = ui_min.upgrade() {
+            let _ = ui.hide();
+        }
+    });
+    let ui_close_btn = ui.as_weak();
+    let tray_close_btn = tray.as_weak();
+    ui.on_close_window(move || shutdown(&ui_close_btn, &tray_close_btn));
+
+    let ui_close = ui.as_weak();
+    let tray_close = tray.as_weak();
+    ui.window().on_close_requested(move || {
+        shutdown(&ui_close, &tray_close);
         slint::CloseRequestResponse::HideWindow
     });
 
@@ -377,7 +479,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
 struct PlaceWatch {
     started: Instant,
-    last: Option<(i32, i32)>,
+    last: Option<window_place::Place>,
+    loaded_xy: Option<(f32, f32)>,
 }
 
 fn remember_place(ui: &AppWindow, watch: &mut PlaceWatch) {
@@ -385,22 +488,261 @@ fn remember_place(ui: &AppWindow, watch: &mut PlaceWatch) {
     if watch.started.elapsed() < Duration::from_millis(700) {
         return;
     }
+    let Some(mut place) = current_place(ui) else {
+        return;
+    };
     let pos = ui.window().position();
-    let key = (pos.x, pos.y);
-    if watch.last == Some(key) || (key == (0, 0) && watch.last.is_none()) {
+    if pos.x == 0 && pos.y == 0 && watch.last.is_none() {
+        match watch.loaded_xy {
+            Some((x, y)) => {
+                place.x = x;
+                place.y = y;
+            }
+            None => return,
+        }
+    }
+    if watch.last.is_some_and(|last| same_place(last, place)) {
         return;
     }
-    watch.last = Some(key);
-    save_place(ui);
+    watch.last = Some(place);
+    window_place::save(place);
 }
 
 fn save_place(ui: &AppWindow) {
+    if let Some(place) = current_place(ui) {
+        window_place::save(place);
+    }
+}
+
+fn current_place(ui: &AppWindow) -> Option<window_place::Place> {
     let scale = ui.window().scale_factor();
     if scale <= 0.0 {
-        return;
+        return None;
     }
     let pos = ui.window().position().to_logical(scale);
-    window_place::save(window_place::Place { x: pos.x, y: pos.y });
+    let size = ui.window().size().to_logical(scale);
+    if size.width < 1.0 || size.height < 1.0 {
+        return None;
+    }
+    Some(window_place::Place {
+        x: pos.x,
+        y: pos.y,
+        mode: Some(mode_index(ui.get_mode())),
+        width: Some(size.width),
+        height: Some(size.height),
+        volume: Some(ui.get_volume()),
+    })
+}
+
+fn same_place(left: window_place::Place, right: window_place::Place) -> bool {
+    (left.x - right.x).abs() < 0.5
+        && (left.y - right.y).abs() < 0.5
+        && left.mode == right.mode
+        && match (left.width, left.height, right.width, right.height) {
+            (Some(lw), Some(lh), Some(rw), Some(rh)) => {
+                (lw - rw).abs() < 0.5 && (lh - rh).abs() < 0.5
+            }
+            _ => false,
+        }
+        && match (left.volume, right.volume) {
+            (Some(lv), Some(rv)) => (lv - rv).abs() < 0.005,
+            _ => false,
+        }
+}
+
+fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
+    let mode = session
+        .and_then(|place| place.mode)
+        .unwrap_or(0)
+        .clamp(0, 2);
+    ui.set_mode(mode_from_index(mode));
+    if let Some((width, height)) =
+        session.and_then(|place| window_place::usable_size(place.width, place.height))
+    {
+        ui.window().set_size(slint::LogicalSize::new(width, height));
+    } else {
+        resize(ui, mode);
+    }
+    if let Some(place) = session {
+        ui.window()
+            .set_position(slint::LogicalPosition::new(place.x, place.y));
+    }
+}
+
+fn mode_index(mode: Mode) -> i32 {
+    match mode {
+        Mode::Mini => 0,
+        Mode::Medium => 1,
+        Mode::Large => 2,
+    }
+}
+
+fn mode_from_index(mode: i32) -> Mode {
+    match mode {
+        0 => Mode::Mini,
+        1 => Mode::Medium,
+        _ => Mode::Large,
+    }
+}
+
+#[derive(Default)]
+struct MediaWatch {
+    volume: f32,
+    playing: bool,
+    idle: bool,
+    title: String,
+    ready: bool,
+}
+
+fn publish_media(
+    media: &mut Option<souvlaki::MediaControls>,
+    ui: &AppWindow,
+    player: &Player,
+    watch: &mut MediaWatch,
+) {
+    let Some(media) = media.as_mut() else {
+        return;
+    };
+    let volume = ui.get_volume();
+    let playing = ui.get_playing();
+    let idle = player.is_idle();
+    let title = ui.get_track_title().to_string();
+    if !watch.ready || (volume - watch.volume).abs() > 0.01 {
+        if media.set_volume(f64::from(volume)).is_ok() {
+            watch.volume = volume;
+        }
+    }
+    if !watch.ready || playing != watch.playing || idle != watch.idle {
+        let playback = if playing {
+            souvlaki::MediaPlayback::Playing { progress: None }
+        } else if idle {
+            souvlaki::MediaPlayback::Stopped
+        } else {
+            souvlaki::MediaPlayback::Paused { progress: None }
+        };
+        if media.set_playback(playback).is_ok() {
+            watch.playing = playing;
+            watch.idle = idle;
+        }
+    }
+    if title != watch.title && !title.is_empty() && title != "Нет трека" {
+        let artist = ui.get_track_artist().to_string();
+        let album = ui.get_track_album().to_string();
+        let _ = media.set_metadata(souvlaki::MediaMetadata {
+            title: Some(title.as_str()),
+            artist: Some(artist.as_str()),
+            album: Some(album.as_str()),
+            cover_url: None,
+            duration: None,
+        });
+        watch.title = title;
+    }
+    watch.ready = true;
+}
+
+fn dispatch(
+    ui: &AppWindow,
+    player: &Rc<RefCell<Player>>,
+    queue: &Rc<RefCell<queue::Queue>>,
+    config: &navidrome::ServerConfig,
+    status: &str,
+    waves: &std::sync::Arc<wave::WaveHub>,
+    command: commands::Command,
+) {
+    use commands::Command;
+    match command {
+        Command::Toggle => {
+            if player.borrow().is_idle() {
+                let _ = play_current(ui, player, queue, config, waves);
+            } else {
+                player.borrow_mut().toggle();
+            }
+        }
+        Command::Play => {
+            let (idle, playing) = {
+                let player = player.borrow();
+                (player.is_idle(), player.snapshot().playing)
+            };
+            if idle {
+                let _ = play_current(ui, player, queue, config, waves);
+            } else if !playing {
+                player.borrow_mut().toggle();
+            }
+        }
+        Command::Pause => {
+            if player.borrow().snapshot().playing {
+                player.borrow_mut().toggle();
+            }
+        }
+        Command::Stop => player.borrow_mut().stop(),
+        Command::Next => {
+            let moved = queue.borrow_mut().next();
+            jump(ui, player, queue, config, status, waves, moved);
+            return;
+        }
+        Command::Previous => {
+            let moved = queue.borrow_mut().prev();
+            jump(ui, player, queue, config, status, waves, moved);
+            return;
+        }
+        Command::VolumeUp | Command::VolumeDown | Command::SetVolume(_) => {
+            let current = player.borrow().snapshot().volume;
+            if let Some(volume) = commands::volume_after(current, command) {
+                player.borrow_mut().set_volume(volume);
+            }
+        }
+    }
+    let player = player.borrow();
+    push_playback(ui, &player.snapshot());
+    ui.set_status(player.status_or(status).into());
+}
+
+fn shutdown(ui: &slint::Weak<AppWindow>, tray: &slint::Weak<PlayerTray>) {
+    if let Some(ui) = ui.upgrade() {
+        save_place(&ui);
+        let _ = ui.hide();
+    }
+    if let Some(tray) = tray.upgrade() {
+        let _ = tray.hide();
+    }
+    let _ = slint::quit_event_loop();
+}
+
+fn reveal(ui: &AppWindow) {
+    let _ = ui.show();
+    ui.window().set_minimized(false);
+}
+
+fn empty_wave() -> slint::ModelRc<f32> {
+    slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<f32>::new())))
+}
+
+fn show_wave(ui: &AppWindow, peaks: &[f32]) {
+    ui.set_wave(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+        peaks.to_vec(),
+    ))));
+}
+
+fn tray_icon() -> slint::Image {
+    let size = 32u32;
+    let mut pixels = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as i32 - 16;
+            let dy = y as i32 - 16;
+            if dx * dx + dy * dy > 13 * 13 {
+                continue;
+            }
+            let index = ((y * size + x) * 4) as usize;
+            pixels[index] = 0xe8;
+            pixels[index + 1] = 0x87;
+            pixels[index + 2] = 0x2a;
+            pixels[index + 3] = 255;
+        }
+    }
+    let buffer =
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&pixels, size, size);
+    slint::Image::from_rgba8(buffer)
 }
 
 fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
@@ -413,10 +755,11 @@ fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
 }
 
 fn resize(ui: &AppWindow, mode: i32) {
+    // The 28px title strip sits above the layouts tuned in the earlier steps.
     let (width, height) = match mode {
-        0 => (520.0, 132.0),
-        1 => (460.0, 640.0),
-        _ => (1040.0, 680.0),
+        0 => (520.0, 160.0),
+        1 => (460.0, 668.0),
+        _ => (1040.0, 708.0),
     };
     ui.window().set_size(slint::LogicalSize::new(width, height));
 }
@@ -595,6 +938,7 @@ fn play_current(
     player: &RefCell<Player>,
     queue: &RefCell<queue::Queue>,
     config: &navidrome::ServerConfig,
+    waves: &std::sync::Arc<wave::WaveHub>,
 ) -> Result<(), String> {
     let (target, cover_id) = {
         let queue = queue.borrow();
@@ -608,6 +952,8 @@ fn play_current(
         let queue = queue.borrow();
         show_queue(ui, &queue);
     }
+    ui.set_wave(empty_wave());
+    waves.load(target.clone());
     let loaded = match target {
         Some(target) => player.borrow_mut().load(&target),
         None => Err("Нет трека".into()),
@@ -643,12 +989,13 @@ fn jump(
     queue: &RefCell<queue::Queue>,
     config: &navidrome::ServerConfig,
     status: &str,
+    waves: &std::sync::Arc<wave::WaveHub>,
     moved: bool,
 ) {
     if !moved {
         return;
     }
-    let _ = play_current(ui, player, queue, config);
+    let _ = play_current(ui, player, queue, config, waves);
     let player = player.borrow();
     push_playback(ui, &player.snapshot());
     ui.set_status(player.status_or(status).into());

@@ -14,6 +14,7 @@ export component Large inherits Rectangle {
     in property <float> position;
     in property <float> duration;
     in property <float> volume;
+    in property <[float]> wave;
     in property <bool> playing;
     in property <int> mode;
     in property <[QueueItem]> queue;
@@ -241,6 +242,7 @@ export component Large inherits Rectangle {
                     SeekBar {
                         position: root.position;
                         duration: root.duration;
+                        wave: root.wave;
                         seek(ratio) => { root.seek(ratio); }
                         horizontal-stretch: 1;
                     }

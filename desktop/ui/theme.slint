@@ -47,25 +47,66 @@ export component IconButton inherits Rectangle {
     }
 }
 
+export component TitleButton inherits Rectangle {
+    in property <string> glyph;
+    callback clicked();
+    width: 26px;
+    height: 22px;
+    border-radius: 3px;
+    background: touch.pressed ? Theme.raised : transparent;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.glyph;
+        color: Theme.text;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 export component SeekBar inherits Rectangle {
     in property <float> position;
     in property <float> duration;
+    in property <[float]> wave;
     callback seek(float);
-    // The painted bar is 8px. The touch target is the whole row, so it does not spill onto the buttons.
-    height: 18px;
+    // Empty wave keeps the flat orange strip. Bars sit on the same dark track.
+    height: 22px;
+    property <float> progress: min(1, root.position / max(root.duration, 0.001));
+    property <length> track-height: root.wave.length > 0 ? 16px : 8px;
 
     Rectangle {
-        y: (parent.height - 8px) / 2;
+        y: (parent.height - self.height) / 2;
         width: 100%;
-        height: 8px;
+        height: root.track-height;
         background: #3a3a3a;
         border-radius: 4px;
+        clip: true;
 
-        Rectangle {
-            width: parent.width * min(1, root.position / max(root.duration, 0.001));
+        if root.wave.length == 0 : Rectangle {
+            width: parent.width * root.progress;
             height: 100%;
             background: Theme.orange;
             border-radius: 4px;
+        }
+
+        if root.wave.length > 0 : Rectangle {
+            width: 100%;
+            height: 100%;
+
+            for sample[index] in root.wave : Rectangle {
+                property <float> at: (index + 0.5) / root.wave.length;
+                x: index * parent.width / root.wave.length;
+                width: max(1px, parent.width / root.wave.length - 1px);
+                height: max(2px, parent.height * max(0.12, min(1, sample)));
+                y: (parent.height - self.height) / 2;
+                background: at <= root.progress ? Theme.orange : #9a9a9a;
+            }
         }
     }
 

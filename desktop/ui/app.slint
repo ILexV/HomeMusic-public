@@ -1,7 +1,7 @@
 import { Large } from "large.slint";
 import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
-import { Theme } from "theme.slint";
+import { Theme, TitleButton } from "theme.slint";
 
 import { AlbumItem, ArtistItem, QueueItem } from "types.slint";
 
@@ -11,6 +11,10 @@ export component AppWindow inherits Window {
     title: "HomeMusic";
     background: Theme.bg;
     default-font-size: 14px;
+    no-frame: true;
+    always-on-top: root.mode == Mode.mini;
+    resize-border-width: 6px;
+    forward-focus: keys;
 
     in-out property <Mode> mode: Mode.mini;
     property <int> mode-index: root.mode == Mode.mini ? 0 : root.mode == Mode.medium ? 1 : 2;
@@ -27,6 +31,7 @@ export component AppWindow inherits Window {
     in-out property <float> position;
     in-out property <float> duration;
     in-out property <float> volume;
+    in-out property <[float]> wave;
     in-out property <bool> playing;
     in-out property <[QueueItem]> queue;
     in-out property <string> queue-title: "Очередь";
@@ -46,99 +51,171 @@ export component AppWindow inherits Window {
     callback search-edited(string);
     callback pick-artist(int);
     callback open-album(int);
+    callback minimize();
+    callback close-window();
+    // text, control, alt, shift, meta. True when the player handled the key.
+    callback shortcut(string, bool, bool, bool, bool) -> bool;
 
-    Rectangle {
+    keys := FocusScope {
         width: 100%;
         height: 100%;
-        background: Theme.bg;
-        border-width: 1px;
-        border-color: Theme.orange;
 
-        if root.mode == Mode.mini : Mini {
-            width: 100%;
-            height: 100%;
-            track-title: root.track-title;
-            track-artist: root.track-artist;
-            error: root.error;
-            time-label: root.time-label;
-            duration-label: root.duration-label;
-            position: root.position;
-            duration: root.duration;
-            volume: root.volume;
-            playing: root.playing;
-            mode: root.mode-index;
-            play-pause => { root.play-pause(); }
-            stop => { root.stop(); }
-            next => { root.next(); }
-            seek(ratio) => { root.seek(ratio); }
-            set-volume(value) => { root.set-volume(value); }
-            set-mode(mode) => { root.set-mode(mode); }
+        key-pressed(event) => {
+            if (root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta)) {
+                accept
+            } else {
+                reject
+            }
         }
-        if root.mode == Mode.medium : Medium {
+
+        Rectangle {
             width: 100%;
             height: 100%;
-            track-title: root.track-title;
-            track-artist: root.track-artist;
-            track-album: root.track-album;
-            track-meta: root.track-meta;
-            cover: root.cover;
-            has-cover: root.has-cover;
-            time-label: root.time-label;
-            duration-label: root.duration-label;
-            status: root.status;
-            position: root.position;
-            duration: root.duration;
-            volume: root.volume;
-            playing: root.playing;
-            mode: root.mode-index;
-            queue: root.queue;
-            queue-title: root.queue-title;
-            queue-total: root.queue-total;
-            search <=> root.search;
-            play-pause => { root.play-pause(); }
-            stop => { root.stop(); }
-            prev => { root.prev(); }
-            next => { root.next(); }
-            play-row(index) => { root.play-row(index); }
-            seek(ratio) => { root.seek(ratio); }
-            set-volume(value) => { root.set-volume(value); }
-            set-mode(mode) => { root.set-mode(mode); }
-            search-edited(text) => { root.search-edited(text); }
+            background: Theme.bg;
+            border-width: 1px;
+            border-color: Theme.orange;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 28px;
+                    background: Theme.panel;
+
+                    WindowMoveArea {
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 4px;
+                            spacing: 2px;
+                            alignment: center;
+
+                            Text {
+                                text: "HomeMusic";
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            TitleButton { glyph: "–"; clicked => { root.minimize(); } }
+                            TitleButton { glyph: "×"; clicked => { root.close-window(); } }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+
+                    if root.mode == Mode.mini : Mini {
+                        width: 100%;
+                        height: 100%;
+                        track-title: root.track-title;
+                        track-artist: root.track-artist;
+                        error: root.error;
+                        time-label: root.time-label;
+                        duration-label: root.duration-label;
+                        position: root.position;
+                        duration: root.duration;
+                        volume: root.volume;
+                        wave: root.wave;
+                        playing: root.playing;
+                        mode: root.mode-index;
+                        play-pause => { root.play-pause(); }
+                        stop => { root.stop(); }
+                        next => { root.next(); }
+                        seek(ratio) => { root.seek(ratio); }
+                        set-volume(value) => { root.set-volume(value); }
+                        set-mode(mode) => { root.set-mode(mode); }
+                    }
+                    if root.mode == Mode.medium : Medium {
+                        width: 100%;
+                        height: 100%;
+                        track-title: root.track-title;
+                        track-artist: root.track-artist;
+                        track-album: root.track-album;
+                        track-meta: root.track-meta;
+                        cover: root.cover;
+                        has-cover: root.has-cover;
+                        time-label: root.time-label;
+                        duration-label: root.duration-label;
+                        status: root.status;
+                        position: root.position;
+                        duration: root.duration;
+                        volume: root.volume;
+                        wave: root.wave;
+                        playing: root.playing;
+                        mode: root.mode-index;
+                        queue: root.queue;
+                        queue-title: root.queue-title;
+                        queue-total: root.queue-total;
+                        search <=> root.search;
+                        play-pause => { root.play-pause(); }
+                        stop => { root.stop(); }
+                        prev => { root.prev(); }
+                        next => { root.next(); }
+                        play-row(index) => { root.play-row(index); }
+                        seek(ratio) => { root.seek(ratio); }
+                        set-volume(value) => { root.set-volume(value); }
+                        set-mode(mode) => { root.set-mode(mode); }
+                        search-edited(text) => { root.search-edited(text); }
+                    }
+                    if root.mode == Mode.large : Large {
+                        width: 100%;
+                        height: 100%;
+                        track-title: root.track-title;
+                        track-artist: root.track-artist;
+                        track-album: root.track-album;
+                        track-meta: root.track-meta;
+                        time-label: root.time-label;
+                        duration-label: root.duration-label;
+                        status: root.status;
+                        position: root.position;
+                        duration: root.duration;
+                        volume: root.volume;
+                        wave: root.wave;
+                        playing: root.playing;
+                        mode: root.mode-index;
+                        queue: root.queue;
+                        queue-title: root.queue-title;
+                        queue-total: root.queue-total;
+                        artists: root.artists;
+                        albums: root.albums;
+                        search <=> root.search;
+                        cover: root.cover;
+                        has-cover: root.has-cover;
+                        play-pause => { root.play-pause(); }
+                        stop => { root.stop(); }
+                        prev => { root.prev(); }
+                        next => { root.next(); }
+                        play-row(index) => { root.play-row(index); }
+                        seek(ratio) => { root.seek(ratio); }
+                        set-volume(value) => { root.set-volume(value); }
+                        set-mode(mode) => { root.set-mode(mode); }
+                        search-edited(text) => { root.search-edited(text); }
+                        pick-artist(index) => { root.pick-artist(index); }
+                        open-album(index) => { root.open-album(index); }
+                    }
+                }
+            }
         }
-        if root.mode == Mode.large : Large {
-            width: 100%;
-            height: 100%;
-            track-title: root.track-title;
-            track-artist: root.track-artist;
-            track-album: root.track-album;
-            track-meta: root.track-meta;
-            time-label: root.time-label;
-            duration-label: root.duration-label;
-            status: root.status;
-            position: root.position;
-            duration: root.duration;
-            volume: root.volume;
-            playing: root.playing;
-            mode: root.mode-index;
-            queue: root.queue;
-            queue-title: root.queue-title;
-            queue-total: root.queue-total;
-            artists: root.artists;
-            albums: root.albums;
-            search <=> root.search;
-            cover: root.cover;
-            has-cover: root.has-cover;
-            play-pause => { root.play-pause(); }
-            stop => { root.stop(); }
-            prev => { root.prev(); }
-            next => { root.next(); }
-            play-row(index) => { root.play-row(index); }
-            seek(ratio) => { root.seek(ratio); }
-            set-volume(value) => { root.set-volume(value); }
-            set-mode(mode) => { root.set-mode(mode); }
-            search-edited(text) => { root.search-edited(text); }
-            pick-artist(index) => { root.pick-artist(index); }
-            open-album(index) => { root.open-album(index); }
+    }
+}
+
+export component PlayerTray inherits SystemTrayIcon {
+    in-out property <image> tray-icon;
+    icon: root.tray-icon;
+    tooltip: "HomeMusic";
+    title: "HomeMusic";
+    callback show-window();
+    callback quit();
+    callback icon-clicked();
+    clicked => { root.icon-clicked(); }
+
+    Menu {
+        MenuItem {
+            title: "Показать";
+            activated => { root.show-window(); }
+        }
+        MenuItem {
+            title: "Выход";
+            activated => { root.quit(); }
         }
     }
 }
