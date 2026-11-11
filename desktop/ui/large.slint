@@ -13,6 +13,7 @@ export component Large inherits Rectangle {
     in property <float> duration;
     in property <float> volume;
     in property <bool> playing;
+    in property <int> mode;
     in property <[QueueItem]> queue;
     in property <[AlbumItem]> albums;
     callback play-pause();
@@ -158,7 +159,7 @@ export component Large inherits Rectangle {
                         volume: root.volume;
                         set-volume(value) => { root.set-volume(value); }
                     }
-                    ModeSwitch { set-mode(mode) => { root.set-mode(mode); } }
+                    ModeSwitch { mode: root.mode; set-mode(mode) => { root.set-mode(mode); } }
                 }
 
                 Text {

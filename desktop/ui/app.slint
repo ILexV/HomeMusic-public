@@ -13,6 +13,7 @@ export component AppWindow inherits Window {
     default-font-size: 14px;
 
     in-out property <Mode> mode: Mode.mini;
+    property <int> mode-index: root.mode == Mode.mini ? 0 : root.mode == Mode.medium ? 1 : 2;
     in-out property <string> track-title;
     in-out property <string> track-artist;
     in-out property <string> track-album;
@@ -46,16 +47,15 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             track-title: root.track-title;
-            track-artist: root.track-artist;
             time-label: root.time-label;
             duration-label: root.duration-label;
             position: root.position;
             duration: root.duration;
             volume: root.volume;
             playing: root.playing;
+            mode: root.mode-index;
             play-pause => { root.play-pause(); }
             stop => { root.stop(); }
-            prev => { root.prev(); }
             next => { root.next(); }
             seek(ratio) => { root.seek(ratio); }
             set-volume(value) => { root.set-volume(value); }
@@ -75,6 +75,7 @@ export component AppWindow inherits Window {
             duration: root.duration;
             volume: root.volume;
             playing: root.playing;
+            mode: root.mode-index;
             queue: root.queue;
             play-pause => { root.play-pause(); }
             stop => { root.stop(); }
@@ -98,6 +99,7 @@ export component AppWindow inherits Window {
             duration: root.duration;
             volume: root.volume;
             playing: root.playing;
+            mode: root.mode-index;
             queue: root.queue;
             albums: root.albums;
             play-pause => { root.play-pause(); }

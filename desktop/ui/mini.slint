@@ -2,16 +2,15 @@ import { IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
-    in property <string> track-artist;
     in property <string> time-label;
     in property <string> duration-label;
     in property <float> position;
     in property <float> duration;
     in property <float> volume;
     in property <bool> playing;
+    in property <int> mode;
     callback play-pause();
     callback stop();
-    callback prev();
     callback next();
     callback seek(float);
     callback set-volume(float);
@@ -20,11 +19,16 @@ export component Mini inherits Rectangle {
     background: Theme.bg;
 
     VerticalLayout {
-        padding: 10px;
-        spacing: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 4px;
 
         HorizontalLayout {
             spacing: 8px;
+            alignment: center;
+
             Text {
                 text: root.track-title;
                 color: Theme.text;
@@ -34,16 +38,14 @@ export component Mini inherits Rectangle {
                 horizontal-stretch: 1;
             }
             Text {
-                text: root.track-artist;
-                color: Theme.muted;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
-            Text {
                 text: root.time-label + " / " + root.duration-label;
                 color: Theme.muted;
                 font-size: 12px;
                 vertical-alignment: center;
+            }
+            ModeSwitch {
+                mode: root.mode;
+                set-mode(mode) => { root.set-mode(mode); }
             }
         }
 
@@ -54,30 +56,17 @@ export component Mini inherits Rectangle {
         }
 
         HorizontalLayout {
-            spacing: 2px;
+            spacing: 4px;
             alignment: center;
 
-            IconButton { glyph: "⏮"; clicked => { root.prev(); } }
+            VolumeBar {
+                stretch: true;
+                volume: root.volume;
+                set-volume(value) => { root.set-volume(value); }
+            }
             IconButton { glyph: root.playing ? "⏸" : "▶"; clicked => { root.play-pause(); } }
             IconButton { glyph: "⏹"; clicked => { root.stop(); } }
             IconButton { glyph: "⏭"; clicked => { root.next(); } }
-
-            Rectangle { horizontal-stretch: 1; }
-
-            Text {
-                text: "🔊";
-                color: Theme.muted;
-                vertical-alignment: center;
-            }
-            VolumeBar {
-                volume: root.volume;
-                set-volume(value) => { root.set-volume(value); }
-                vertical-stretch: 0;
-            }
-            Rectangle { width: 8px; }
-            ModeSwitch {
-                set-mode(mode) => { root.set-mode(mode); }
-            }
         }
     }
 }

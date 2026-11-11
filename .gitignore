@@ -50,3 +50,4 @@ design-review/
 # desktop player build and the local Navidrome login
 desktop/target/
 desktop/config.toml
+desktop/window-place.toml

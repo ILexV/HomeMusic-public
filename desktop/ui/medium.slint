@@ -13,6 +13,7 @@ export component Medium inherits Rectangle {
     in property <float> duration;
     in property <float> volume;
     in property <bool> playing;
+    in property <int> mode;
     in property <[QueueItem]> queue;
     callback play-pause();
     callback stop();
@@ -170,7 +171,7 @@ export component Medium inherits Rectangle {
                     horizontal-stretch: 1;
                     vertical-alignment: center;
                 }
-                ModeSwitch { set-mode(mode) => { root.set-mode(mode); } }
+                ModeSwitch { mode: root.mode; set-mode(mode) => { root.set-mode(mode); } }
             }
         }
     }

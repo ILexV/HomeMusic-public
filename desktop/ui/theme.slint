@@ -34,18 +34,27 @@ export component SeekBar inherits Rectangle {
     in property <float> position;
     in property <float> duration;
     callback seek(float);
-    height: 10px;
-    background: #3a3a3a;
-    border-radius: 5px;
+    // The painted bar is 8px. The touch target is the whole row, so it does not spill onto the buttons.
+    height: 18px;
 
     Rectangle {
-        width: parent.width * min(1, root.position / max(root.duration, 0.001));
-        height: 100%;
-        background: Theme.orange;
-        border-radius: 5px;
+        y: (parent.height - 8px) / 2;
+        width: 100%;
+        height: 8px;
+        background: #3a3a3a;
+        border-radius: 4px;
+
+        Rectangle {
+            width: parent.width * min(1, root.position / max(root.duration, 0.001));
+            height: 100%;
+            background: Theme.orange;
+            border-radius: 4px;
+        }
     }
 
     area := TouchArea {
+        width: 100%;
+        height: 100%;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 root.seek(area.mouse-x / area.width);
@@ -56,22 +65,31 @@ export component SeekBar inherits Rectangle {
 
 export component VolumeBar inherits Rectangle {
     in property <float> volume;
+    in property <bool> stretch: false;
     callback set-volume(float);
-    width: 88px;
-    height: 8px;
-    background: #3a3a3a;
-    border-radius: 4px;
+    horizontal-stretch: root.stretch ? 1 : 0;
+    min-width: 72px;
+    preferred-width: 88px;
+    height: 22px;
 
     Rectangle {
-        width: parent.width * max(0, min(1, root.volume));
-        height: 100%;
-        background: Theme.orange;
+        y: (parent.height - 8px) / 2;
+        width: 100%;
+        height: 8px;
+        background: #3a3a3a;
         border-radius: 4px;
+
+        Rectangle {
+            width: parent.width * max(0, min(1, root.volume));
+            height: 100%;
+            background: Theme.orange;
+            border-radius: 4px;
+        }
     }
 
     area := TouchArea {
-        y: -8px;
-        height: parent.height + 16px;
+        width: 100%;
+        height: 100%;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 root.set-volume(area.mouse-x / area.width);
@@ -81,35 +99,36 @@ export component VolumeBar inherits Rectangle {
 }
 
 component ModeChip inherits Rectangle {
-    in property <string> label;
+    in property <string> glyph;
+    in property <bool> active;
     callback clicked();
-    height: 22px;
-    border-radius: 4px;
-    background: touch.pressed ? Theme.orange : Theme.raised;
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    background: root.active ? Theme.orange : Theme.raised;
 
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        alignment: center;
-        Text {
-            text: root.label;
-            color: Theme.text;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.glyph;
+        color: root.active ? #1b1b1b : Theme.muted;
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 
-    touch := TouchArea {
+    TouchArea {
         clicked => { root.clicked(); }
     }
 }
 
 export component ModeSwitch inherits HorizontalLayout {
+    in property <int> mode;
     callback set-mode(int);
-    spacing: 4px;
+    spacing: 3px;
     alignment: center;
 
-    ModeChip { label: "мини"; clicked => { root.set-mode(0); } }
-    ModeChip { label: "сред"; clicked => { root.set-mode(1); } }
-    ModeChip { label: "боль"; clicked => { root.set-mode(2); } }
+    ModeChip { glyph: "–"; active: root.mode == 0; clicked => { root.set-mode(0); } }
+    ModeChip { glyph: "☰"; active: root.mode == 1; clicked => { root.set-mode(1); } }
+    ModeChip { glyph: "▦"; active: root.mode == 2; clicked => { root.set-mode(2); } }
 }

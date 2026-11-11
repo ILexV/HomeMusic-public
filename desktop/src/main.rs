@@ -1,9 +1,10 @@
 mod navidrome;
 mod player;
+mod window_place;
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use player::SilentPlayer;
 use slint::ComponentHandle;
@@ -24,6 +25,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_albums(slint::ModelRc::from(Rc::new(demo_albums())));
     push_playback(&ui, &player.borrow().state);
     resize(&ui, 0);
+    if let Some(place) = window_place::load() {
+        ui.window().set_position(slint::LogicalPosition::new(place.x, place.y));
+    }
 
     let ui_play = ui.as_weak();
     let player_play = player.clone();
@@ -80,19 +84,58 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let ui_tick = ui.as_weak();
     let player_tick = player.clone();
+    let place_watch = Rc::new(RefCell::new(PlaceWatch { started: Instant::now(), last: None }));
+    let watch_tick = place_watch.clone();
     let timer = slint::Timer::default();
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(200), move || {
         let mut player = player_tick.borrow_mut();
         let was_playing = player.state.playing;
         player.tick(0.2);
-        if was_playing {
-            if let Some(ui) = ui_tick.upgrade() {
+        if let Some(ui) = ui_tick.upgrade() {
+            if was_playing {
                 push_playback(&ui, &player.state);
             }
+            remember_place(&ui, &mut watch_tick.borrow_mut());
         }
     });
 
+    let ui_close = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = ui_close.upgrade() {
+            save_place(&ui);
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+
     ui.run()
+}
+
+struct PlaceWatch {
+    started: Instant,
+    last: Option<(i32, i32)>,
+}
+
+fn remember_place(ui: &AppWindow, watch: &mut PlaceWatch) {
+    // The first moments report 0,0 before the window manager applies the restored position.
+    if watch.started.elapsed() < Duration::from_millis(700) {
+        return;
+    }
+    let pos = ui.window().position();
+    let key = (pos.x, pos.y);
+    if watch.last == Some(key) || (key == (0, 0) && watch.last.is_none()) {
+        return;
+    }
+    watch.last = Some(key);
+    save_place(ui);
+}
+
+fn save_place(ui: &AppWindow) {
+    let scale = ui.window().scale_factor();
+    if scale <= 0.0 {
+        return;
+    }
+    let pos = ui.window().position().to_logical(scale);
+    window_place::save(window_place::Place { x: pos.x, y: pos.y });
 }
 
 fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
