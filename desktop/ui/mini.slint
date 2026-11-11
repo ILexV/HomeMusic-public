@@ -2,6 +2,8 @@ import { IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
+    in property <string> track-artist;
+    in property <string> error;
     in property <string> time-label;
     in property <string> duration-label;
     in property <float> position;
@@ -29,6 +31,14 @@ export component Mini inherits Rectangle {
             spacing: 8px;
             alignment: center;
 
+            if root.track-artist != "" : Text {
+                text: root.track-artist;
+                color: Theme.muted;
+                font-size: 12px;
+                overflow: elide;
+                vertical-alignment: center;
+                max-width: 150px;
+            }
             Text {
                 text: root.track-title;
                 color: Theme.text;
@@ -67,6 +77,13 @@ export component Mini inherits Rectangle {
             IconButton { glyph: root.playing ? "⏸" : "▶"; clicked => { root.play-pause(); } }
             IconButton { glyph: "⏹"; clicked => { root.stop(); } }
             IconButton { glyph: "⏭"; clicked => { root.next(); } }
+        }
+
+        if root.error != "" : Text {
+            text: root.error;
+            color: Theme.orange;
+            font-size: 12px;
+            overflow: elide;
         }
     }
 }

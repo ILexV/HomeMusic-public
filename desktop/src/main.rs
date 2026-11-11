@@ -17,21 +17,44 @@ fn main() -> Result<(), slint::PlatformError> {
         null_audio: false,
     })));
     let config = navidrome::ServerConfig::load();
-    let config_status = Rc::new(config.status_line());
-
-    ui.set_track_artist(String::new().into());
-    ui.set_track_album(String::new().into());
-    if let Some(target) = std::env::args().nth(1) {
+    let library_status = if let Some(target) = std::env::args().nth(1) {
         let (title, meta) = track_label(&target);
         ui.set_track_title(title.into());
+        ui.set_track_artist(String::new().into());
+        ui.set_track_album(String::new().into());
         ui.set_track_meta(meta.into());
         if let Err(err) = player.borrow_mut().load(&target) {
-            ui.set_status(err.into());
+            ui.set_error(err.clone().into());
+            err
+        } else {
+            config.status_line()
         }
     } else {
-        ui.set_track_title("Нет трека".into());
-        ui.set_track_meta(String::new().into());
-    }
+        match navidrome::first_track(&config) {
+            Ok(track) => {
+                ui.set_track_title(track.title.into());
+                ui.set_track_artist(track.artist.into());
+                ui.set_track_album(track.album.into());
+                ui.set_track_meta(track.meta.into());
+                match player.borrow_mut().load(&track.stream_url) {
+                    Ok(()) => "Navidrome подключён".into(),
+                    Err(err) => {
+                        ui.set_error(err.clone().into());
+                        err
+                    }
+                }
+            }
+            Err(err) => {
+                ui.set_track_title("Нет трека".into());
+                ui.set_track_artist(String::new().into());
+                ui.set_track_album(String::new().into());
+                ui.set_track_meta(String::new().into());
+                ui.set_error(err.clone().into());
+                err
+            }
+        }
+    };
+    let config_status = Rc::new(library_status);
     ui.set_status(player.borrow().status_or(&config_status).into());
     ui.set_queue(slint::ModelRc::from(Rc::new(demo_queue())));
     ui.set_albums(slint::ModelRc::from(Rc::new(demo_albums())));

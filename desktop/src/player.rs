@@ -32,6 +32,8 @@ impl Player {
             init.set_option("vid", "no")?;
             init.set_option("audio-display", "no")?;
             init.set_option("ytdl", "no")?;
+            // Keep the stream URL, which carries the Subsonic token, out of the log.
+            init.set_option("msg-level", "all=error")?;
             if options.null_audio {
                 init.set_option("ao", "null")?;
             }
@@ -306,6 +308,27 @@ mod tests {
             let half = state.duration_s * 0.5;
             wait_until(&player, |state| (state.position_s - half).abs() < 0.4);
         }
+    }
+
+    #[test]
+    #[ignore = "needs desktop/config.toml and a running Navidrome"]
+    fn streams_one_navidrome_track() {
+        let config = crate::navidrome::ServerConfig::load();
+        let track = crate::navidrome::first_track(&config).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!track.title.is_empty(), "empty title");
+        assert!(
+            !track.stream_url.contains(&config.password),
+            "stream url contains the password"
+        );
+        let mut player = open_null();
+        player
+            .load(&track.stream_url)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let state = wait_until(&player, |state| {
+            state.duration_s > 1.0 && state.position_s > 0.1 && state.playing
+        });
+        assert!(state.position_s < state.duration_s);
+        eprintln!("playing: {} — {}", track.artist, track.title);
     }
 
     #[test]
