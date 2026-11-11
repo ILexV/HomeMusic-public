@@ -1,4 +1,4 @@
-//! Where the window was last left. Also the mode, the size, and the volume.
+//! Where the window was last left. Also the mode, the size, the volume, and the equalizer.
 //! A file that only has `x` and `y` still loads.
 
 use std::path::PathBuf;
@@ -11,6 +11,10 @@ pub struct Place {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub volume: Option<f32>,
+    pub eq_on: Option<bool>,
+    pub eq_open: Option<bool>,
+    pub preamp: Option<f32>,
+    pub bands: Option<[f32; 10]>,
 }
 
 pub fn path() -> PathBuf {
@@ -36,6 +40,26 @@ pub fn save(place: Place) {
     if let Some(volume) = place.volume {
         body.push_str(&format!("volume = {volume}\n"));
     }
+    if let Some(eq_on) = place.eq_on {
+        body.push_str(&format!("eq = {}\n", if eq_on { "true" } else { "false" }));
+    }
+    if let Some(eq_open) = place.eq_open {
+        body.push_str(&format!(
+            "eq-open = {}\n",
+            if eq_open { "true" } else { "false" }
+        ));
+    }
+    if let Some(preamp) = place.preamp {
+        body.push_str(&format!("preamp = {preamp}\n"));
+    }
+    if let Some(bands) = place.bands {
+        let text = bands
+            .iter()
+            .map(|gain| format!("{gain:.1}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        body.push_str(&format!("bands = {text}\n"));
+    }
     let _ = std::fs::write(path(), body);
 }
 
@@ -46,6 +70,10 @@ pub fn parse(text: &str) -> Option<Place> {
     let mut width = None;
     let mut height = None;
     let mut volume = None;
+    let mut eq_on = None;
+    let mut eq_open = None;
+    let mut preamp = None;
+    let mut bands = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -74,6 +102,10 @@ pub fn parse(text: &str) -> Option<Place> {
                     }
                 }
             }
+            "eq" => eq_on = parse_bool(value),
+            "eq-open" => eq_open = parse_bool(value),
+            "preamp" => preamp = parse_f32(value).map(crate::eq::clamp_db),
+            "bands" => bands = parse_bands(value),
             _ => {}
         }
     }
@@ -84,6 +116,10 @@ pub fn parse(text: &str) -> Option<Place> {
         width,
         height,
         volume,
+        eq_on,
+        eq_open,
+        preamp,
+        bands,
     })
 }
 
@@ -112,6 +148,27 @@ fn positive(value: &str) -> Option<f32> {
     (parsed > 0.0).then_some(parsed)
 }
 
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_bands(value: &str) -> Option<[f32; 10]> {
+    let mut bands = [0.0; 10];
+    let mut count = 0;
+    for part in value.split(',') {
+        if count >= bands.len() {
+            return None;
+        }
+        bands[count] = crate::eq::clamp_db(parse_f32(part.trim())?);
+        count += 1;
+    }
+    (count == bands.len()).then_some(bands)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +181,10 @@ mod tests {
             width: None,
             height: None,
             volume: None,
+            eq_on: None,
+            eq_open: None,
+            preamp: None,
+            bands: None,
         }
     }
 
@@ -167,5 +228,19 @@ mod tests {
         assert_eq!(place.volume, None);
         assert_eq!(place.width, Some(10.0));
         assert_eq!(usable_size(place.width, place.height), None);
+    }
+
+    #[test]
+    fn parses_the_equalizer_and_clamps_a_wild_band() {
+        let place = parse(
+            "x = 1\ny = 2\neq = true\neq-open = false\npreamp = -2.5\nbands = 0,0,0,0,0,6,0,0,0,40\n",
+        )
+        .unwrap();
+        assert_eq!(place.eq_on, Some(true));
+        assert_eq!(place.eq_open, Some(false));
+        assert_eq!(place.preamp, Some(-2.5));
+        let bands = place.bands.unwrap();
+        assert_eq!(bands[5], 6.0);
+        assert_eq!(bands[9], 12.0);
     }
 }

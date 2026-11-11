@@ -1,4 +1,4 @@
-import { IconButton, ModeSwitch, SearchField, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { EqButton, IconButton, ModeSwitch, SearchField, SeekBar, Theme, VolumeBar } from "theme.slint";
 import { AlbumItem, ArtistItem, QueueItem } from "types.slint";
 
 export component Large inherits Rectangle {
@@ -17,6 +17,7 @@ export component Large inherits Rectangle {
     in property <[float]> wave;
     in property <bool> playing;
     in property <int> mode;
+    in property <bool> eq-on;
     in property <[QueueItem]> queue;
     in property <string> queue-title;
     in property <string> queue-total;
@@ -31,6 +32,7 @@ export component Large inherits Rectangle {
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
+    callback toggle-eq();
     callback search-edited(string);
     callback pick-artist(int);
     callback open-album(int);
@@ -252,6 +254,7 @@ export component Large inherits Rectangle {
                         font-size: 12px;
                         vertical-alignment: center;
                     }
+                    EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
                     Text { text: "🔊"; vertical-alignment: center; }
                     VolumeBar {
                         volume: root.volume;

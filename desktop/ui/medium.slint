@@ -1,4 +1,4 @@
-import { IconButton, ModeSwitch, SearchField, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { EqButton, IconButton, ModeSwitch, SearchField, SeekBar, Theme, VolumeBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
 export component Medium inherits Rectangle {
@@ -17,6 +17,7 @@ export component Medium inherits Rectangle {
     in property <[float]> wave;
     in property <bool> playing;
     in property <int> mode;
+    in property <bool> eq-on;
     in property <[QueueItem]> queue;
     in property <string> queue-title;
     in property <string> queue-total;
@@ -30,6 +31,7 @@ export component Medium inherits Rectangle {
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
+    callback toggle-eq();
 
     background: Theme.bg;
 
@@ -94,6 +96,7 @@ export component Medium inherits Rectangle {
                         }
                         IconButton { glyph: "⏹"; clicked => { root.stop(); } }
                         IconButton { glyph: "⏭"; clicked => { root.next(); } }
+                        EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
                     }
                 }
             }

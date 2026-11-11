@@ -4,6 +4,8 @@ use std::ffi::c_char;
 
 use libmpv2::Mpv;
 
+use crate::eq::{self, Settings};
+
 #[derive(Clone, Debug)]
 pub struct PlaybackState {
     pub playing: bool,
@@ -21,6 +23,9 @@ pub struct PlayerOptions {
 pub struct Player {
     mpv: Option<Mpv>,
     volume: f32,
+    eq: Settings,
+    /// True after a filter graph was installed, so a later flat curve can clear it.
+    filter_active: bool,
     notice: Option<String>,
     /// Set by stop and by a natural end that was already handled.
     /// A following end-of-file event must not advance the queue.
@@ -47,6 +52,8 @@ impl Player {
                 let player = Self {
                     mpv: Some(mpv),
                     volume: 0.8,
+                    eq: Settings::default(),
+                    filter_active: false,
                     notice: None,
                     user_stopped: false,
                 };
@@ -56,6 +63,8 @@ impl Player {
             Err(err) => Self {
                 mpv: None,
                 volume: 0.8,
+                eq: Settings::default(),
+                filter_active: false,
                 notice: Some(open_error(&err)),
                 user_stopped: false,
             },
@@ -93,6 +102,7 @@ impl Player {
             let _ = mpv.set_property("pause", false);
         }
         self.notice = None;
+        self.apply_eq();
         Ok(())
     }
 
@@ -184,6 +194,40 @@ impl Player {
         self.apply_volume();
     }
 
+    pub fn eq(&self) -> Settings {
+        self.eq
+    }
+
+    pub fn restore_eq(&mut self, settings: Settings) {
+        self.eq.enabled = settings.enabled;
+        self.eq.preamp = eq::clamp_db(settings.preamp);
+        self.eq.bands = settings.bands.map(eq::clamp_db);
+        self.apply_eq();
+    }
+
+    pub fn set_eq_enabled(&mut self, enabled: bool) {
+        self.eq.enabled = enabled;
+        self.apply_eq();
+    }
+
+    pub fn set_preamp(&mut self, db: f32) {
+        self.eq.preamp = eq::clamp_db(db);
+        self.apply_eq();
+    }
+
+    pub fn set_band(&mut self, index: usize, db: f32) {
+        if let Some(band) = self.eq.bands.get_mut(index) {
+            *band = eq::clamp_db(db);
+            self.apply_eq();
+        }
+    }
+
+    pub fn reset_eq(&mut self) {
+        self.eq.preamp = 0.0;
+        self.eq.bands = [0.0; 10];
+        self.apply_eq();
+    }
+
     pub fn snapshot(&self) -> PlaybackState {
         let Some(mpv) = self.mpv.as_ref() else {
             return PlaybackState {
@@ -235,6 +279,35 @@ impl Player {
             Some(value) => (value / 100.0).clamp(0.0, 1.0) as f32,
             None => self.volume,
         }
+    }
+
+    fn apply_eq(&mut self) {
+        let Some(mpv) = self.mpv.as_ref() else {
+            return;
+        };
+        match eq::chain(self.eq) {
+            Some(filter) => {
+                if mpv.command("af", &["set", &filter]).is_ok()
+                    || mpv.set_property("af", filter.as_str()).is_ok()
+                {
+                    self.filter_active = true;
+                }
+            }
+            None if self.filter_active => {
+                if mpv.command("af", &["clr"]).is_ok() || mpv.set_property("af", "").is_ok() {
+                    self.filter_active = false;
+                }
+            }
+            None => {}
+        }
+    }
+
+    #[cfg(test)]
+    fn audio_filter(&self) -> String {
+        self.mpv
+            .as_ref()
+            .and_then(|mpv| mpv.get_property::<String>("af").ok())
+            .unwrap_or_default()
     }
 }
 
@@ -343,6 +416,26 @@ mod tests {
         player.stop();
         let stopped = wait_until(player, |state| !state.playing && state.position_s < 0.05);
         let _ = stopped;
+    }
+
+    #[test]
+    fn a_raised_band_reaches_mpv_and_a_flat_curve_clears_it() {
+        let path = std::env::temp_dir().join("home music eq.wav");
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        let _ = wait_until(&player, |state| state.playing && state.duration_s > 0.4);
+        player.set_eq_enabled(true);
+        player.set_band(5, 6.0);
+        let filtered = player.audio_filter();
+        assert!(
+            filtered.contains("equalizer") && filtered.contains("g=6"),
+            "{filtered}"
+        );
+        player.reset_eq();
+        let cleared = player.audio_filter();
+        assert!(cleared.is_empty() || !cleared.contains("g=6"), "{cleared}");
+        player.stop();
     }
 
     #[test]

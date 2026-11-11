@@ -1,4 +1,4 @@
-import { IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { EqButton, IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
@@ -12,12 +12,14 @@ export component Mini inherits Rectangle {
     in property <[float]> wave;
     in property <bool> playing;
     in property <int> mode;
+    in property <bool> eq-on;
     callback play-pause();
     callback stop();
     callback next();
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
+    callback toggle-eq();
 
     background: Theme.bg;
 
@@ -79,6 +81,7 @@ export component Mini inherits Rectangle {
             IconButton { glyph: root.playing ? "⏸" : "▶"; clicked => { root.play-pause(); } }
             IconButton { glyph: "⏹"; clicked => { root.stop(); } }
             IconButton { glyph: "⏭"; clicked => { root.next(); } }
+            EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
         }
 
         if root.error != "" : Text {

@@ -180,6 +180,164 @@ component ModeChip inherits Rectangle {
     }
 }
 
+export component EqButton inherits Rectangle {
+    in property <string> label: "EQ";
+    in property <bool> active;
+    callback clicked();
+    height: 22px;
+    border-radius: 3px;
+    background: root.active ? #1b1b1b : transparent;
+    border-width: 1px;
+    border-color: root.active ? Theme.orange : Theme.dim;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.active ? Theme.orange : Theme.text;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component EqSlider inherits Rectangle {
+    in property <float> gain;
+    in property <string> label;
+    callback set-gain(float);
+    horizontal-stretch: 1;
+    min-width: 24px;
+    property <bool> dragging: false;
+    property <float> shown: max(-12, min(12, root.gain));
+    // 0 is the top (+12 dB). 1 is the bottom (-12 dB).
+    property <float> thumb: (12 - root.shown) / 24;
+
+    VerticalLayout {
+        spacing: 2px;
+        alignment: center;
+
+        track := Rectangle {
+            height: 72px;
+            width: 100%;
+
+            Rectangle {
+                x: (parent.width - 4px) / 2;
+                width: 4px;
+                height: 100%;
+                background: #3a3a3a;
+                border-radius: 2px;
+            }
+            Rectangle {
+                y: parent.height / 2;
+                width: 100%;
+                height: 1px;
+                background: Theme.dim;
+            }
+            if root.shown > 0 : Rectangle {
+                x: (parent.width - 4px) / 2;
+                width: 4px;
+                y: parent.height * root.thumb;
+                height: parent.height / 2 - self.y;
+                background: Theme.orange;
+            }
+            if root.shown < 0 : Rectangle {
+                x: (parent.width - 4px) / 2;
+                width: 4px;
+                y: parent.height / 2;
+                height: parent.height * root.thumb - parent.height / 2;
+                background: Theme.orange;
+            }
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: Theme.orange;
+                x: (parent.width - self.width) / 2;
+                y: parent.height * root.thumb - self.height / 2;
+            }
+
+            area := TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.dragging = true;
+                        root.set-gain(root.db-at(area.mouse-y, area.height));
+                    } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        root.dragging = false;
+                    } else if (event.kind == PointerEventKind.move && root.dragging) {
+                        root.set-gain(root.db-at(area.mouse-y, area.height));
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.muted;
+            font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    pure function db-at(y: length, span: length) -> float {
+        let ratio = max(0, min(1, y / max(span, 1px)));
+        12 - ratio * 24
+    }
+}
+
+export component Equalizer inherits Rectangle {
+    in property <bool> enabled;
+    in property <float> preamp;
+    in property <[float]> bands;
+    callback set-enabled(bool);
+    callback set-preamp(float);
+    callback set-band(int, float);
+    callback reset();
+    height: 132px;
+    background: Theme.panel;
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: center;
+            EqButton {
+                label: root.enabled ? "вкл" : "выкл";
+                active: root.enabled;
+                clicked => { root.set-enabled(!root.enabled); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            EqButton {
+                label: "сброс";
+                clicked => { root.reset(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 2px;
+            alignment: center;
+            EqSlider {
+                label: "Пр";
+                gain: root.preamp;
+                set-gain(value) => { root.set-preamp(value); }
+            }
+            for value[index] in root.bands : EqSlider {
+                label: index == 0 ? "31" : index == 1 ? "62" : index == 2 ? "125" : index == 3 ? "250" : index == 4 ? "500" : index == 5 ? "1k" : index == 6 ? "2k" : index == 7 ? "4k" : index == 8 ? "8k" : "16k";
+                gain: value;
+                set-gain(next) => { root.set-band(index, next); }
+            }
+        }
+    }
+}
+
 export component ModeSwitch inherits HorizontalLayout {
     in property <int> mode;
     callback set-mode(int);

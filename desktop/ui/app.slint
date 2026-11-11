@@ -1,7 +1,7 @@
 import { Large } from "large.slint";
 import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
-import { Theme, TitleButton } from "theme.slint";
+import { Equalizer, Theme, TitleButton } from "theme.slint";
 
 import { AlbumItem, ArtistItem, QueueItem } from "types.slint";
 
@@ -32,6 +32,10 @@ export component AppWindow inherits Window {
     in-out property <float> duration;
     in-out property <float> volume;
     in-out property <[float]> wave;
+    in-out property <bool> eq-on;
+    in-out property <bool> eq-open;
+    in-out property <float> preamp;
+    in-out property <[float]> bands;
     in-out property <bool> playing;
     in-out property <[QueueItem]> queue;
     in-out property <string> queue-title: "Очередь";
@@ -48,6 +52,11 @@ export component AppWindow inherits Window {
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
+    callback toggle-eq();
+    callback set-eq-enabled(bool);
+    callback set-preamp(float);
+    callback set-band(int, float);
+    callback reset-eq();
     callback search-edited(string);
     callback pick-artist(int);
     callback open-album(int);
@@ -123,6 +132,8 @@ export component AppWindow inherits Window {
                         seek(ratio) => { root.seek(ratio); }
                         set-volume(value) => { root.set-volume(value); }
                         set-mode(mode) => { root.set-mode(mode); }
+                        eq-on: root.eq-on;
+                        toggle-eq => { root.toggle-eq(); }
                     }
                     if root.mode == Mode.medium : Medium {
                         width: 100%;
@@ -155,6 +166,8 @@ export component AppWindow inherits Window {
                         set-volume(value) => { root.set-volume(value); }
                         set-mode(mode) => { root.set-mode(mode); }
                         search-edited(text) => { root.search-edited(text); }
+                        eq-on: root.eq-on;
+                        toggle-eq => { root.toggle-eq(); }
                     }
                     if root.mode == Mode.large : Large {
                         width: 100%;
@@ -191,7 +204,19 @@ export component AppWindow inherits Window {
                         search-edited(text) => { root.search-edited(text); }
                         pick-artist(index) => { root.pick-artist(index); }
                         open-album(index) => { root.open-album(index); }
+                        eq-on: root.eq-on;
+                        toggle-eq => { root.toggle-eq(); }
                     }
+                }
+
+                if root.eq-open : Equalizer {
+                    enabled: root.eq-on;
+                    preamp: root.preamp;
+                    bands: root.bands;
+                    set-enabled(on) => { root.set-eq-enabled(on); }
+                    set-preamp(value) => { root.set-preamp(value); }
+                    set-band(index, value) => { root.set-band(index, value); }
+                    reset => { root.reset-eq(); }
                 }
             }
         }

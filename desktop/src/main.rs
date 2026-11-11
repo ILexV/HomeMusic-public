@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod commands;
+mod eq;
 mod media_keys;
 mod navidrome;
 mod paths;
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use player::{Player, PlayerOptions};
 use slint::ComponentHandle;
+use slint::Model;
 
 slint::include_modules!();
 
@@ -25,9 +27,19 @@ fn main() -> Result<(), slint::PlatformError> {
         null_audio: false,
     })));
     let session = window_place::load();
-    if let Some(volume) = session.as_ref().and_then(|place| place.volume) {
-        player.borrow_mut().set_volume(volume);
+    if let Some(place) = session.as_ref() {
+        if let Some(volume) = place.volume {
+            player.borrow_mut().set_volume(volume);
+        }
+        player.borrow_mut().restore_eq(eq::Settings {
+            enabled: place.eq_on.unwrap_or(false),
+            preamp: place.preamp.unwrap_or(0.0),
+            bands: place.bands.unwrap_or([0.0; 10]),
+        });
     }
+    show_bands(&ui, &player.borrow().eq().bands);
+    ui.set_preamp(player.borrow().eq().preamp);
+    ui.set_eq_on(player.borrow().eq().enabled);
     let waves = wave::WaveHub::shared();
     let config = Rc::new(navidrome::ServerConfig::load());
     let queue = Rc::new(RefCell::new(queue::Queue::from_tracks("", Vec::new())));
@@ -140,6 +152,54 @@ fn main() -> Result<(), slint::PlatformError> {
             let player = player_volume.borrow();
             push_playback(&ui, &player.snapshot());
             ui.set_status(player.status_or(&status_volume).into());
+        }
+    });
+
+    let ui_eq = ui.as_weak();
+    ui.on_toggle_eq(move || {
+        if let Some(ui) = ui_eq.upgrade() {
+            set_eq_open(&ui, !ui.get_eq_open());
+        }
+    });
+    let ui_eq_on = ui.as_weak();
+    let player_eq_on = player.clone();
+    ui.on_set_eq_enabled(move |enabled| {
+        player_eq_on.borrow_mut().set_eq_enabled(enabled);
+        if let Some(ui) = ui_eq_on.upgrade() {
+            ui.set_eq_on(player_eq_on.borrow().eq().enabled);
+        }
+    });
+    let ui_preamp = ui.as_weak();
+    let player_preamp = player.clone();
+    ui.on_set_preamp(move |value| {
+        player_preamp.borrow_mut().set_preamp(value);
+        if let Some(ui) = ui_preamp.upgrade() {
+            ui.set_preamp(player_preamp.borrow().eq().preamp);
+        }
+    });
+    let ui_band = ui.as_weak();
+    let player_band = player.clone();
+    ui.on_set_band(move |index, value| {
+        if index < 0 {
+            return;
+        }
+        let index = index as usize;
+        player_band.borrow_mut().set_band(index, value);
+        let Some(gain) = player_band.borrow().eq().bands.get(index).copied() else {
+            return;
+        };
+        if let Some(ui) = ui_band.upgrade() {
+            set_band_row(&ui, index, gain);
+        }
+    });
+    let ui_reset = ui.as_weak();
+    let player_reset = player.clone();
+    ui.on_reset_eq(move || {
+        player_reset.borrow_mut().reset_eq();
+        if let Some(ui) = ui_reset.upgrade() {
+            let eq = player_reset.borrow().eq();
+            ui.set_preamp(eq.preamp);
+            show_bands(&ui, &eq.bands);
         }
     });
 
@@ -549,6 +609,10 @@ fn current_place(ui: &AppWindow) -> Option<window_place::Place> {
         width: Some(size.width),
         height: Some(size.height),
         volume: Some(ui.get_volume()),
+        eq_on: Some(ui.get_eq_on()),
+        eq_open: Some(ui.get_eq_open()),
+        preamp: Some(ui.get_preamp()),
+        bands: Some(bands_from_ui(ui)),
     })
 }
 
@@ -566,6 +630,16 @@ fn same_place(left: window_place::Place, right: window_place::Place) -> bool {
             (Some(lv), Some(rv)) => (lv - rv).abs() < 0.005,
             _ => false,
         }
+        && left.eq_on == right.eq_on
+        && left.eq_open == right.eq_open
+        && match (left.preamp, right.preamp) {
+            (Some(lp), Some(rp)) => (lp - rp).abs() < 0.05,
+            _ => false,
+        }
+        && match (left.bands, right.bands) {
+            (Some(lb), Some(rb)) => lb.iter().zip(rb).all(|(a, b)| (a - b).abs() < 0.05),
+            _ => false,
+        }
 }
 
 fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
@@ -574,6 +648,9 @@ fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
         .unwrap_or(0)
         .clamp(0, 2);
     ui.set_mode(mode_from_index(mode));
+    if let Some(place) = session {
+        ui.set_eq_open(place.eq_open.unwrap_or(false));
+    }
     if let Some((width, height)) =
         session.and_then(|place| window_place::usable_size(place.width, place.height))
     {
@@ -796,14 +873,72 @@ fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
     ui.set_duration_label(clock(state.duration_s).into());
 }
 
+const EQ_PANEL_HEIGHT: f32 = 132.0;
+
 fn resize(ui: &AppWindow, mode: i32) {
     // The 28px title strip sits above the layouts tuned in the earlier steps.
-    let (width, height) = match mode {
+    let (width, mut height) = match mode {
         0 => (520.0, 160.0),
         1 => (460.0, 668.0),
         _ => (1040.0, 708.0),
     };
+    if ui.get_eq_open() {
+        height += EQ_PANEL_HEIGHT;
+    }
     ui.window().set_size(slint::LogicalSize::new(width, height));
+}
+
+fn set_eq_open(ui: &AppWindow, open: bool) {
+    if ui.get_eq_open() == open {
+        return;
+    }
+    let scale = ui.window().scale_factor();
+    let size = ui.window().size().to_logical(scale);
+    ui.set_eq_open(open);
+    if scale <= 0.0 || size.height < 1.0 {
+        return;
+    }
+    let delta = if open {
+        EQ_PANEL_HEIGHT
+    } else {
+        -EQ_PANEL_HEIGHT
+    };
+    let height = (size.height + delta).clamp(80.0, 4000.0);
+    ui.window()
+        .set_size(slint::LogicalSize::new(size.width, height));
+}
+
+fn show_bands(ui: &AppWindow, bands: &[f32; 10]) {
+    let model = ui.get_bands();
+    if let Some(rows) = model.as_any().downcast_ref::<slint::VecModel<f32>>() {
+        if rows.row_count() == bands.len() {
+            for (index, gain) in bands.iter().enumerate() {
+                rows.set_row_data(index, *gain);
+            }
+            return;
+        }
+    }
+    ui.set_bands(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+        bands.to_vec(),
+    ))));
+}
+
+fn set_band_row(ui: &AppWindow, index: usize, gain: f32) {
+    let model = ui.get_bands();
+    if let Some(rows) = model.as_any().downcast_ref::<slint::VecModel<f32>>() {
+        rows.set_row_data(index, gain);
+    }
+}
+
+fn bands_from_ui(ui: &AppWindow) -> [f32; 10] {
+    let model = ui.get_bands();
+    let mut bands = [0.0; 10];
+    for (index, band) in bands.iter_mut().enumerate() {
+        if let Some(gain) = model.row_data(index) {
+            *band = eq::clamp_db(gain);
+        }
+    }
+    bands
 }
 
 fn track_label(target: &str) -> (String, String) {
