@@ -1,3 +1,5 @@
+import { LineEdit } from "std-widgets.slint";
+
 export global Theme {
     out property <color> bg: #1b1b1b;
     out property <color> panel: #242424;
@@ -6,6 +8,21 @@ export global Theme {
     out property <color> text: #f3f3f3;
     out property <color> muted: #a3a3a3;
     out property <color> dim: #6f6f6f;
+}
+
+export component SearchField inherits Rectangle {
+    in-out property <string> text;
+    callback edited(string);
+    min-height: 32px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+
+    LineEdit {
+        width: 100%;
+        placeholder-text: "Поиск";
+        text <=> root.text;
+        edited(value) => { root.edited(value); }
+    }
 }
 
 export component IconButton inherits Rectangle {

@@ -3,7 +3,7 @@ import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
 import { Theme } from "theme.slint";
 
-import { AlbumItem, QueueItem } from "types.slint";
+import { AlbumItem, ArtistItem, QueueItem } from "types.slint";
 
 export enum Mode { mini, medium, large }
 
@@ -29,15 +29,23 @@ export component AppWindow inherits Window {
     in-out property <float> volume;
     in-out property <bool> playing;
     in-out property <[QueueItem]> queue;
+    in-out property <string> queue-title: "Очередь";
+    in-out property <string> queue-total;
+    in-out property <[ArtistItem]> artists;
     in-out property <[AlbumItem]> albums;
+    in-out property <string> search;
 
     callback play-pause();
     callback stop();
     callback prev();
     callback next();
+    callback play-row(int);
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
+    callback search-edited(string);
+    callback pick-artist(int);
+    callback open-album(int);
 
     Rectangle {
         width: 100%;
@@ -84,13 +92,18 @@ export component AppWindow inherits Window {
             playing: root.playing;
             mode: root.mode-index;
             queue: root.queue;
+            queue-title: root.queue-title;
+            queue-total: root.queue-total;
+            search <=> root.search;
             play-pause => { root.play-pause(); }
             stop => { root.stop(); }
             prev => { root.prev(); }
             next => { root.next(); }
+            play-row(index) => { root.play-row(index); }
             seek(ratio) => { root.seek(ratio); }
             set-volume(value) => { root.set-volume(value); }
             set-mode(mode) => { root.set-mode(mode); }
+            search-edited(text) => { root.search-edited(text); }
         }
         if root.mode == Mode.large : Large {
             width: 100%;
@@ -108,14 +121,24 @@ export component AppWindow inherits Window {
             playing: root.playing;
             mode: root.mode-index;
             queue: root.queue;
+            queue-title: root.queue-title;
+            queue-total: root.queue-total;
+            artists: root.artists;
             albums: root.albums;
+            search <=> root.search;
+            cover: root.cover;
+            has-cover: root.has-cover;
             play-pause => { root.play-pause(); }
             stop => { root.stop(); }
             prev => { root.prev(); }
             next => { root.next(); }
+            play-row(index) => { root.play-row(index); }
             seek(ratio) => { root.seek(ratio); }
             set-volume(value) => { root.set-volume(value); }
             set-mode(mode) => { root.set-mode(mode); }
+            search-edited(text) => { root.search-edited(text); }
+            pick-artist(index) => { root.pick-artist(index); }
+            open-album(index) => { root.open-album(index); }
         }
     }
 }

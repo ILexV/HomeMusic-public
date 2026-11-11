@@ -1,4 +1,6 @@
 export struct QueueItem {
+    // `source` is the index in the real queue. A search hides rows without renumbering them.
+    source: int,
     number: string,
     title: string,
     meta: string,
@@ -7,6 +9,13 @@ export struct QueueItem {
 }
 
 export struct AlbumItem {
+    id: string,
     title: string,
     artist: string,
+}
+
+export struct ArtistItem {
+    id: string,
+    name: string,
+    current: bool,
 }

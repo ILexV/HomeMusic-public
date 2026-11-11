@@ -22,6 +22,9 @@ pub struct Player {
     mpv: Option<Mpv>,
     volume: f32,
     notice: Option<String>,
+    /// Set by stop and by a natural end that was already handled.
+    /// A following end-of-file event must not advance the queue.
+    user_stopped: bool,
 }
 
 impl Player {
@@ -45,6 +48,7 @@ impl Player {
                     mpv: Some(mpv),
                     volume: 0.8,
                     notice: None,
+                    user_stopped: false,
                 };
                 player.apply_volume();
                 player
@@ -53,6 +57,7 @@ impl Player {
                 mpv: None,
                 volume: 0.8,
                 notice: Some(open_error(&err)),
+                user_stopped: false,
             },
         }
     }
@@ -63,23 +68,39 @@ impl Player {
     }
 
     pub fn load(&mut self, target: &str) -> Result<(), String> {
-        let Some(mpv) = self.mpv.as_ref() else {
+        if self.mpv.is_none() {
             let err = self
                 .notice
                 .clone()
                 .unwrap_or_else(|| "Звук: libmpv недоступен".into());
             self.notice = Some(err.clone());
             return Err(err);
+        }
+        // Drop the previous file's end event before the new file starts.
+        self.discard_events();
+        self.user_stopped = false;
+        let loaded = {
+            let mpv = self.mpv.as_ref().unwrap();
+            let _ = mpv.set_property("pause", false);
+            mpv.command("loadfile", &[target, "replace"])
         };
-        let _ = mpv.set_property("pause", false);
-        if let Err(err) = mpv.command("loadfile", &[target, "replace"]) {
+        if let Err(err) = loaded {
             let text = format!("Не удалось открыть файл ({err})");
             self.notice = Some(text.clone());
             return Err(text);
         }
-        let _ = mpv.set_property("pause", false);
+        if let Some(mpv) = self.mpv.as_ref() {
+            let _ = mpv.set_property("pause", false);
+        }
         self.notice = None;
         Ok(())
+    }
+
+    pub fn is_idle(&self) -> bool {
+        let Some(mpv) = self.mpv.as_ref() else {
+            return true;
+        };
+        flag(mpv, "idle-active").unwrap_or(true)
     }
 
     pub fn toggle(&mut self) {
@@ -95,11 +116,52 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        // Mark this before the command, so an end event already in the queue is not a new track.
+        self.user_stopped = true;
         let Some(mpv) = self.mpv.as_ref() else {
             return;
         };
         let _ = mpv.command("stop", &[]);
         let _ = mpv.set_property("pause", true);
+    }
+
+    /// Drain the event queue. True once when the file played through to the end.
+    /// Stop, quit, and an end that arrives together with them do not count.
+    pub fn take_natural_end(&mut self) -> bool {
+        let mut eof = false;
+        let mut user_stopped = self.user_stopped;
+        if let Some(mpv) = self.mpv.as_ref() {
+            for _ in 0..64 {
+                match mpv.wait_event(0.0) {
+                    None => break,
+                    Some(Ok(event)) => match event {
+                        libmpv2::events::Event::StartFile | libmpv2::events::Event::FileLoaded => {
+                            user_stopped = false;
+                            eof = false;
+                        }
+                        libmpv2::events::Event::EndFile(reason) => {
+                            let stopped = reason == libmpv2::mpv_end_file_reason::Stop
+                                || reason == libmpv2::mpv_end_file_reason::Quit;
+                            if stopped {
+                                user_stopped = true;
+                                eof = false;
+                            } else if reason == libmpv2::mpv_end_file_reason::Eof && !user_stopped {
+                                eof = true;
+                            }
+                        }
+                        _ => {}
+                    },
+                    Some(Err(_)) => {}
+                }
+            }
+        } else {
+            return false;
+        }
+        if eof {
+            user_stopped = true;
+        }
+        self.user_stopped = user_stopped;
+        eof
     }
 
     pub fn seek_ratio(&mut self, ratio: f32) {
@@ -148,6 +210,17 @@ impl Player {
             position_s,
             duration_s,
             volume: self.volume_now(mpv),
+        }
+    }
+
+    fn discard_events(&self) {
+        let Some(mpv) = self.mpv.as_ref() else {
+            return;
+        };
+        for _ in 0..64 {
+            if mpv.wait_event(0.0).is_none() {
+                break;
+            }
         }
     }
 
@@ -343,6 +416,81 @@ mod tests {
         }
         let (artist, title, len) = cover.expect("no cover in the sampled tracks");
         eprintln!("cover: {artist} — {title} ({len} bytes)");
+    }
+
+    #[test]
+    #[ignore = "needs desktop/config.toml and a running Navidrome"]
+    fn streams_the_first_queued_track() {
+        let config = crate::navidrome::ServerConfig::load();
+        let library = crate::navidrome::load_queue(&config).unwrap_or_else(|err| panic!("{err}"));
+        assert!(library.tracks.len() >= 2, "count {}", library.tracks.len());
+        let total: u64 = library
+            .tracks
+            .iter()
+            .map(|track| u64::from(track.duration_s))
+            .sum();
+        eprintln!(
+            "queue: {} ({} tracks, {total}s)",
+            library.name,
+            library.tracks.len()
+        );
+        let url = crate::navidrome::stream_url(&config, &library.tracks[0].id);
+        assert!(
+            !url.contains(&config.password),
+            "stream url contains the password"
+        );
+        let mut player = open_null();
+        player.load(&url).unwrap_or_else(|err| {
+            let safe = if err.contains("http") || err.contains(&config.password) {
+                "Не удалось открыть поток".to_string()
+            } else {
+                err
+            };
+            panic!("{safe}");
+        });
+        let state = wait_until(&player, |state| {
+            state.duration_s > 1.0 && state.position_s > 0.1 && state.playing
+        });
+        assert!(state.position_s < state.duration_s);
+    }
+
+    #[test]
+    fn natural_end_is_reported_once() {
+        let path = std::env::temp_dir().join("home music end.wav");
+        std::fs::write(&path, tone_wav(0.4)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        let start = Instant::now();
+        let mut saw = false;
+        while start.elapsed() < Duration::from_secs(4) {
+            if player.take_natural_end() {
+                saw = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(saw, "eof was not reported");
+        assert!(!player.take_natural_end());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!player.take_natural_end());
+    }
+
+    #[test]
+    fn stop_is_not_a_natural_end() {
+        let path = std::env::temp_dir().join("home music stop.wav");
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&player, |state| state.playing && state.position_s > 0.05);
+        player.stop();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(800) {
+            assert!(
+                !player.take_natural_end(),
+                "stop was treated as the end of the file"
+            );
+            std::thread::sleep(Duration::from_millis(40));
+        }
     }
 
     #[test]

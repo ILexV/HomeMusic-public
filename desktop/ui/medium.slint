@@ -1,4 +1,4 @@
-import { IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { IconButton, ModeSwitch, SearchField, SeekBar, Theme, VolumeBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
 export component Medium inherits Rectangle {
@@ -17,10 +17,15 @@ export component Medium inherits Rectangle {
     in property <bool> playing;
     in property <int> mode;
     in property <[QueueItem]> queue;
+    in property <string> queue-title;
+    in property <string> queue-total;
+    in-out property <string> search;
     callback play-pause();
     callback stop();
     callback prev();
     callback next();
+    callback play-row(int);
+    callback search-edited(string);
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
@@ -122,21 +127,16 @@ export component Medium inherits Rectangle {
             spacing: 6px;
             vertical-stretch: 1;
 
-            Rectangle {
-                height: 28px;
-                background: Theme.raised;
-                border-radius: 4px;
-                HorizontalLayout {
-                    padding-left: 10px;
-                    alignment: center;
-                    Text { text: "Поиск"; color: Theme.dim; font-size: 12px; }
-                }
+            SearchField {
+                text <=> root.search;
+                edited(text) => { root.search-edited(text); }
             }
 
             Text {
-                text: "Очередь";
+                text: root.queue-title;
                 color: Theme.orange;
                 font-size: 13px;
+                overflow: elide;
             }
             Flickable {
                 vertical-stretch: 1;
@@ -153,7 +153,7 @@ export component Medium inherits Rectangle {
                                 text: item.number;
                                 color: item.current ? #1b1b1b : Theme.muted;
                                 font-size: 12px;
-                                min-width: 22px;
+                                min-width: 28px;
                             }
                             Text {
                                 text: item.title;
@@ -168,8 +168,20 @@ export component Medium inherits Rectangle {
                                 font-size: 12px;
                             }
                         }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.play-row(item.source); }
+                        }
                     }
                 }
+            }
+            Text {
+                text: root.queue-total;
+                color: Theme.dim;
+                font-size: 12px;
+                horizontal-alignment: right;
+                width: 100%;
             }
         }
 

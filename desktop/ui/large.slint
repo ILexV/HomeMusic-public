@@ -1,11 +1,13 @@
-import { IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
-import { AlbumItem, QueueItem } from "types.slint";
+import { IconButton, ModeSwitch, SearchField, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { AlbumItem, ArtistItem, QueueItem } from "types.slint";
 
 export component Large inherits Rectangle {
     in property <string> track-title;
     in property <string> track-artist;
     in property <string> track-album;
     in property <string> track-meta;
+    in property <image> cover;
+    in property <bool> has-cover;
     in property <string> time-label;
     in property <string> duration-label;
     in property <string> status;
@@ -15,14 +17,22 @@ export component Large inherits Rectangle {
     in property <bool> playing;
     in property <int> mode;
     in property <[QueueItem]> queue;
+    in property <string> queue-title;
+    in property <string> queue-total;
+    in property <[ArtistItem]> artists;
     in property <[AlbumItem]> albums;
+    in-out property <string> search;
     callback play-pause();
     callback stop();
     callback prev();
     callback next();
+    callback play-row(int);
     callback seek(float);
     callback set-volume(float);
     callback set-mode(int);
+    callback search-edited(string);
+    callback pick-artist(int);
+    callback open-album(int);
 
     background: Theme.bg;
 
@@ -37,11 +47,11 @@ export component Large inherits Rectangle {
                 Rectangle {
                     height: 160px;
                     background: Theme.raised;
-                    Text {
-                        text: "обложка";
-                        color: Theme.dim;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    if root.has-cover : Image {
+                        source: root.cover;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: ImageFit.cover;
                     }
                 }
                 Text { text: root.track-title; color: Theme.text; font-size: 15px; overflow: elide; wrap: word-wrap; }
@@ -51,12 +61,21 @@ export component Large inherits Rectangle {
                 Flickable {
                     vertical-stretch: 1;
                     VerticalLayout {
-                        for item in root.queue: Text {
-                            text: item.title;
-                            color: item.current ? Theme.orange : Theme.muted;
-                            font-size: 12px;
-                            overflow: elide;
+                        for item in root.queue: Rectangle {
                             height: 20px;
+                            Text {
+                                text: item.title;
+                                color: item.current ? Theme.orange : Theme.muted;
+                                font-size: 12px;
+                                overflow: elide;
+                                width: 100%;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { root.play-row(item.source); }
+                            }
                         }
                     }
                 }
@@ -69,18 +88,78 @@ export component Large inherits Rectangle {
                 padding: 12px;
                 spacing: 8px;
                 Text { text: "Библиотека"; color: Theme.text; font-size: 14px; }
-                Text { text: "альбомы подключаются на шаге 6"; color: Theme.dim; font-size: 11px; }
+                SearchField {
+                    text <=> root.search;
+                    edited(text) => { root.search-edited(text); }
+                }
                 HorizontalLayout {
-                    spacing: 12px;
-                    for album in root.albums: VerticalLayout {
-                        width: 140px;
+                    spacing: 8px;
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        width: 150px;
                         spacing: 4px;
-                        Rectangle {
-                            height: 120px;
-                            background: Theme.raised;
+                        Text { text: "Исполнители"; color: Theme.muted; font-size: 12px; }
+                        Flickable {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                for artist[index] in root.artists: Rectangle {
+                                    height: 28px;
+                                    background: artist.current ? Theme.orange : transparent;
+                                    Text {
+                                        text: artist.name;
+                                        color: artist.current ? #1b1b1b : Theme.text;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        x: 6px;
+                                        width: parent.width - 12px;
+                                    }
+                                    TouchArea {
+                                        width: 100%;
+                                        height: 100%;
+                                        clicked => { root.pick-artist(index); }
+                                    }
+                                }
+                            }
                         }
-                        Text { text: album.title; color: Theme.text; font-size: 12px; overflow: elide; }
-                        Text { text: album.artist; color: Theme.muted; font-size: 11px; overflow: elide; }
+                    }
+
+                    Rectangle { width: 1px; background: #333; }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+                        Text { text: "Альбомы"; color: Theme.muted; font-size: 12px; }
+                        Flickable {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                for album[index] in root.albums: Rectangle {
+                                    height: 40px;
+                                    VerticalLayout {
+                                        padding-left: 6px;
+                                        alignment: center;
+                                        Text {
+                                            text: album.title;
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: album.artist;
+                                            color: Theme.muted;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    TouchArea {
+                                        width: 100%;
+                                        height: 100%;
+                                        clicked => { root.open-album(index); }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -91,7 +170,12 @@ export component Large inherits Rectangle {
                 width: 280px;
                 padding: 12px;
                 spacing: 6px;
-                Text { text: "Очередь"; color: Theme.orange; font-size: 14px; }
+                Text {
+                    text: root.queue-title;
+                    color: Theme.orange;
+                    font-size: 14px;
+                    overflow: elide;
+                }
                 Flickable {
                     vertical-stretch: 1;
                     VerticalLayout {
@@ -113,8 +197,20 @@ export component Large inherits Rectangle {
                                     font-size: 11px;
                                 }
                             }
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { root.play-row(item.source); }
+                            }
                         }
                     }
+                }
+                Text {
+                    text: root.queue-total;
+                    color: Theme.dim;
+                    font-size: 11px;
+                    horizontal-alignment: right;
+                    width: 100%;
                 }
             }
         }
