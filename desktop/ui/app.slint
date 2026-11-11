@@ -1,0 +1,112 @@
+import { Large } from "large.slint";
+import { Medium } from "medium.slint";
+import { Mini } from "mini.slint";
+import { Theme } from "theme.slint";
+
+import { AlbumItem, QueueItem } from "types.slint";
+
+export enum Mode { mini, medium, large }
+
+export component AppWindow inherits Window {
+    title: "HomeMusic";
+    background: Theme.bg;
+    default-font-size: 14px;
+
+    in-out property <Mode> mode: Mode.mini;
+    in-out property <string> track-title;
+    in-out property <string> track-artist;
+    in-out property <string> track-album;
+    in-out property <string> track-meta;
+    in-out property <string> time-label;
+    in-out property <string> duration-label;
+    in-out property <string> status;
+    in-out property <float> position;
+    in-out property <float> duration;
+    in-out property <float> volume;
+    in-out property <bool> playing;
+    in-out property <[QueueItem]> queue;
+    in-out property <[AlbumItem]> albums;
+
+    callback play-pause();
+    callback stop();
+    callback prev();
+    callback next();
+    callback seek(float);
+    callback set-volume(float);
+    callback set-mode(int);
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.bg;
+        border-width: 1px;
+        border-color: Theme.orange;
+
+        if root.mode == Mode.mini : Mini {
+            width: 100%;
+            height: 100%;
+            track-title: root.track-title;
+            track-artist: root.track-artist;
+            time-label: root.time-label;
+            duration-label: root.duration-label;
+            position: root.position;
+            duration: root.duration;
+            volume: root.volume;
+            playing: root.playing;
+            play-pause => { root.play-pause(); }
+            stop => { root.stop(); }
+            prev => { root.prev(); }
+            next => { root.next(); }
+            seek(ratio) => { root.seek(ratio); }
+            set-volume(value) => { root.set-volume(value); }
+            set-mode(mode) => { root.set-mode(mode); }
+        }
+        if root.mode == Mode.medium : Medium {
+            width: 100%;
+            height: 100%;
+            track-title: root.track-title;
+            track-artist: root.track-artist;
+            track-album: root.track-album;
+            track-meta: root.track-meta;
+            time-label: root.time-label;
+            duration-label: root.duration-label;
+            status: root.status;
+            position: root.position;
+            duration: root.duration;
+            volume: root.volume;
+            playing: root.playing;
+            queue: root.queue;
+            play-pause => { root.play-pause(); }
+            stop => { root.stop(); }
+            prev => { root.prev(); }
+            next => { root.next(); }
+            seek(ratio) => { root.seek(ratio); }
+            set-volume(value) => { root.set-volume(value); }
+            set-mode(mode) => { root.set-mode(mode); }
+        }
+        if root.mode == Mode.large : Large {
+            width: 100%;
+            height: 100%;
+            track-title: root.track-title;
+            track-artist: root.track-artist;
+            track-album: root.track-album;
+            track-meta: root.track-meta;
+            time-label: root.time-label;
+            duration-label: root.duration-label;
+            status: root.status;
+            position: root.position;
+            duration: root.duration;
+            volume: root.volume;
+            playing: root.playing;
+            queue: root.queue;
+            albums: root.albums;
+            play-pause => { root.play-pause(); }
+            stop => { root.stop(); }
+            prev => { root.prev(); }
+            next => { root.next(); }
+            seek(ratio) => { root.seek(ratio); }
+            set-volume(value) => { root.set-volume(value); }
+            set-mode(mode) => { root.set-mode(mode); }
+        }
+    }
+}

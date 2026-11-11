@@ -1,0 +1,177 @@
+import { IconButton, ModeSwitch, SeekBar, Theme, VolumeBar } from "theme.slint";
+import { QueueItem } from "types.slint";
+
+export component Medium inherits Rectangle {
+    in property <string> track-title;
+    in property <string> track-artist;
+    in property <string> track-album;
+    in property <string> track-meta;
+    in property <string> time-label;
+    in property <string> duration-label;
+    in property <string> status;
+    in property <float> position;
+    in property <float> duration;
+    in property <float> volume;
+    in property <bool> playing;
+    in property <[QueueItem]> queue;
+    callback play-pause();
+    callback stop();
+    callback prev();
+    callback next();
+    callback seek(float);
+    callback set-volume(float);
+    callback set-mode(int);
+
+    background: Theme.bg;
+
+    VerticalLayout {
+        Rectangle {
+            height: 168px;
+            background: Theme.panel;
+
+            HorizontalLayout {
+                padding: 12px;
+                spacing: 12px;
+
+                Rectangle {
+                    width: 96px;
+                    height: 96px;
+                    background: Theme.raised;
+                    Text {
+                        text: "обложка";
+                        color: Theme.dim;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    alignment: start;
+
+                    HorizontalLayout {
+                        Text {
+                            text: root.track-title;
+                            color: Theme.text;
+                            font-size: 16px;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text { text: "🔊"; color: Theme.muted; vertical-alignment: center; }
+                        VolumeBar {
+                            volume: root.volume;
+                            set-volume(value) => { root.set-volume(value); }
+                        }
+                    }
+                    Text { text: root.track-artist; color: Theme.muted; font-size: 13px; }
+                    Text { text: root.track-album; color: Theme.dim; font-size: 12px; }
+                    Text { text: root.track-meta; color: Theme.dim; font-size: 11px; }
+
+                    HorizontalLayout {
+                        spacing: 2px;
+                        alignment: center;
+                        IconButton { glyph: "⏮"; clicked => { root.prev(); } }
+                        play := Rectangle {
+                            width: 36px;
+                            height: 36px;
+                            border-radius: 18px;
+                            background: Theme.orange;
+                            Text {
+                                text: root.playing ? "⏸" : "▶";
+                                color: #1b1b1b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.play-pause(); } }
+                        }
+                        IconButton { glyph: "⏹"; clicked => { root.stop(); } }
+                        IconButton { glyph: "⏭"; clicked => { root.next(); } }
+                    }
+                }
+            }
+        }
+
+        SeekBar {
+            position: root.position;
+            duration: root.duration;
+            seek(ratio) => { root.seek(ratio); }
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            Text {
+                text: root.time-label;
+                color: Theme.muted;
+                font-size: 11px;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.duration-label;
+                color: Theme.muted;
+                font-size: 11px;
+            }
+        }
+
+        Rectangle { height: 1px; background: #333; }
+
+        VerticalLayout {
+            padding: 8px;
+            vertical-stretch: 1;
+            HorizontalLayout {
+                Text {
+                    text: "Очередь";
+                    color: Theme.orange;
+                    font-size: 13px;
+                    horizontal-stretch: 1;
+                }
+                Text { text: "пример"; color: Theme.dim; font-size: 11px; }
+            }
+            Flickable {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    for item in root.queue: Rectangle {
+                        height: 44px;
+                        background: item.current ? Theme.orange : transparent;
+                        VerticalLayout {
+                            padding-left: 8px;
+                            alignment: center;
+                            Text {
+                                text: item.title;
+                                color: item.current ? #1b1b1b : Theme.text;
+                                font-size: 13px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: item.meta + "    " + item.duration;
+                                color: item.current ? #3a240f : Theme.muted;
+                                font-size: 11px;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 36px;
+            background: Theme.panel;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 8px;
+                spacing: 8px;
+                alignment: center;
+                Text {
+                    text: root.status;
+                    color: Theme.dim;
+                    font-size: 11px;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                ModeSwitch { set-mode(mode) => { root.set-mode(mode); } }
+            }
+        }
+    }
+}

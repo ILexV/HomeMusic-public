@@ -1,0 +1,115 @@
+export global Theme {
+    out property <color> bg: #1b1b1b;
+    out property <color> panel: #242424;
+    out property <color> raised: #2c2c2c;
+    out property <color> orange: #e8872a;
+    out property <color> text: #f3f3f3;
+    out property <color> muted: #a3a3a3;
+    out property <color> dim: #6f6f6f;
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> glyph;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: touch.pressed ? Theme.raised : transparent;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.glyph;
+        color: Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SeekBar inherits Rectangle {
+    in property <float> position;
+    in property <float> duration;
+    callback seek(float);
+    height: 10px;
+    background: #3a3a3a;
+    border-radius: 5px;
+
+    Rectangle {
+        width: parent.width * min(1, root.position / max(root.duration, 0.001));
+        height: 100%;
+        background: Theme.orange;
+        border-radius: 5px;
+    }
+
+    area := TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.seek(area.mouse-x / area.width);
+            }
+        }
+    }
+}
+
+export component VolumeBar inherits Rectangle {
+    in property <float> volume;
+    callback set-volume(float);
+    width: 88px;
+    height: 8px;
+    background: #3a3a3a;
+    border-radius: 4px;
+
+    Rectangle {
+        width: parent.width * max(0, min(1, root.volume));
+        height: 100%;
+        background: Theme.orange;
+        border-radius: 4px;
+    }
+
+    area := TouchArea {
+        y: -8px;
+        height: parent.height + 16px;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.set-volume(area.mouse-x / area.width);
+            }
+        }
+    }
+}
+
+component ModeChip inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 22px;
+    border-radius: 4px;
+    background: touch.pressed ? Theme.orange : Theme.raised;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ModeSwitch inherits HorizontalLayout {
+    callback set-mode(int);
+    spacing: 4px;
+    alignment: center;
+
+    ModeChip { label: "мини"; clicked => { root.set-mode(0); } }
+    ModeChip { label: "сред"; clicked => { root.set-mode(1); } }
+    ModeChip { label: "боль"; clicked => { root.set-mode(2); } }
+}

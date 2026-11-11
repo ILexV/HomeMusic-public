@@ -1,0 +1,5 @@
+# Copy to config.toml next to this file. config.toml is not committed.
+# The password is the Navidrome admin password. Leave it empty until step 3.
+server = "http://192.168.1.51:4533"
+user = ""
+password = ""
