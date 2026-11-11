@@ -6,8 +6,11 @@ publish = false
 description = "Compact desktop player for HomeMusic"
 
 [dependencies]
+libc = "0.2"
+libmpv2 = "7"
 md-5 = "0.10"
 slint = "1.18"
 
 [build-dependencies]
+pkg-config = "0.3"
 slint-build = "1.18"
