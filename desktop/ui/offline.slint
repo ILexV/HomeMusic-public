@@ -1,0 +1,97 @@
+import { SpinBox } from "std-widgets.slint";
+import { Theme, EqButton, ScrollPort } from "theme.slint";
+
+export struct OfflineRow {
+    key: string,
+    title: string,
+    detail: string,
+    pinned: bool,
+}
+
+export component OfflinePanel inherits Rectangle {
+    in property <[OfflineRow]> rows;
+    in property <string> status;
+    in property <string> usage;
+    in property <bool> busy;
+    in property <int> progress;
+    in property <int> quota-mib: 2048;
+    callback save-current();
+    callback save-queue();
+    callback cache-queue();
+    callback cancel();
+    callback play(string);
+    callback pin(string, bool);
+    callback remove(string);
+    callback clear();
+    callback set-quota(int);
+    callback refresh();
+    private property <bool> confirm-clear: false;
+    background: Theme.panel;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text { text: "Музыка на этом устройстве"; color: Theme.text; font-size: 17px; }
+        Text {
+            text: "Сохранить — закрепить полную запись. Кэш очереди — загрузить без закрепления; старые незакреплённые записи вытесняются при нехватке места. Само прослушивание кэш не заполняет.";
+            color: Theme.muted; font-size: 11px; wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 6px; alignment: start;
+            EqButton { label: "Сохранить трек"; enabled: !root.busy; clicked => { root.save-current(); } }
+            EqButton { label: "Сохранить очередь"; enabled: !root.busy; clicked => { root.save-queue(); } }
+            EqButton { label: "Кэш очереди"; enabled: !root.busy; clicked => { root.cache-queue(); } }
+            EqButton { label: "Отмена"; enabled: root.busy; clicked => { root.cancel(); } }
+        }
+        Text { text: root.status; color: Theme.orange; font-size: 12px; wrap: word-wrap; }
+        if root.busy : Rectangle {
+            height: 4px; background: Theme.line;
+            Rectangle { width: parent.width * root.progress / 100; height: parent.height; background: Theme.orange; }
+        }
+        HorizontalLayout {
+            spacing: 6px; alignment: start;
+            Text { text: root.usage; color: Theme.muted; vertical-alignment: center; }
+            Text { text: "Лимит, МиБ:"; color: Theme.text; vertical-alignment: center; }
+            quota := SpinBox { value: root.quota-mib; minimum: 1; maximum: 1048576; enabled: !root.busy; }
+            EqButton { label: "Применить"; enabled: !root.busy; clicked => { root.set-quota(quota.value); } }
+        }
+        HorizontalLayout {
+            spacing: 6px; alignment: start;
+            EqButton { label: "Обновить"; clicked => { root.refresh(); } }
+            EqButton { label: root.confirm-clear ? "Да, удалить копии" : "Очистить хранилище"; clicked => {
+                if root.confirm-clear { root.clear(); root.confirm-clear = false; }
+                else { root.confirm-clear = true; }
+            } }
+            if root.confirm-clear : EqButton { label: "Не удалять"; clicked => { root.confirm-clear = false; } }
+        }
+        Text {
+            text: "Удаление не меняет очередь и библиотеку на сервере. Копия выбранного трека защищена: сначала переключите трек. Снятие закрепления не удаляет запись сразу.";
+            color: Theme.dim; font-size: 10px; wrap: word-wrap;
+        }
+        if root.rows.length == 0 : Text { text: "Локальных записей пока нет"; color: Theme.muted; }
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 80px;
+        ScrollPort {
+            for row in root.rows : Rectangle {
+                height: 64px;
+                HorizontalLayout {
+                    padding: 5px; spacing: 6px;
+                    VerticalLayout {
+                        spacing: 2px; alignment: center;
+                        Text { text: row.title; color: Theme.text; font-size: 12px; overflow: elide; }
+                        Text { text: row.detail; color: Theme.dim; font-size: 10px; overflow: elide; }
+                    }
+                    EqButton { label: "Играть"; clicked => { root.play(row.key); } }
+                    EqButton {
+                        label: row.pinned ? "Открепить" : "Закрепить";
+                        active: row.pinned;
+                        clicked => { root.pin(row.key, !row.pinned); }
+                    }
+                    EqButton { label: "Удалить"; clicked => { root.remove(row.key); } }
+                }
+            }
+        }
+        }
+    }
+}

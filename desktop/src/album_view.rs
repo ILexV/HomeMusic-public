@@ -141,10 +141,12 @@ pub fn connect_album_actions(
         cancel_queue_load(&ui, &hub_play);
         clear_wave(&hub_play);
         *hub_play.album_id.borrow_mut() = preview.id.clone();
-        *queue_play.borrow_mut() = queue::Queue::from_tracks(
+        let mut next = queue::Queue::from_tracks(
             ui.get_album_title().to_string(), preview.tracks.clone(),
         );
-        queue_play.borrow_mut().select(index as usize);
+        next.select(index as usize);
+        next.inherit_preferences(&queue_play.borrow());
+        *queue_play.borrow_mut() = next;
         jump(&ui, &player_play, &queue_play, &config_play, &status_play, &waves_play, &hub_play, true);
         ui.set_album_note("Очередь заменена альбомом".into());
     });
@@ -162,8 +164,10 @@ pub fn connect_album_actions(
         cancel_queue_load(&ui, &hub_add);
         let mut queue = queue_add.borrow_mut();
         if queue.is_empty() {
-            *queue = queue::Queue::from_tracks(ui.get_album_title().to_string(), preview.tracks.clone());
-            queue.select(0);
+            let mut next = queue::Queue::from_tracks(ui.get_album_title().to_string(), preview.tracks.clone());
+            next.select(0);
+            next.inherit_preferences(&queue);
+            *queue = next;
             *hub_add.album_id.borrow_mut() = preview.id.clone();
             crate::show_cover(&ui, &hub_add, &preview.tracks[0].id);
         } else {

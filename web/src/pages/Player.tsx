@@ -3,6 +3,7 @@ import { Icon } from '../components/Icon';
 import { LikeButton } from '../components/LikeButton';
 import { TrackMenuButton } from '../components/TrackMenu';
 import { Button, Cover, Empty, IconButton, Spinner, cx } from '../components/ui';
+import { PlaybackDevices } from '../components/PlaybackDevices';
 import { fmtDuration, providerLabel } from '../lib/format';
 import {
   cycleRepeat,
@@ -54,6 +55,7 @@ export function PlayerPage() {
           <IconButton icon="down" label="Свернуть" onClick={() => goBack('/home')} />
         </div>
         <Empty icon="note" title="Сейчас ничего не играет" text="Выберите трек, альбом или «Мою волну»." />
+        <PlaybackDevices />
       </div>
     );
 
@@ -83,6 +85,7 @@ export function PlayerPage() {
         <div className="min-w-0 flex-1 text-center text-xs uppercase tracking-wide text-muted">{contextLabel(context)}</div>
         <TrackMenuButton track={{ ...track, nd_song_id: info?.nd_song_id }} inPlayer />
       </div>
+      <PlaybackDevices />
 
       <div className="px-6 pt-2">
         <Cover src={track.cover_url || track.cover_small_url} alt={track.title} className="mx-auto aspect-square w-full max-w-[22rem] shadow-2xl" />

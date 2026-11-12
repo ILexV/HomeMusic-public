@@ -1,0 +1,240 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { AudioPanel } from "audio.slint";
+import { ModesPanel, ModeRecommendation } from "modes.slint";
+import { StreamInfoPanel } from "stream-info.slint";
+import { OfflinePanel, OfflineRow } from "offline.slint";
+import { LyricsPanel, LyricLine } from "lyrics.slint";
+import { SmartPlaylistsPanel, SmartPlaylistRow, SmartRuleRow } from "smart_playlists.slint";
+import { DevicesPanel, DeviceRow } from "devices.slint";
+import { ConnectionPanel } from "connection.slint";
+export { ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow }
+
+export component ToolsWindow inherits Window {
+    title: "HomeMusic · Управление плеером";
+    icon: @image-url("../assets/icon.png");
+    background: Theme.bg;
+    default-font-size: 14px;
+    preferred-width: 900px;
+    preferred-height: 680px;
+    min-width: 760px;
+    min-height: 560px;
+    in-out property <int> active-panel: 0;
+    init => { Palette.color-scheme = ColorScheme.dark; }
+    in-out property <float> audio-crossfade: 0;
+    in-out property <bool> audio-overlap-album: false;
+    in-out property <int> audio-normalization: 0;
+    in-out property <string> audio-status;
+    callback audio-set-crossfade(float);
+    callback audio-set-overlap-album(bool);
+    callback audio-set-normalization(int);
+    in-out property <int> modes-repeat;
+    in-out property <int> modes-shuffle;
+    in-out property <bool> modes-smart-enabled: true;
+    in-out property <bool> modes-can-smart;
+    in-out property <string> modes-status;
+    in-out property <[ModeRecommendation]> modes-recommendations;
+    callback modes-set-repeat(int);
+    callback modes-set-shuffle(int);
+    callback modes-enable-smart(bool);
+    callback modes-add(int);
+    callback modes-hide(int);
+    in-out property <string> info-title;
+    in-out property <string> info-source;
+    in-out property <string> info-kind;
+    in-out property <string> info-format;
+    in-out property <string> info-download;
+    in-out property <string> info-message;
+    callback info-refresh();
+    in-out property <[OfflineRow]> offline-rows;
+    in-out property <string> offline-status;
+    in-out property <string> offline-usage;
+    in-out property <bool> offline-busy;
+    in-out property <int> offline-progress;
+    in-out property <int> offline-quota-mib: 2048;
+    callback offline-save-current();
+    callback offline-save-queue();
+    callback offline-cache-queue();
+    callback offline-cancel();
+    callback offline-play(string);
+    callback offline-pin(string, bool);
+    callback offline-remove(string);
+    callback offline-clear();
+    callback offline-set-quota(int);
+    callback offline-refresh();
+    in-out property <[LyricLine]> lyrics-lines;
+    in-out property <int> lyrics-active: -1;
+    in-out property <string> lyrics-title;
+    in-out property <string> lyrics-note;
+    in-out property <bool> lyrics-seekable;
+    in-out property <bool> lyrics-local;
+    in-out property <string> lyrics-query-title;
+    in-out property <string> lyrics-query-artist;
+    in-out property <string> lyrics-query-album;
+    callback lyrics-seek(int);
+    callback lyrics-search();
+    in-out property <[SmartPlaylistRow]> smart-rows;
+    in-out property <[SmartRuleRow]> smart-rules;
+    in-out property <string> smart-selected;
+    in-out property <string> smart-status;
+    in-out property <bool> smart-busy;
+    in-out property <string> smart-name;
+    in-out property <bool> smart-match-any;
+    in-out property <int> smart-sort;
+    in-out property <bool> smart-descending;
+    in-out property <string> smart-limit;
+    callback smart-refresh();
+    callback smart-select(string);
+    callback smart-new();
+    callback smart-save();
+    callback smart-delete();
+    callback smart-preview();
+    callback smart-play();
+    callback smart-add-rule();
+    callback smart-remove-rule(int);
+    callback smart-rule-kind(int, int);
+    callback smart-rule-value(int, string);
+    callback smart-rule-maximum(int, string);
+    callback smart-rule-flag(int);
+    in property <[DeviceRow]> devices-rows;
+    in property <string> devices-status;
+    in property <string> devices-error;
+    in property <string> devices-track;
+    in property <bool> devices-busy;
+    in property <bool> devices-playing;
+    in property <bool> devices-has-session;
+    in property <float> devices-position;
+    in property <float> devices-duration;
+    in property <float> devices-volume;
+    in property <bool> devices-detached;
+    callback devices-local-only();
+    callback devices-transfer(string);
+    callback devices-take-here();
+    callback devices-command(string, float);
+    in-out property <string> connection-server;
+    in-out property <string> connection-hub;
+    in-out property <string> connection-user;
+    in-out property <string> connection-password;
+    in property <string> connection-status;
+    in property <string> connection-storage;
+    in property <bool> connection-insecure;
+    in property <bool> connection-busy;
+    callback connection-changed();
+    callback connection-test();
+    callback connection-save();
+
+    HorizontalLayout {
+        spacing: 1px;
+        Rectangle {
+            width: 174px;
+            background: Theme.panel;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                Text { text: "ПЛЕЕР"; color: Theme.dim; font-size: 11px; height: 32px; }
+                for label[index] in ["Звук и переходы", "Режим очереди", "Источник трека", "Офлайн-музыка", "Текст песни", "Умные плейлисты", "Устройства", "Подключение"] : Rectangle {
+                    height: 42px;
+                    border-radius: 4px;
+                    background: root.active-panel == index ? Theme.raised : (tab.has-hover ? #ffffff08 : transparent);
+                    if root.active-panel == index : Rectangle { width: 3px; height: 24px; y: 9px; background: Theme.orange; }
+                    Text { x: 12px; width: parent.width - 20px; text: label; color: root.active-panel == index ? Theme.text : Theme.muted; vertical-alignment: center; font-size: 13px; }
+                    tab := TouchArea { mouse-cursor: pointer; clicked => { root.active-panel = index; } }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            if root.active-panel == 0 : AudioPanel {
+                audio-crossfade: root.audio-crossfade;
+                audio-overlap-album: root.audio-overlap-album;
+                audio-normalization: root.audio-normalization;
+                audio-status: root.audio-status;
+                audio-set-crossfade(value) => { root.audio-set-crossfade(value); }
+                audio-set-overlap-album(value) => { root.audio-set-overlap-album(value); }
+                audio-set-normalization(value) => { root.audio-set-normalization(value); }
+            }
+            if root.active-panel == 1 : ModesPanel {
+                repeat-mode: root.modes-repeat; shuffle-mode: root.modes-shuffle;
+                smart-enabled: root.modes-smart-enabled; can-smart: root.modes-can-smart;
+                status: root.modes-status; recommendations: root.modes-recommendations;
+                set-repeat(value) => { root.modes-set-repeat(value); }
+                set-shuffle(value) => { root.modes-set-shuffle(value); }
+                enable-smart(value) => { root.modes-enable-smart(value); }
+                add(index) => { root.modes-add(index); }
+                hide(index) => { root.modes-hide(index); }
+            }
+            if root.active-panel == 2 : StreamInfoPanel {
+                title: root.info-title; source: root.info-source; kind: root.info-kind;
+                format: root.info-format; download: root.info-download; message: root.info-message;
+                refresh => { root.info-refresh(); }
+            }
+            if root.active-panel == 3 : OfflinePanel {
+                rows: root.offline-rows; status: root.offline-status; usage: root.offline-usage;
+                busy: root.offline-busy; progress: root.offline-progress; quota-mib: root.offline-quota-mib;
+                save-current => { root.offline-save-current(); }
+                save-queue => { root.offline-save-queue(); }
+                cache-queue => { root.offline-cache-queue(); }
+                cancel => { root.offline-cancel(); }
+                play(key) => { root.offline-play(key); }
+                pin(key, pinned) => { root.offline-pin(key, pinned); }
+                remove(key) => { root.offline-remove(key); }
+                clear => { root.offline-clear(); }
+                set-quota(mib) => { root.offline-set-quota(mib); }
+                refresh => { root.offline-refresh(); }
+            }
+            if root.active-panel == 4 : LyricsPanel {
+                lines: root.lyrics-lines; active: root.lyrics-active; title: root.lyrics-title;
+                note: root.lyrics-note; seekable: root.lyrics-seekable; local: root.lyrics-local;
+                query-title <=> root.lyrics-query-title;
+                query-artist <=> root.lyrics-query-artist;
+                query-album <=> root.lyrics-query-album;
+                seek(index) => { root.lyrics-seek(index); }
+                search => { root.lyrics-search(); }
+            }
+            if root.active-panel == 5 : SmartPlaylistsPanel {
+                rows: root.smart-rows; rules: root.smart-rules; selected: root.smart-selected;
+                status: root.smart-status; busy: root.smart-busy;
+                name <=> root.smart-name; match-any <=> root.smart-match-any;
+                sort <=> root.smart-sort; descending <=> root.smart-descending; limit <=> root.smart-limit;
+                refresh => { root.smart-refresh(); }
+                select-playlist(id) => { root.smart-select(id); }
+                new-playlist => { root.smart-new(); }
+                save => { root.smart-save(); }
+                delete-playlist => { root.smart-delete(); }
+                preview => { root.smart-preview(); }
+                play => { root.smart-play(); }
+                add-rule => { root.smart-add-rule(); }
+                remove-rule(index) => { root.smart-remove-rule(index); }
+                rule-kind(index, kind) => { root.smart-rule-kind(index, kind); }
+                rule-value(index, value) => { root.smart-rule-value(index, value); }
+                rule-maximum(index, value) => { root.smart-rule-maximum(index, value); }
+                rule-flag(index) => { root.smart-rule-flag(index); }
+            }
+            if root.active-panel == 6 : DevicesPanel {
+                rows: root.devices-rows; status: root.devices-status; error: root.devices-error;
+                track: root.devices-track; busy: root.devices-busy; playing: root.devices-playing;
+                has-session: root.devices-has-session; position: root.devices-position;
+                duration: root.devices-duration; volume: root.devices-volume;
+                transfer(id) => { root.devices-transfer(id); }
+                take-here => { root.devices-take-here(); }
+                command(kind, value) => { root.devices-command(kind, value); }
+                detached: root.devices-detached;
+                local-only => { root.devices-local-only(); }
+            }
+            if root.active-panel == 7 : ConnectionPanel {
+                server <=> root.connection-server;
+                hub <=> root.connection-hub;
+                user <=> root.connection-user;
+                password <=> root.connection-password;
+                status: root.connection-status;
+                storage: root.connection-storage;
+                insecure: root.connection-insecure;
+                busy: root.connection-busy;
+                changed => { root.connection-changed(); }
+                test => { root.connection-test(); }
+                save => { root.connection-save(); }
+            }
+        }
+    }
+}

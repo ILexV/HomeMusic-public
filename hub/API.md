@@ -1,6 +1,6 @@
 # Hub HTTP API
 
-All JSON. Models are in `app/api/schemas.py` (pydantic): field names below match them exactly.
+All JSON. Most models are in `app/api/schemas.py`; player features also define schemas in their route modules and `app/playback_schema.py`. Field names below match those models.
 Auth: cookie `hm_session` (HttpOnly, set by login). Any endpoint except login/healthz returns `401` without it.
 Errors: `{"detail": "<Russian message>"}` with 4xx/5xx.
 
@@ -136,6 +136,8 @@ For a single catalog-track heart, a client that sees `catalog_favorite_download_
 without queuing a second download. A later unlike or causal rollback cancels the quiet heart download, while an
 independently requested download remains queued. These fields are optional for existing clients.
 
+`GET /api/downloads` also accepts `ref=…`: exact catalog/file reference, filtered within the current account **before** applying `limit` (1–500). This lets the player find the latest download for one track without scanning unrelated jobs.
+
 Playlist additions keep the request order, including songs already in the library. Active downloads wait for earlier
 ones, but `needs_review` does not block later ready songs. The pending row and subsequent applied-song anchors are
 kept so a reviewed song can be inserted back into its requested place after retry, including across restarts.
@@ -165,6 +167,7 @@ Deezer's 30 s preview, show «превью 30 сек»), `library` (already owne
 the regular sources are followed by `sources.download_fallback`, and a preview-only result returns `503`
 with a Russian explanation instead of preview audio. Without `full`, browser preview behavior is preserved.
 Successful stream responses include `X-HomeMusic-Listen-Kind: full|library|preview`, independently of `q`.
+`GET /api/listen?ref=…&full=1` applies the same full-recording policy to source metadata; it cannot describe a cached preview as the full-only player's selected source.
 Owned-file lookup precedes optional album/name enrichment. Playback bounds optional album lookup to 1.5 s,
 original-name lookup to 3 s, each regular search to 6 s, fallback search to 8 s, and file probing to 25 s
 (a YouTube file: ~8 s extraction, then its URL answers only after the ad before the video could be skipped —
@@ -182,6 +185,43 @@ After the first listen the Hub checks the file on its track page (hitmoz: Explic
 (`track_refs`, `album_ref`…) tries the listened file first if the check passed. A file that fails it (e.g. the clean copy of an
 explicit track) is replaced, for the next listen, by a download-grade pick. Importing the track drops the pick (not a file's: it
 stays that file).
+
+## Lyrics
+
+`POST /api/lyrics` requires authentication. Supply one canonical `ref` or `nd_song_id`, or local metadata `{title, artist, album?, duration_s?}`. Canonical requests resolve server-side metadata; submitted names cannot override a different canonical recording. Local paths and streaming URLs are not accepted.
+
+The response distinguishes `synced`, `plain`, `instrumental`, and `unavailable`; `lines` contain text and optional `time_s`. Only timed lines support seeking. LRCLIB results must match full title, artist, album when provided, and duration within two seconds. Version qualifiers are retained. Insufficient evidence or unavailable lyrics is not an audio playback error. Provider requests and response sizes are bounded; the process-local cache keeps at most 128 entries (24 hours for successful results, five minutes for unavailable results).
+
+## Smart playlists
+
+All definitions and evaluations belong to the authenticated account; another user's ID returns `404`.
+
+| Method | Path | Body → Response |
+|---|---|---|
+| GET / POST | `/api/smart-playlists` | List definitions / create `{name, definition}` (`201`) |
+| GET / PUT / DELETE | `/api/smart-playlists/{id}` | Read / replace `{name, definition}` / delete `{ok}` |
+| POST | `/api/smart-playlists/preview` | `Definition` → `Evaluation` |
+| POST | `/api/smart-playlists/{id}/evaluate` | Re-evaluate saved rules → `Evaluation` |
+
+`Definition`: `{match: "all"|"any", rules: [...], sort, descending, limit}`. One to 32 rules; limit 1–2000; sort `title`, `artist`, `year`, `added`, `last_listened`, or `random`. Rules: `liked {value}`, `not_listened {days, include_unheard}`, `unheard`, `genre {value}`, `year {minimum?, maximum?}`, `recently_added {days}`. Unknown fields and invalid ranges return `422`; no SQL expressions are accepted.
+
+`Evaluation`: `{count, tracks: [{nd_song_id, title, artist, album, duration_s}]}`; count precedes the limit. Evaluation uses the user's currently visible Navidrome library, favorites and listening history, not recommendations. “Not listened recently” excludes unheard tracks unless requested. Unknown last-listened time with a positive Navidrome play count is not proof of either “unheard” or “older than N days”. Results are recalculated on preview/play; random order is recalculated too.
+
+## Shared playback and device control
+
+All `/api/playback` routes use the authenticated user's isolated session. `Snapshot` is `{queue, index, occurrence, position, playing, volume, repeat, shuffle}`. Queue ≤1000 canonical tracks: `{ref, nd_song_id, title, artist, album, duration_s}`. URLs, local paths, credentials, and arbitrary extra fields are rejected. `repeat` is `off|all|one`; `shuffle` is boolean. Position is seconds; volume is 0–1. Index and occurrence preserve duplicate entries.
+
+| Method | Path | Request |
+|---|---|---|
+| POST | `/api/playback/heartbeat` | `{device_id, name, kind: "desktop"|"web", state?, revision?}` |
+| POST | `/api/playback/claim` | `{device_id, state, revision}`; only no owner or the same owner |
+| POST | `/api/playback/handoff` | `{device_id, target, revision}`; explicit transfer/recovery |
+| POST | `/api/playback/command` | `{device_id, target, revision, kind, value?}`; play/pause/next/prev/seek/volume |
+| POST | `/api/playback/ack` | `{device_id, command_id, ok, error?, state?}` |
+
+Responses are a `View`: `{device_id, devices, owner, revision, state, handoff, commands, error}`. Commands are bounded, expiring and delivered only to their target; acknowledgment is idempotent. Only the owner publishes state with the current revision. Position-only heartbeats update telemetry without invalidating a controller's revision; queue, mode, volume and playing changes still reject stale actions.
+
+Handoff is prepare-paused → source stop acknowledgment with final position → target start acknowledgment → ownership commit. Failure never automatically resumes the source. Recovery from an owner offline for over 15 seconds is explicit and still requires a ready, online target. Clients heartbeat every two seconds and pause shared playback after 12 seconds without successful contact; reconnect does not automatically resume audio. Explicit local-only mode disconnects from session control and allows offline playback without that shared-session fence. Browser autoplay denial is visible, not a successful transfer.
 
 ## Listening data (mixes, «Моя волна»: MIXES.md 3)
 | Method | Path | Body → Response |

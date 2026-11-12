@@ -1,0 +1,73 @@
+import { Theme, EqButton, ScrollPort } from "theme.slint";
+
+export struct ModeRecommendation {
+    title: string,
+    artist: string,
+    label: string,
+    current: bool,
+    busy: bool,
+}
+
+export component ModesPanel inherits Rectangle {
+    in property <int> repeat-mode;
+    in property <int> shuffle-mode;
+    in property <bool> smart-enabled;
+    in property <bool> can-smart;
+    in property <string> status;
+    in property <[ModeRecommendation]> recommendations;
+    callback set-repeat(int);
+    callback set-shuffle(int);
+    callback enable-smart(bool);
+    callback add(int);
+    callback hide(int);
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        Text { text: "Режимы воспроизведения"; color: Theme.text; font-size: 20px; }
+        Text { text: "Повтор"; color: Theme.muted; }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            EqButton { label: "Выключен"; active: root.repeat-mode == 0; clicked => { root.set-repeat(0); } }
+            EqButton { label: "Вся очередь"; active: root.repeat-mode == 1; clicked => { root.set-repeat(1); } }
+            EqButton { label: "Один трек"; active: root.repeat-mode == 2; clicked => { root.set-repeat(2); } }
+        }
+        Text { text: "Повтор одного трека не блокирует ручной переход к следующему."; wrap: word-wrap; color: Theme.dim; font-size: 12px; }
+        Text { text: "Перемешивание"; color: Theme.muted; }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            EqButton { label: "Выключено"; active: root.shuffle-mode == 0; clicked => { root.set-shuffle(0); } }
+            EqButton { label: "Обычное"; active: root.shuffle-mode == 1; clicked => { root.set-shuffle(1); } }
+            EqButton { label: "Умное"; active: root.shuffle-mode == 2; enabled: root.can-smart; clicked => { root.set-shuffle(2); } }
+        }
+        EqButton { label: root.smart-enabled ? "Умный режим: включён" : "Умный режим: выключен"; active: root.smart-enabled; clicked => { root.enable-smart(!root.smart-enabled); } }
+        Text { text: "Умное перемешивание доступно для очереди, запущенной из плейлиста или понравившихся. Выключение удаляет только ещё не сыгранные рекомендации."; wrap: word-wrap; color: Theme.dim; font-size: 12px; }
+        Text { text: root.status; wrap: word-wrap; color: Theme.orange; }
+        Text { text: "Рекомендации в очереди"; color: Theme.text; font-size: 16px; }
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 80px;
+        ScrollPort {
+            for rec[index] in root.recommendations : Rectangle {
+                height: 94px;
+                background: rec.current ? Theme.raised : Theme.panel;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+                    Text { text: (rec.current ? "Сейчас: " : "") + rec.title + " — " + rec.artist; color: Theme.text; overflow: elide; }
+                    Text { text: rec.label; color: Theme.muted; font-size: 11px; overflow: elide; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        EqButton { label: "Добавить в список"; enabled: !rec.busy; clicked => { root.add(index); } }
+                        EqButton { label: "Больше не предлагать"; enabled: !rec.busy; clicked => { root.hide(index); } }
+                    }
+                }
+            }
+            if root.recommendations.length == 0 : Text { text: "Рекомендаций пока нет"; color: Theme.dim; }
+        }
+        }
+    }
+}

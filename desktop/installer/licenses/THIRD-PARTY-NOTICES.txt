@@ -1,0 +1,69 @@
+HomeMusic: notices for the bundled Windows media runtime
+
+Русский: здесь приведены подлинные тексты лицензий mpv и FFmpeg,
+идентификаторы исходного кода из DLL и ссылки на исходники. Этот файл
+НЕ является письменным предложением предоставить исходный код и НЕ
+подтверждает полноту выполнения требований к распространению. Точный
+выпуск сборщика, изменения и полный набор статически включённых библиотек
+не установлены. До публичного распространения необходимо получить полный
+соответствующий исходный код, рецепты сборки и уведомления всех компонентов.
+
+BINARY IDENTIFICATION
+libmpv-2.dll SHA-256:
+88504ee5560942a955405e99dfb5971368e4cf851321f36565bf2a667271db1b
+Embedded mpv version: mpv v0.42.0-38-gbcde6b93c
+Embedded FFmpeg version: N-128766-gcd4e96eb3
+Embedded FFmpeg library identifiers: Lavf63.18.100; Lavc63.28.100
+The commit prefixes resolve in the upstream repositories to:
+mpv: bcde6b93cca4d128d84e1a60d1a6db2cd81c889e
+FFmpeg: cd4e96eb314630788b7ff2f9820c395788c023e2
+These identify upstream revisions, not a proof of an unmodified binary.
+
+MPV SOURCE AND BUILD FILES AT THE IDENTIFIED REVISION
+https://github.com/mpv-player/mpv/tree/bcde6b93cca4d128d84e1a60d1a6db2cd81c889e
+https://github.com/mpv-player/mpv/archive/bcde6b93cca4d128d84e1a60d1a6db2cd81c889e.tar.gz
+https://github.com/mpv-player/mpv/blob/bcde6b93cca4d128d84e1a60d1a6db2cd81c889e/meson.build
+https://github.com/mpv-player/mpv/blob/bcde6b93cca4d128d84e1a60d1a6db2cd81c889e/meson.options
+mpv is a fork of mplayer2, which is a fork of MPlayer.
+The accompanying mpv-Copyright.txt, mpv-GPL-2.0.txt and mpv-LGPL-2.1.txt
+are verbatim upstream Copyright, LICENSE.GPL and LICENSE.LGPL at this revision.
+The upstream default is GPL version 2 or later. Merely supplying LGPL text
+here does not assert that this binary was built in LGPL-only mode.
+
+FFMPEG SOURCE AND BUILD FILES AT THE IDENTIFIED REVISION
+https://github.com/FFmpeg/FFmpeg/tree/cd4e96eb314630788b7ff2f9820c395788c023e2
+https://github.com/FFmpeg/FFmpeg/archive/cd4e96eb314630788b7ff2f9820c395788c023e2.tar.gz
+https://github.com/FFmpeg/FFmpeg/blob/cd4e96eb314630788b7ff2f9820c395788c023e2/configure
+https://github.com/FFmpeg/FFmpeg/blob/cd4e96eb314630788b7ff2f9820c395788c023e2/INSTALL.md
+FFmpeg-LICENSE.txt and the four FFmpeg-COPYING files are verbatim upstream
+LICENSE.md and COPYING files at this revision. The applicable combined
+license depends on build options and external libraries; these texts are
+not a claim that all included code is LGPL-only.
+This software is based in part on the work of the Independent JPEG Group.
+No source modifications by the DLL builder have been established here.
+
+WINDOWS BUILD PROVENANCE: PARTIALLY IDENTIFIED, NOT VERIFIED
+The DLL contains the build path:
+/__w/mpv-winbuild-cmake/mpv-winbuild-cmake/build_x86_64/packages/mpv-prefix/src/mpv-build/libmpv-2.pdb
+and Clang 22.1.8 with LLVM revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1.
+A matching public build project is:
+https://github.com/shinchiro/mpv-winbuild-cmake
+https://github.com/shinchiro/mpv-winbuild-cmake/blob/master/packages/mpv.cmake
+https://github.com/shinchiro/mpv-winbuild-cmake/blob/master/packages/ffmpeg.cmake
+https://github.com/shinchiro/mpv-winbuild-cmake/releases
+These moving build-recipe links are investigative references, NOT a verified
+exact recipe/release for this DLL. No downloaded release archive, package
+manifest, builder commit or complete corresponding source bundle was found
+alongside the supplied runtime. The path alone cannot identify its publisher.
+
+SCOPE AND REMAINING DISTRIBUTION REQUIREMENTS
+The DLL also incorporates other libraries. The notices here cover identified
+mpv/FFmpeg upstream licensing, not an exhaustive inventory of their static
+third-party dependencies or the HomeMusic executable's Rust dependencies.
+Before public redistribution, establish the exact binary's build provenance,
+all patches/options/dependency revisions, preserve every required notice, and
+provide complete corresponding source by an applicable license-compliant
+method. Upstream URLs alone are not represented as satisfying that duty.
+No source offer is made by this notice.
+The Vulkan runtime's separate upstream license is installed as
+VulkanRT-License.txt in the application directory.

@@ -1,0 +1,106 @@
+import { Theme, ScrollPort, EqButton, SearchField } from "theme.slint";
+
+export struct LyricLine {
+    text: string,
+    timed: bool,
+}
+
+component LyricsRow inherits Rectangle {
+    in property <string> text;
+    in property <bool> current;
+    in property <bool> clickable;
+    in property <bool> following;
+    callback seek();
+    callback follow(length);
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    min-height: 34px;
+    background: root.current ? #e8872a25 : (touch.has-hover && root.clickable ? Theme.raised : transparent);
+    border-radius: 4px;
+    changed current => { if root.current && root.following { root.follow(root.y + root.height / 2); } }
+    changed following => { if root.current && root.following { root.follow(root.y + root.height / 2); } }
+    changed y => { if root.current && root.following { root.follow(root.y + root.height / 2); } }
+    VerticalLayout {
+        padding: 9px;
+        Text {
+            text: root.text;
+            color: root.current ? Theme.orange : Theme.text;
+            font-size: 16px;
+            font-weight: root.current ? 700 : 400;
+            wrap: word-wrap;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.clickable;
+        mouse-cursor: root.clickable ? pointer : default;
+        clicked => {
+            if abs(self.mouse-y - self.pressed-y) < 6px && abs(self.mouse-x - self.pressed-x) < 6px {
+                root.seek();
+            }
+        }
+    }
+}
+
+export component LyricsPanel inherits Rectangle {
+    in property <[LyricLine]> lines;
+    in property <int> active: -1;
+    in property <string> title;
+    in property <string> note;
+    in property <bool> seekable;
+    in property <bool> local;
+    in-out property <string> query-title;
+    in-out property <string> query-artist;
+    in-out property <string> query-album;
+    private property <bool> following: true;
+    callback seek(int);
+    callback search();
+    changed lines => { port.scroll-y = 0px; }
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            Text { text: root.title; color: Theme.text; font-size: 15px; overflow: elide; vertical-alignment: center; }
+            EqButton {
+                label: root.following ? "Следить за строкой" : "Свободная прокрутка";
+                tip: "Автоматически прокручивать к текущей строке";
+                active: root.following;
+                clicked => { root.following = !root.following; }
+            }
+        }
+        if root.local : VerticalLayout {
+            spacing: 5px;
+            HorizontalLayout {
+                spacing: 5px;
+                SearchField { text <=> root.query-artist; hint: "Исполнитель"; }
+                SearchField { text <=> root.query-title; hint: "Название трека"; }
+            }
+            HorizontalLayout {
+                spacing: 5px;
+                SearchField { text <=> root.query-album; hint: "Альбом (для точного совпадения)"; }
+                EqButton { label: "Найти текст"; enabled: root.query-title != "" && root.query-artist != ""; clicked => { root.search(); } }
+            }
+        }
+        Text { text: root.note; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 80px;
+        port := ScrollPort {
+            content := VerticalLayout {
+                alignment: start;
+                spacing: 3px;
+                for line[index] in root.lines : LyricsRow {
+                    text: line.text;
+                    current: index == root.active && line.timed;
+                    following: root.following;
+                    clickable: line.timed && root.seekable;
+                    seek => { root.seek(index); }
+                    follow(y) => {
+                        port.scroll-y = max(min(0px, port.height - content.height), min(0px, port.height / 3 - y));
+                    }
+                }
+            }
+        }
+        }
+    }
+}

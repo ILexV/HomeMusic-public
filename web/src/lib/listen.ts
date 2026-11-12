@@ -5,6 +5,8 @@ import { startDownload } from './actions';
 import { hubEvents } from './events';
 import { NATIVE_PLAYING_EVENT, canPlayAll, pauseNative, webPlayerShown } from './player';
 import { listeningAccount, newEventId, newLaunch, playEvent, routeContext, type Launch } from './plays';
+import type { PlaybackCommand, PlaybackSnapshot } from '../api/playback';
+import { localPlaybackAllowed, startSharedPlayback, stopSharedPlayback } from './sharedPlayback';
 
 /** Listening to catalog tracks before downloading them, in the page itself (one `<audio>`): the Hub picks the
  * file a download would take and streams it (GET /api/listen). Works in a plain browser too. Inside the Android
@@ -148,6 +150,8 @@ let audio: HTMLAudioElement | null = null;
 /** The page player's `<audio>` (null until the first track): `lib/waveAudio.ts` reads its loudness. */
 export const listenAudio = (): HTMLAudioElement | null => audio;
 let pendingSeek = 0;
+let occurrence = newEventId();
+let applyingShared = false;
 let resolving: AbortController | null = null;
 let prefetching: { ref: string; ctl: AbortController } | null = null;
 /** Seconds into a track after which ⏮ restarts it instead of going to the previous one. */
@@ -240,6 +244,9 @@ function lockTab() {
 lockTab();
 setInterval(() => { checkpoint(); scanAbandoned(); }, 15_000);
 window.addEventListener('pagehide', () => {
+  stopSharedPlayback();
+  audio?.pause();
+  pause();
   persistListening(true);
   checkpoint();
   reportEnd(false, false, true);
@@ -252,6 +259,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pageshow', (event) => {
   if (!event.persisted) return;
   lockTab();
+  if (sessionAccount !== null) startSharedPlayback(sharedAdapter, sessionAccount);
   const t = state.track;
   if (t) {
     played = { ref: t.ref, context: state.context, launch: listLaunch, started: false, playbackId: newEventId(), listenedMs: 0, anchor: null, account: listeningAccount() };
@@ -358,6 +366,8 @@ function play(a: HTMLAudioElement) {
 
 /** `auto`: reached by the previous track ending; a track that can't be played is then skipped. */
 function start(queue: readonly ListenTrack[], index: number, auto = false, position = 0, autoplay = true) {
+  if (!applyingShared && !localPlaybackAllowed()) return;
+  occurrence = newEventId();
   const track = queue[index];
   const a = el();
   reportEnd();
@@ -366,16 +376,22 @@ function start(queue: readonly ListenTrack[], index: number, auto = false, posit
   resolving?.abort();
   const ctl = new AbortController();
   resolving = ctl;
+  const resolveTimeout = setTimeout(() => {
+    if (resolving !== ctl) return;
+    ctl.abort();
+    a.pause();
+    set({ phase: 'error', error: 'Истекло время загрузки аудио' });
+  }, 20_000);
   pendingSeek = position;
   set({ track, queue, index, context: listContext, phase: autoplay ? 'resolving' : 'paused', info: null, error: null, position, duration: track.duration_s ?? 0 });
-  a.src = listenStreamUrl(track.ref);
+  a.src = listenStreamUrl(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref);
   if (autoplay) play(a);
   else a.load();
   mediaSession(track);
   // the prefetch of this very track (it was next) is the request to wait for: don't abort it
   if (prefetching?.ref !== track.ref) prefetching?.ctl.abort();
   prefetching = null;
-  api.listen(track.ref, ctl.signal).then(
+  api.listen(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref, ctl.signal).then(
     (info) => {
       if (resolving !== ctl) return;
       set({ info, duration: info.kind === 'preview' ? (info.duration_s ?? 30) : state.duration });
@@ -388,7 +404,7 @@ function start(queue: readonly ListenTrack[], index: number, auto = false, posit
       set({ phase: 'error', error: errorMessage(e) });
       a.pause();
     },
-  );
+  ).finally(() => clearTimeout(resolveTimeout));
 }
 
 /** The Hub opens the picked file only when the stream asks for it, and moves on to the next file if it doesn't
@@ -398,10 +414,12 @@ function refreshInfo() {
   const ref = state.track?.ref;
   if (!ref || refreshed === ref || state.info?.kind !== 'full') return;
   refreshed = ref;
-  api.listen(ref).then(
+  const ctl = new AbortController();
+  const timeout = setTimeout(() => ctl.abort(), 8000);
+  api.listen(ref, ctl.signal).then(
     (info) => state.track?.ref === ref && set({ info }),
     () => {},
-  );
+  ).finally(() => clearTimeout(timeout));
 }
 
 /** Asks the Hub to pick the next track's file now (it remembers the pick), so it starts at once. */
@@ -411,9 +429,10 @@ function prefetchNext() {
   prefetching?.ctl.abort();
   const ctl = new AbortController();
   prefetching = { ref: nextTrack.ref, ctl };
-  api.listen(nextTrack.ref, ctl.signal).catch(() => {
+  const timeout = setTimeout(() => ctl.abort(), 20_000);
+  api.listen(nextTrack.nd_song_id ? `nd:${nextTrack.nd_song_id}` : nextTrack.ref, ctl.signal).catch(() => {
     /* the track itself will show the error when it is reached */
-  });
+  }).finally(() => clearTimeout(timeout));
 }
 
 // --- tracks on screen -------------------------------------------------------------------------------------
@@ -489,10 +508,13 @@ export function listen(track: ListenTrack, queue?: readonly ListenTrack[], conte
 }
 
 function startList(track: ListenTrack, queue?: readonly ListenTrack[], context?: string, origin?: LaunchOrigin) {
+  if (!applyingShared && !localPlaybackAllowed()) return;
   listContext = context ?? routeContext();
   listLaunch = newLaunch(listContext, origin);
-  const list = queue?.some((t) => t.ref === track.ref) ? queue : [track];
-  const at = list.findIndex((t) => t.ref === track.ref);
+  const source = queue?.some((t) => t === track || t.ref === track.ref) ? queue : [track];
+  const identityIndex = source.indexOf(track);
+  const at = identityIndex >= 0 ? identityIndex : source.findIndex((t) => t.ref === track.ref);
+  const list = source.map((t) => ({ ...t }));
   smartHooks?.listStarted(listContext); // the previous list's smart session is over; this list may have its own
   // shuffle stays on for the next list: the tapped track first, the rest in random order
   if (state.shuffle && !listContext.startsWith('wave:') && list.length > 1) {
@@ -565,8 +587,10 @@ function persistListening(force = false) {
 /** Restore only after /me confirms the account. Native Android playback owns its own session. */
 export function restoreListening(account: number | null) {
   if (sessionAccount === account) return;
+  stopSharedPlayback();
   if (sessionAccount !== null) stopListening();
   sessionAccount = account;
+  if (account !== null) startSharedPlayback(sharedAdapter, account);
   if (account === null || canPlayAll()) return;
   try {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY + account) ?? 'null') as SavedSession | null;
@@ -581,7 +605,8 @@ export function restoreListening(account: number | null) {
       ? { id: saved.launch.id, origin: typeof saved.launch.origin === 'string' ? saved.launch.origin : null }
       : newLaunch(saved.context);
     set({ shuffle: saved.shuffle === true, smart: saved.smart === true, repeat: saved.repeat === 'all' || saved.repeat === 'one' ? saved.repeat : 'off' });
-    start(saved.queue, saved.index, false, saved.position, saved.autoplay === true);
+    // Restored queues never resume behind an existing remote owner or after a lost lease.
+    start(saved.queue, saved.index, false, saved.position, false);
     smartHooks?.restored();
   } catch { /* Ignore an incomplete or obsolete snapshot. */ }
 }
@@ -745,10 +770,11 @@ export function removeFromQueue(index: number) {
 export function moveInQueue(from: number, to: number) {
   const q = [...state.queue];
   if (from === to || from < 0 || to < 0 || from >= q.length || to >= q.length) return;
-  const current = q[state.index];
+  const currentIndex = state.index === from ? to
+    : state.index + (from < state.index ? -1 : 0) + (to <= state.index - (from < state.index ? 1 : 0) ? 1 : 0);
   const [t] = q.splice(from, 1);
   q.splice(to, 0, t);
-  set({ queue: q, index: q.indexOf(current) });
+  set({ queue: q, index: currentIndex });
   prefetchNext();
 }
 
@@ -803,6 +829,7 @@ export function toggle() {
 }
 
 function resume() {
+  if (!applyingShared && !localPlaybackAllowed()) return;
   const a = audio;
   const track = state.track;
   if (!a || !track) return;
@@ -811,6 +838,183 @@ function resume() {
   set({ phase: state.info || state.position ? 'loading' : 'resolving' });
   play(a);
 }
+
+/** Only canonical identifiers and display metadata cross the device boundary. */
+function sharedSnapshot(): PlaybackSnapshot | null {
+  if (!state.track) return null;
+  if (state.queue.length > 1000) throw new Error('Общая очередь ограничена 1000 треками.');
+  if (state.info?.kind === 'preview') throw new Error('Превью нельзя передать как полный трек.');
+  const queue = state.queue.map((track) => {
+    const nd = track.nd_song_id || (track.ref.startsWith('nd:') ? track.ref.slice(3) : null);
+    if (nd && !/^[A-Za-z0-9_.-]+$/.test(nd)) throw new Error('В очереди есть локальный трек без общего идентификатора.');
+    const ref = track.ref || (nd ? `nd:${nd}` : '');
+    if (!/^(?:(?:dz|hm|mb|nd):[A-Za-z0-9_.-]+|file:[A-Za-z0-9_-]+:[A-Za-z0-9_.:-]+)$/.test(ref)) {
+      throw new Error('Локальные файлы и ссылки нельзя передавать. Выберите треки из библиотеки или каталога.');
+    }
+    return { ref, nd_song_id: nd, title: track.title, artist: track.artist, album: track.album ?? '',
+      duration_s: Number.isFinite(track.duration_s) ? Math.max(0, track.duration_s!) : 0 };
+  });
+  return {
+    queue, index: state.index, occurrence,
+    position: Math.max(0, pendingSeek || (audio?.currentTime ?? state.position)),
+    playing: !!audio && !audio.paused && !audio.ended && audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA,
+    volume: audio?.volume ?? state.volume, repeat: state.repeat, shuffle: state.shuffle,
+  };
+}
+
+/** Readiness is actual decoded audio, not a successful metadata HTTP response. */
+function sharedMediaReady(signal: AbortSignal, ready: () => boolean) {
+  return new Promise<void>((resolve, reject) => {
+    const finish = (error?: Error) => {
+      clearInterval(timer);
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', aborted);
+      if (error) reject(error);
+      else resolve();
+    };
+    const aborted = () => finish(new Error('Передача отменена или соединение потеряно'));
+    const check = () => {
+      if (signal.aborted) return aborted();
+      if (audio?.error || state.phase === 'error') return finish(new Error(state.error || 'Не удалось открыть аудио'));
+      if (state.info?.kind === 'preview') return finish(new Error('Доступно только превью, передача полного трека невозможна'));
+      try { if (ready()) finish(); }
+      catch (e) { finish(e instanceof Error ? e : new Error('Не удалось начать воспроизведение')); }
+    };
+    const timer = setInterval(check, 100);
+    const timeout = setTimeout(() => finish(new Error('Истекло время подготовки аудио')), 20_000);
+    signal.addEventListener('abort', aborted, { once: true });
+    check();
+  });
+}
+
+const sharedAdapter = {
+  snapshot: sharedSnapshot,
+  pause() {
+    audio?.pause();
+    pause();
+  },
+  async unlock() {
+    const a = el();
+    if (canPlayAll()) throw new Error('В приложении используйте его плеер; для передачи сюда откройте обычный браузер.');
+    if (!a.getAttribute('src')) throw new Error('Сначала передайте трек сюда. Если браузер запретит звук, разрешите его этой кнопкой и повторите передачу.');
+    if (!a.paused) return;
+    const muted = a.muted;
+    a.muted = true;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    const abort = () => a.pause();
+    ctl.signal.addEventListener('abort', abort, { once: true });
+    try {
+      let started = false;
+      let failure: unknown;
+      void a.play().then(() => { started = true; }, (e: unknown) => { failure = e; });
+      await sharedMediaReady(ctl.signal, () => {
+        if (failure) throw failure;
+        return started && !a.paused;
+      });
+    } finally {
+      clearTimeout(timer);
+      a.pause();
+      a.muted = muted;
+      set({ phase: 'paused' });
+    }
+  },
+  async execute(command: PlaybackCommand, signal: AbortSignal): Promise<PlaybackSnapshot> {
+    if (canPlayAll()) throw new Error('Передача в WebView недоступна. Откройте HomeMusic в обычном браузере.');
+    if (signal.aborted || Date.now() / 1000 >= command.expires_at) throw new Error('Срок команды истёк');
+    const a = el();
+    const abort = () => { a.pause(); resolving?.abort(); };
+    signal.addEventListener('abort', abort, { once: true });
+    let shouldPlay = false;
+    let mustLoad = false;
+    try {
+      applyingShared = true;
+      try {
+        if (command.kind === 'prepare' || command.kind === 'start') {
+          const snapshot = command.state;
+          if (!snapshot?.queue.length || !snapshot.queue[snapshot.index]) throw new Error('Нет очереди для передачи');
+          smartHooks?.end();
+          smartChosen = false;
+          unshuffled = null;
+          listContext = 'other';
+          listLaunch = newLaunch(listContext);
+          set({ smart: false });
+          setModes({ shuffle: snapshot.shuffle, repeat: snapshot.repeat });
+          setVolume(snapshot.volume);
+          // The source's final stop snapshot wins, including its exact occurrence and queue.
+          const current = command.kind === 'start' ? sharedSnapshot() : null;
+          const sameQueue = current && current.index === snapshot.index && current.occurrence === snapshot.occurrence
+            && JSON.stringify(current.queue) === JSON.stringify(snapshot.queue);
+          a.pause();
+          if (command.kind === 'prepare' || !sameQueue) {
+            start(snapshot.queue.map((track) => ({ ...track, ref: track.ref || `nd:${track.nd_song_id}` })), snapshot.index, false, snapshot.position, false);
+          } else seek(snapshot.position);
+          occurrence = snapshot.occurrence;
+          mustLoad = true;
+          shouldPlay = command.kind === 'start' && snapshot.playing;
+        } else if (command.kind === 'stop' || command.kind === 'pause') {
+          a.pause();
+          pause();
+          if (state.track) set({ position: a.currentTime, phase: 'paused' });
+        } else if (command.kind === 'volume') {
+          if (!Number.isFinite(command.value)) throw new Error('Не задана громкость');
+          setVolume(command.value!);
+        } else if (command.kind === 'seek') {
+          if (!Number.isFinite(command.value)) throw new Error('Не задана позиция');
+          seek(Math.max(0, command.value!));
+          mustLoad = true;
+        } else {
+          if (!state.track) throw new Error('Очередь пуста');
+          let index = state.index;
+          if (command.kind === 'next') {
+            if (hasNext(state)) index++;
+            else if (state.repeat === 'all') index = 0;
+            else throw new Error('Достигнут конец очереди');
+          } else if (command.kind === 'prev' && hasPrev(state) && a.currentTime < RESTART_AFTER_S) index--;
+          if (command.kind !== 'play' || state.phase === 'error' || state.phase === 'ended') {
+            start(state.queue, index, false, 0, false);
+          }
+          mustLoad = true;
+          shouldPlay = true;
+        }
+      } finally {
+        applyingShared = false;
+      }
+      if (mustLoad) {
+        const expectedOccurrence = occurrence;
+        await sharedMediaReady(signal, () => {
+          if (occurrence !== expectedOccurrence) throw new Error('Очередь изменена во время передачи');
+          return !!state.info && pendingSeek === 0 && a.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && !a.seeking;
+        });
+      }
+      if ((command.kind === 'prepare' || command.kind === 'start') && command.state
+        && Math.abs(a.currentTime - command.state.position) > 0.5) {
+        throw new Error('Источник не позволяет перейти к точной позиции передаваемого трека');
+      }
+      if (shouldPlay) {
+        if (signal.aborted || Date.now() / 1000 >= command.expires_at) throw new Error('Срок команды истёк');
+        let started = false;
+        let failure: unknown;
+        void a.play().then(() => { started = true; }, (e: unknown) => { failure = e; });
+        await sharedMediaReady(signal, () => {
+          if (failure) throw new Error((failure as Error).name === 'NotAllowedError'
+            ? 'Браузер запретил звук. Нажмите «Разрешить звук», затем повторите передачу или команду.'
+            : 'Не удалось начать воспроизведение');
+          return started && !a.paused && a.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+        });
+      }
+      const snapshot = sharedSnapshot();
+      if (!snapshot) throw new Error('Очередь пуста');
+      return snapshot;
+    } catch (e) {
+      // Abort already paused synchronously; an old account's rejected promise must not pause its successor.
+      if (!signal.aborted) { a.pause(); pause(); }
+      throw e;
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
+  },
+};
 
 export function pause() {
   if (!audio || !state.track || state.phase === 'error' || state.phase === 'ended') return;

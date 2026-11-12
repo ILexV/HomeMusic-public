@@ -1,9 +1,19 @@
-# Copy to config.toml next to the program. config.toml is not committed.
-# `cargo run` and `cargo test` still read this folder.
-# A shipped exe reads config.toml in the folder that contains the exe.
-# The password is the Navidrome admin password.
-server = "http://192.168.1.51:4533"
-# Hub. Empty uses the Navidrome host on port 8080.
+# Обычно файл редактировать не нужно: «⋯» → «Подключение».
+# При первом запуске окно входа открывается автоматически.
+# «Проверить вход» не меняет настройки; «Сохранить и переподключиться»
+# проверяет оба сервера, сохраняет настройки и перезапускает плеер.
+#
+# config.toml находится рядом с программой (при cargo run — в desktop/).
+# HTTPS рекомендуется; HTTP допустим только в доверенной локальной сети.
+# Подойдёт обычная учётная запись Navidrome, не обязательно администратор.
+server = "http://127.0.0.1:4533"
+# Пустое значение: тот же хост и протокол, порт 8080.
 hub = ""
 user = ""
+#
+# Windows: успешное сохранение переносит прежний пароль в Диспетчер учётных
+# данных Windows и заменяет password на служебную ссылку credential.
+# Ссылку нельзя переносить на другой компьютер или другую учётную запись.
+# Linux: пароль хранится в этом файле с правами 0600, без шифрования.
+# Прежние файлы с password читаются до миграции, повторный ввод не требуется.
 password = ""

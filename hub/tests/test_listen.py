@@ -453,6 +453,8 @@ async def test_full_song_request_never_plays_a_preview(env):
     response = await c.get("/api/listen/stream", params={"ref": "dz:100", "full": "1"})
     assert response.status_code == 503, response.text
     assert "Полная версия" in response.json()["detail"]
+    metadata = await c.get("/api/listen", params={"ref": "dz:100", "full": "1"})
+    assert metadata.status_code == 503, metadata.text
     assert not any(call.request.url.host == "preview.test" for call in env["mock"].calls)
 
 
@@ -469,6 +471,8 @@ async def test_full_song_replaces_a_cached_preview_with_the_download_fallback(en
     assert response.status_code == 206, response.text
     assert response.headers["X-HomeMusic-Listen-Kind"] == "full"
     assert response.content == AUDIO
+    metadata = await c.get("/api/listen", params={"ref": "dz:100", "full": "1"})
+    assert metadata.json()["kind"] == "full"
     assert not any(call.request.url.host == "preview.test" for call in env["mock"].calls)
 
 

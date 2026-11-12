@@ -79,6 +79,7 @@ export function MorePage() {
       </div>
 
       <ul className="mx-4 overflow-hidden rounded-xl bg-surface">
+        {STANDALONE && <Item icon="transfer" to="/player" title="Плеер и устройства" sub="Перенести воспроизведение или управлять компьютером с телефона" />}
         {STANDALONE && <Item icon="sparkle" to="/assistant" title="Ассистент" sub="Скриншот, список или просьба — найдёт и скачает" />}
         {STANDALONE && (
           <Item

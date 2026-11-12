@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import listen
@@ -185,11 +185,22 @@ async def create(body: DownloadIn, user: User = Depends(current_user), s: AsyncS
 
 
 @router.get("", response_model=list[DownloadItemOut])
-async def list_items(status: str | None = None, limit: int = Query(100, le=500), user: User = Depends(current_user),
-                     s: AsyncSession = Depends(get_session, scope="function")):
+async def list_items(status: str | None = None, limit: int = Query(100, ge=1, le=500), user: User = Depends(current_user),
+                     s: AsyncSession = Depends(get_session, scope="function"),
+                     ref: str | None = Query(None, min_length=1, max_length=128)):
     stmt = select(DownloadItem).where(DownloadItem.user_id == user.id)
     if status:
         stmt = stmt.where(DownloadItem.status.in_([x.strip() for x in status.split(",") if x.strip()]))
+    if ref is not None:
+        matches = DownloadItem.query_json["meta"]["track_ref"].as_string() == ref
+        if listen.is_file_ref(ref):
+            candidate = await listen.file_candidate(ref)
+            if candidate is not None:
+                matches = or_(matches, and_(
+                    DownloadItem.chosen_candidate_json["provider"].as_string() == candidate.provider,
+                    DownloadItem.chosen_candidate_json["provider_id"].as_string() == candidate.provider_id,
+                ))
+        stmt = stmt.where(matches)
     rows = (await s.execute(stmt.order_by(DownloadItem.id.desc()).limit(limit))).scalars().all()
     links = await item_links(s, list(rows))
     return [item_out(r, links=links[r.id]) for r in rows]

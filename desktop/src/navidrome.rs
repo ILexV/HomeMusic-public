@@ -46,8 +46,12 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn load() -> Self {
         let path = crate::paths::dir().join("config.toml");
-        match std::fs::read_to_string(&path) {
-            Ok(text) => parse_config(&text),
+        match crate::connection_settings::read_config(&path) {
+            Ok(text) => {
+                let mut config = parse_config(&text);
+                crate::connection_settings::restore_password(&text, &mut config);
+                config
+            }
             Err(_) => Self::default(),
         }
     }
@@ -126,6 +130,19 @@ pub fn parse_config(text: &str) -> ServerConfig {
         loaded: true,
         ..ServerConfig::default()
     };
+    // New saves use proper TOML escaping, including quotes, backslashes and Unicode.
+    if let Ok(table) = text.parse::<toml::Table>() {
+        for (key, destination) in [
+            ("server", &mut cfg.server), ("hub", &mut cfg.hub),
+            ("user", &mut cfg.user), ("password", &mut cfg.password),
+        ] {
+            if let Some(value) = table.get(key).and_then(toml::Value::as_str) {
+                *destination = value.to_string();
+            }
+        }
+        return cfg;
+    }
+    // Older versions accepted unescaped strings. Keep them readable until a successful save.
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -144,6 +161,35 @@ pub fn parse_config(text: &str) -> ServerConfig {
         }
     }
     cfg
+}
+
+/// Validate the user's Subsonic credentials without requiring a non-empty music library.
+pub(crate) fn check_connection(config: &ServerConfig) -> Result<(), String> {
+    if config.user.is_empty() || config.password.is_empty() {
+        return Err("Navidrome: введите логин и пароль".into());
+    }
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(15))
+        .timeout_connect(Duration::from_secs(3))
+        .timeout_read(Duration::from_secs(8))
+        .timeout_write(Duration::from_secs(5))
+        .build()
+        .get(&view_url(config, "ping.view", ""))
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::Status(401 | 403, _) => "Navidrome: неверный логин или пароль".to_string(),
+            _ => "Navidrome: нет связи. Проверьте адрес сервера и сертификат HTTPS.".to_string(),
+        })?;
+    let body: Value = serde_json::from_reader(response.into_reader().take(64 * 1024))
+        .map_err(|_| "Navidrome: некорректный ответ сервера".to_string())?;
+    if auth_failed(&body) {
+        Err("Navidrome: неверный логин или пароль".into())
+    } else if !status_ok(&body) {
+        Err("Navidrome: сервер не подтвердил вход".into())
+    } else {
+        Ok(())
+    }
 }
 
 pub fn subsonic_token(password: &str, salt: &str) -> String {
@@ -310,6 +356,17 @@ pub fn album_tracks(config: &ServerConfig, album_id: &str) -> Result<LibraryQueu
         return Err("Navidrome: в альбоме нет треков".into());
     }
     Ok(LibraryQueue { name, tracks })
+}
+
+/// Resolve an actual song's album identity, not a title match or partial queue.
+pub fn song_album(config: &ServerConfig, song_id: &str) -> Result<(String, LibraryQueue), String> {
+    require_login(config)?;
+    let body = http_json(&view_url(config, "getSong.view", &format!("id={}", encode(song_id))))?;
+    check_body(config, &body)?;
+    let id = body.get("subsonic-response").and_then(|v| v.get("song"))
+        .and_then(|v| v.get("albumId")).and_then(Value::as_str)
+        .filter(|s| !s.is_empty()).ok_or("Navidrome: нет данных альбома")?;
+    Ok((id.to_owned(), album_tracks(config, id)?))
 }
 
 /// Albums and artists matching a search box query. An empty query does not call the server.

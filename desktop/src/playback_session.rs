@@ -220,6 +220,7 @@ fn encode(
     serde_json::to_vec(&json!({
         "schema": SCHEMA, "account": account, "name": queue.name(),
         "items": items, "index": queue.index(),
+        "modes": queue.modes_snapshot(),
         "position_s": usable_position(position_s, queue.current()), "album_id": album_id,
         "wave": wave.map(|wave| json!({"id": wave.id, "personal": wave.personal, "origin": wave.origin})),
     })).map_err(|_| "Не удалось подготовить очередь к сохранению".into())
@@ -253,6 +254,7 @@ fn decode(bytes: &[u8], account: &str) -> Option<SavedPlayback> {
             return None;
         }
     }
+    if let Some(modes) = value.get("modes") { queue.restore_modes(modes); }
     let position_s = usable_position(value.get("position_s")?.as_f64()? as f32, queue.current());
     let wave = match value.get("wave")? {
         Value::Null => None,

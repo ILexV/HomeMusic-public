@@ -23,6 +23,7 @@ pub fn connect_queue_actions(
     let weak = ui.as_weak();
     let state = hub.clone();
     let items = queue.clone();
+    let playback = player.clone();
     ui.on_move_queue_row(move |from, to| {
         let Some(ui) = weak.upgrade() else { return };
         if from < 0 || to < 0 {
@@ -30,6 +31,7 @@ pub fn connect_queue_actions(
         }
         let moved = items.borrow_mut().move_item(from as usize, to as usize);
         if moved {
+            playback.borrow_mut().cancel_preload();
             cancel_queue_load(&ui, &state);
             show_queue(&ui, &items.borrow(), &state);
         }
@@ -38,10 +40,12 @@ pub fn connect_queue_actions(
     let weak = ui.as_weak();
     let state = hub.clone();
     let items = queue.clone();
+    let playback = player.clone();
     ui.on_queue_row_next(move |source| {
         let Some(ui) = weak.upgrade() else { return };
         let moved = source >= 0 && items.borrow_mut().play_next(source as usize);
         if moved {
+            playback.borrow_mut().cancel_preload();
             cancel_queue_load(&ui, &state);
             show_queue(&ui, &items.borrow(), &state);
         }
@@ -70,6 +74,7 @@ pub fn connect_queue_actions(
         if !items.borrow_mut().remove(source) {
             return;
         }
+        playback.borrow_mut().cancel_preload();
         cancel_queue_load(&ui, &state);
         if current_removed {
             playback.borrow_mut().stop();

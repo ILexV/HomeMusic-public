@@ -1,0 +1,40 @@
+import { Theme, ScrollPort } from "theme.slint";
+
+component InfoField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 6px;
+    Text { text: root.label; color: Theme.muted; font-size: 12px; }
+    Text { text: root.value; color: Theme.text; font-size: 15px; wrap: word-wrap; }
+}
+
+export component StreamInfoPanel inherits Rectangle {
+    in property <string> title;
+    in property <string> source;
+    in property <string> kind;
+    in property <string> format;
+    in property <string> download;
+    in property <string> message;
+    callback refresh();
+    background: Theme.bg;
+    ScrollPort {
+        VerticalLayout {
+            padding: 24px;
+            spacing: 24px;
+            Text { text: root.title == "" ? "Сейчас ничего не выбрано" : root.title; color: Theme.text; font-size: 21px; wrap: word-wrap; }
+            InfoField { label: "Источник записи"; value: root.source; }
+            InfoField { label: "Что воспроизводится"; value: root.kind; }
+            InfoField { label: "Фактические данные декодера"; value: root.format; }
+            InfoField { label: "Загрузка и хранение"; value: root.download; }
+            Text { text: root.message; color: Theme.orange; wrap: word-wrap; }
+            Rectangle {
+                height: 36px;
+                background: refresh-touch.has-hover ? Theme.raised : Theme.panel;
+                border-radius: 4px;
+                Text { text: "Обновить сведения"; color: Theme.text; horizontal-alignment: center; vertical-alignment: center; }
+                refresh-touch := TouchArea { mouse-cursor: pointer; clicked => { root.refresh(); } }
+            }
+            Text { text: "Формат и битрейт относятся к звучащему файлу, а не к записи каталога. Серверная библиотека и копии на этом компьютере — разные хранилища."; color: Theme.muted; wrap: word-wrap; }
+        }
+    }
+}

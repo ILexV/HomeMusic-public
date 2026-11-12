@@ -1,0 +1,132 @@
+import { CheckBox, ComboBox } from "std-widgets.slint";
+import { Theme, EqButton, SearchField, ScrollPort } from "theme.slint";
+
+export struct SmartPlaylistRow { id: string, name: string, detail: string }
+export struct SmartRuleRow { kind: int, value: string, maximum: string, flag: bool }
+
+export component SmartPlaylistsPanel inherits Rectangle {
+    in property <[SmartPlaylistRow]> rows;
+    in property <[SmartRuleRow]> rules;
+    in property <string> selected;
+    in property <string> status;
+    in property <bool> busy;
+    in-out property <string> name;
+    in-out property <bool> match-any;
+    in-out property <int> sort;
+    in-out property <bool> descending;
+    in-out property <string> limit;
+    callback refresh();
+    callback select-playlist(string);
+    callback new-playlist();
+    callback save();
+    callback delete-playlist();
+    callback preview();
+    callback play();
+    callback add-rule();
+    callback remove-rule(int);
+    callback rule-kind(int, int);
+    callback rule-value(int, string);
+    callback rule-maximum(int, string);
+    callback rule-flag(int);
+    background: Theme.panel;
+
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+        VerticalLayout {
+            min-width: 170px;
+            max-width: 220px;
+            spacing: 8px;
+            Text { text: "Плейлисты по правилам"; color: Theme.text; font-size: 15px; wrap: word-wrap; }
+            HorizontalLayout {
+                EqButton { label: "Новый"; enabled: !root.busy; clicked => { root.new-playlist(); } }
+                EqButton { label: "Обновить"; enabled: !root.busy; clicked => { root.refresh(); } }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 80px;
+            ScrollPort {
+                for row in root.rows: Rectangle {
+                    height: 64px;
+                    background: root.selected == row.id ? Theme.raised : transparent;
+                    VerticalLayout {
+                        padding: 6px;
+                        Text { text: row.name; color: Theme.text; overflow: elide; }
+                        Text { text: row.detail; color: Theme.dim; font-size: 11px; overflow: elide; }
+                    }
+                    TouchArea { enabled: !root.busy; clicked => { root.select-playlist(row.id); } }
+                }
+            }
+            }
+        }
+        VerticalLayout {
+            spacing: 8px;
+            Text { text: "Только ваша медиатека — без рекомендаций"; color: Theme.dim; wrap: word-wrap; }
+            SearchField { text <=> root.name; hint: "Название плейлиста"; }
+            CheckBox { text: "Совпадает хотя бы одно правило (иначе — все)"; checked <=> root.match-any; }
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 120px;
+            ScrollPort {
+                for rule[index] in root.rules: Rectangle {
+                    height: rule.kind == 1 || rule.kind == 4 ? 112px : 82px;
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        HorizontalLayout {
+                            ComboBox {
+                                model: ["Понравившиеся", "Не слушал N дней", "Никогда не слушал", "Жанр", "Годы выпуска", "Недавно добавлены"];
+                                current-index: rule.kind;
+                                selected(value) => { root.rule-kind(index, self.current-index); }
+                            }
+                            EqButton { label: "Удалить правило"; clicked => { root.remove-rule(index); } }
+                        }
+                        if rule.kind == 0: CheckBox {
+                            text: "Наоборот: без отметки «Нравится»";
+                            checked: rule.flag;
+                            toggled => { root.rule-flag(index); }
+                        }
+                        if rule.kind == 1 || rule.kind == 3 || rule.kind == 4 || rule.kind == 5: SearchField {
+                            text: rule.value;
+                            hint: rule.kind == 3 ? "Жанр (точное название)" : rule.kind == 4 ? "Год от" : "Число дней";
+                            edited(value) => { root.rule-value(index, value); }
+                        }
+                        if rule.kind == 4: SearchField {
+                            text: rule.maximum; hint: "Год до (включительно)";
+                            edited(value) => { root.rule-maximum(index, value); }
+                        }
+                        if rule.kind == 1: CheckBox {
+                            text: "Включить и ни разу не слушанные";
+                            checked: rule.flag;
+                            toggled => { root.rule-flag(index); }
+                        }
+                        if rule.kind == 2: Text {
+                            text: "Нет прослушиваний за всю доступную историю";
+                            color: Theme.dim; font-size: 11px; wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+            }
+            EqButton { label: "Добавить правило"; clicked => { root.add-rule(); } }
+            HorizontalLayout {
+                ComboBox {
+                    model: ["По названию", "По исполнителю", "По году", "По добавлению", "По прослушиванию", "Случайно"];
+                    current-index <=> root.sort;
+                }
+                CheckBox { text: "По убыванию"; checked <=> root.descending; }
+                SearchField { text <=> root.limit; hint: "Лимит (1–2000)"; }
+            }
+            HorizontalLayout {
+                EqButton { label: "Сохранить"; enabled: !root.busy; clicked => { root.save(); } }
+                EqButton { label: "Удалить"; enabled: !root.busy && root.selected != ""; clicked => { root.delete-playlist(); } }
+                EqButton { label: "Проверить"; enabled: !root.busy; clicked => { root.preview(); } }
+                EqButton { label: "Играть"; enabled: !root.busy; clicked => { root.play(); } }
+            }
+            Text {
+                text: root.busy ? "Загрузка…" : root.status;
+                color: Theme.dim; wrap: word-wrap; min-height: 36px;
+            }
+        }
+    }
+}

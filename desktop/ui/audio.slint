@@ -1,0 +1,41 @@
+import { CheckBox, ComboBox, Slider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component AudioPanel inherits Rectangle {
+    in property <float> audio-crossfade;
+    in property <bool> audio-overlap-album;
+    in property <int> audio-normalization;
+    in property <string> audio-status;
+    callback audio-set-crossfade(float);
+    callback audio-set-overlap-album(bool);
+    callback audio-set-normalization(int);
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+        Text { text: "ПЕРЕХОДЫ И ГРОМКОСТЬ"; color: Theme.text; font-size: 15px; font-weight: 600; }
+        Text { text: "Предзагрузка следующего трека включена. При нулевом перекрытии — непрерывное воспроизведение."; color: Theme.muted; wrap: word-wrap; }
+        Text { text: "Перекрытие: " + round(root.audio-crossfade * 10) / 10 + " с"; color: Theme.text; }
+        Slider {
+            minimum: 0; maximum: 12; value: root.audio-crossfade;
+            changed(value) => { root.audio-set-crossfade(value); }
+        }
+        CheckBox {
+            text: "Разрешить перекрытие внутри альбома";
+            checked: root.audio-overlap-album;
+            toggled => { root.audio-set-overlap-album(self.checked); }
+        }
+        Text { text: "Нормализация громкости"; color: Theme.text; font-size: 14px; }
+        ComboBox {
+            model: ["Выключена", "По треку", "По альбому"];
+            current-index: root.audio-normalization;
+            selected(value) => { root.audio-set-normalization(self.current-index); }
+        }
+        Text { text: root.audio-status; color: Theme.orange; wrap: word-wrap; }
+        Text {
+            text: "Нет тегов громкости? Аудио анализируется в фоне целиком. Пока анализ не окончен, усиление не меняется. Режим альбома использует единый коэффициент для полного альбома и сохраняет разницу громкости между треками. Для локальных файлов без данных альбома доступен режим трека.";
+            color: Theme.muted; wrap: word-wrap; font-size: 12px;
+        }
+        Rectangle { vertical-stretch: 1; }
+    }
+}

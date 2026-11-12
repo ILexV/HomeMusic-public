@@ -1,0 +1,78 @@
+import { Theme, EqButton, ScrollPort } from "theme.slint";
+
+export struct DeviceRow {
+    id: string,
+    name: string,
+    detail: string,
+    online: bool,
+    owner: bool,
+}
+
+export component DevicesPanel inherits Rectangle {
+    in property <[DeviceRow]> rows;
+    in property <string> status;
+    in property <string> error;
+    in property <string> track;
+    in property <bool> busy;
+    in property <bool> playing;
+    in property <bool> has-session;
+    in property <bool> detached;
+    in property <float> position;
+    in property <float> duration;
+    in property <float> volume;
+    callback transfer(string);
+    callback take-here();
+    callback local-only();
+    callback command(string, float);
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+        Text { text: "Устройства и общая очередь"; color: Theme.text; font-size: 18px; }
+        Text { text: root.status; color: Theme.muted; wrap: word-wrap; }
+        if root.error != "" : Text { text: root.error; color: Theme.orange; wrap: word-wrap; }
+        Text { text: root.track; color: Theme.text; overflow: elide; }
+        HorizontalLayout {
+            spacing: 6px;
+            EqButton { label: root.detached ? "Подключить" : "Здесь"; tip: "Продолжить общую сессию на компьютере"; enabled: !root.busy; clicked => { root.take-here(); } }
+            EqButton { label: "Назад"; enabled: root.has-session && !root.busy; clicked => { root.command("prev", 0); } }
+            EqButton { label: root.playing ? "Пауза" : "Играть"; enabled: root.has-session && !root.busy; clicked => { root.command(root.playing ? "pause" : "play", 0); } }
+            EqButton { label: "Далее"; enabled: root.has-session && !root.busy; clicked => { root.command("next", 0); } }
+        }
+        if !root.detached : EqButton { label: "Слушать только здесь"; tip: "Отключиться от общей сессии, в том числе без сети"; clicked => { root.local-only(); } }
+        Text { text: "Позиция: " + round(root.position) + " / " + round(root.duration) + " с"; color: Theme.muted; font-size: 11px; }
+        Rectangle {
+            height: 16px; background: Theme.raised;
+            Rectangle { width: parent.width * (root.duration > 0 ? min(1, root.position / root.duration) : 0); height: 100%; background: Theme.orange; }
+            TouchArea { enabled: root.has-session && !root.busy && root.duration > 0; mouse-cursor: pointer; clicked => { root.command("seek", max(0, min(1, self.mouse-x / self.width)) * root.duration); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Громкость"; color: Theme.muted; }
+            Rectangle {
+                height: 16px; background: Theme.raised;
+                Rectangle { width: parent.width * root.volume; height: 100%; background: Theme.orange; }
+                TouchArea { enabled: root.has-session && !root.busy; mouse-cursor: pointer; clicked => { root.command("volume", max(0, min(1, self.mouse-x / self.width))); } }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 80px;
+        ScrollPort {
+            for device in root.rows : Rectangle {
+                height: 66px;
+                background: device.owner ? Theme.raised : transparent;
+                HorizontalLayout {
+                    padding: 8px; spacing: 8px;
+                    VerticalLayout {
+                        Text { text: device.name; color: device.online ? Theme.text : Theme.dim; overflow: elide; }
+                        Text { text: device.detail; color: Theme.muted; font-size: 11px; overflow: elide; }
+                    }
+                    EqButton { label: device.owner ? "Активно" : "Передать"; enabled: device.online && !device.owner && root.has-session && !root.busy; clicked => { root.transfer(device.id); } }
+                }
+            }
+        }
+        }
+        Text { text: "Локальные файлы без ID библиотеки передать нельзя. При потере связи общая сессия приостанавливается."; color: Theme.dim; font-size: 11px; wrap: word-wrap; }
+    }
+}

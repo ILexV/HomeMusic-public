@@ -258,7 +258,39 @@ impl Hub {
         self.cookie_value()
     }
 
-    fn send(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    /// Full recording only; redirects cannot carry the account cookie elsewhere.
+    pub(crate) fn full_stream(&self, reference: &str) -> Result<ureq::Response, String> {
+        let url = self.listen_url(reference, true);
+        if url.is_empty() {
+            return Err("Хаб: нет адреса или трека".into());
+        }
+        for attempt in 0..2 {
+            if self.cookie_value().is_empty() {
+                self.login()?;
+            }
+            let response = ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout_connect(Duration::from_secs(5))
+                .timeout_read(Duration::from_secs(25))
+                .build()
+                .get(&url)
+                .set("Cookie", &format!("hm_session={}", self.cookie_value()))
+                .set("X-HomeMusic-Prefetch", "1")
+                .call();
+            match response {
+                Ok(response) if response.status() == 200
+                    && response.header("X-HomeMusic-Listen-Kind") != Some("preview") => {
+                    return Ok(response);
+                }
+                Ok(_) => return Err("Хаб: полная запись недоступна".into()),
+                Err(ureq::Error::Status(401, _)) if attempt == 0 => self.set_cookie(String::new()),
+                Err(error) => return Err(http_err(error)),
+            }
+        }
+        Err("Хаб: требуется вход".into())
+    }
+
+    pub(crate) fn send(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
         if self.base.is_empty() {
             return Err("Хаб: нет адреса".into());
         }
@@ -334,6 +366,9 @@ impl Hub {
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(40))
+        .timeout_write(Duration::from_secs(10))
         .timeout_connect(Duration::from_secs(5))
         .timeout_read(Duration::from_secs(25))
         .build()

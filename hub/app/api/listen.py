@@ -16,17 +16,17 @@ from app.models import User
 router = APIRouter(prefix="/api/listen", tags=["listen"])
 
 
-async def _choose(ref: str) -> listen.Choice:
+async def _choose(ref: str, *, full: bool = False) -> listen.Choice:
     try:
-        return await listen.choose(ref)
+        return await listen.choose(ref, full_only=full)
     except listen.ListenError as e:
         raise HTTPException(e.status, str(e)) from e
 
 
 @router.get("", response_model=ListenOut)
-async def resolve(ref: str, user: User = Depends(current_user)):
+async def resolve(ref: str, full: bool = False, user: User = Depends(current_user)):
     """Picks the file (may take a while: providers are searched), then the client plays `stream_url`."""
-    c = await _choose(ref)
+    c = await _choose(ref, full=full)
     cand = c.candidate
     return ListenOut(
         ref=c.ref,

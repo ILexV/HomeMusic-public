@@ -1,10 +1,33 @@
-//! Playback through libmpv. The window polls `snapshot`; nothing here advances a timer.
+//! Playback through libmpv, with native gapless prefetch and a second crossfade deck.
 
 use std::ffi::c_char;
 
 use libmpv2::Mpv;
 
 use crate::eq::{self, Settings};
+
+#[path = "audio_analysis.rs"]
+pub(crate) mod analysis;
+pub use analysis::{AudioTrack, Normalization};
+
+#[derive(Default)]
+pub struct StreamDetails {
+    pub codec: String,
+    pub bitrate_kbps: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<String>,
+}
+
+struct Prepared {
+    key: String,
+    deck: Option<Box<Player>>,
+    same_album: bool,
+}
+
+struct Fade {
+    outgoing: Box<Player>,
+    seconds: f64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackPhase {
@@ -48,23 +71,61 @@ pub struct Player {
     /// Set by stop and by a natural end that was already handled.
     /// A following end-of-file event must not advance the queue.
     user_stopped: bool,
+    null_audio: bool,
+    prepared: Option<Prepared>,
+    promoted: Option<String>,
+    native_ending: bool,
+    fade: Option<Fade>,
+    fade_factor: f64,
+    crossfade_s: f64,
+    overlap_album: bool,
+    normalization: Normalization,
+    gain_db: f64,
+    audio_track: Option<AudioTrack>,
+    album_tracks: Vec<AudioTrack>,
+    analyzer: Option<analysis::Analyzer>,
+    normalization_status: String,
+}
+
+fn volume_setting(user_volume: f32, gain_db: f64, fade: f64) -> f64 {
+    // mpv applies (volume / 100)^3 to PCM. Preserve the user's existing curve,
+    // but convert our physical dB gain and linear-amplitude fade into that curve.
+    f64::from(user_volume) * 100.0 * 10f64.powf(gain_db / 60.0) * fade.cbrt()
+}
+
+fn open_mpv(null_audio: bool) -> Result<Mpv, libmpv2::Error> {
+    Mpv::with_initializer(|init| {
+        init.set_option("idle", "yes")?;
+        init.set_option("vid", "no")?;
+        init.set_option("audio-display", "no")?;
+        init.set_option("ytdl", "no")?;
+        init.set_option("msg-level", "all=no")?;
+        init.set_option("gapless-audio", "yes")?;
+        init.set_option("prefetch-playlist", "yes")?;
+        init.set_option("network-timeout", "15")?;
+        init.set_option("volume-max", "1000")?;
+        if null_audio { init.set_option("ao", "null")?; }
+        Ok(())
+    })
+}
+
+fn append_file(mpv: &Mpv, target: &str, cookie: &str) -> Result<(), libmpv2::Error> {
+    let header = cookie_header(cookie).unwrap_or_default();
+    let options = format!("http-header-fields=%{}%{},start=0", header.len(), header);
+    let version = mpv.get_property::<String>("mpv-version").unwrap_or_default();
+    let minor = version.trim_start_matches("mpv ").split('.').nth(1)
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(38);
+    if minor >= 38 {
+        mpv.command("loadfile", &[target, "append", "-1", &options])
+    } else {
+        mpv.command("loadfile", &[target, "append", &options])
+    }
 }
 
 impl Player {
     pub fn open(options: PlayerOptions) -> Self {
         ensure_c_numeric();
-        let opened = Mpv::with_initializer(|init| {
-            init.set_option("idle", "yes")?;
-            init.set_option("vid", "no")?;
-            init.set_option("audio-display", "no")?;
-            init.set_option("ytdl", "no")?;
-            // Keep the stream URL, which carries the Subsonic token, out of the log.
-            init.set_option("msg-level", "all=no")?;
-            if options.null_audio {
-                init.set_option("ao", "null")?;
-            }
-            Ok(())
-        });
+        let opened = open_mpv(options.null_audio);
         match opened {
             Ok(mpv) => {
                 let player = Self {
@@ -76,6 +137,12 @@ impl Player {
                     phase: PlaybackPhase::Idle,
                     awaiting_start: false,
                     user_stopped: false,
+                    null_audio: options.null_audio,
+                    prepared: None, promoted: None, native_ending: false, fade: None,
+                    fade_factor: 1.0, crossfade_s: 0.0, overlap_album: false,
+                    normalization: Normalization::Off, gain_db: 0.0,
+                    audio_track: None, album_tracks: Vec::new(), analyzer: None,
+                    normalization_status: "Нормализация выключена".into(),
                 };
                 player.apply_volume();
                 player
@@ -89,8 +156,196 @@ impl Player {
                 phase: PlaybackPhase::Error,
                 awaiting_start: false,
                 user_stopped: false,
+                null_audio: options.null_audio,
+                prepared: None, promoted: None, native_ending: false, fade: None,
+                fade_factor: 1.0, crossfade_s: 0.0, overlap_album: false,
+                normalization: Normalization::Off, gain_db: 0.0,
+                audio_track: None, album_tracks: Vec::new(), analyzer: None,
+                normalization_status: "Нормализация выключена".into(),
             },
         }
+    }
+
+    pub fn stream_details(&self) -> StreamDetails {
+        let Some(mpv) = self.mpv.as_ref().filter(|_| !self.is_idle() && self.phase != PlaybackPhase::Loading) else { return StreamDetails::default(); };
+        StreamDetails {
+            codec: mpv.get_property("audio-codec-name").unwrap_or_default(),
+            bitrate_kbps: prop_f64(mpv, "audio-bitrate").map(|v| (v / 1000.0).round() as u32),
+            sample_rate: prop_f64(mpv, "audio-params/samplerate").map(|v| v as u32),
+            channels: mpv.get_property::<String>("audio-params/hr-channels").ok(),
+        }
+    }
+
+    pub fn set_crossfade(&mut self, seconds: f64, overlap_album: bool) {
+        let seconds = if seconds.is_finite() { seconds.clamp(0.0, 12.0) } else { 0.0 };
+        if self.crossfade_s != seconds || self.overlap_album != overlap_album {
+            self.cancel_preload();
+            self.finish_fade();
+            self.crossfade_s = seconds;
+            self.overlap_album = overlap_album;
+        }
+    }
+
+    /// Key identifies the predicted queue occurrence. Invalidate on queue changes.
+    pub fn prepare_next(&mut self, target: &str, cookie: &str, key: &str, same_album: bool) -> Result<(), String> {
+        if self.prepared.as_ref().is_some_and(|p| p.key == key) { return Ok(()); }
+        self.cancel_preload();
+        if self.is_idle() || self.promoted.is_some() { return Ok(()); }
+        let deck = if self.crossfade_s > 0.0 && (!same_album || self.overlap_album) {
+            let mut next = Box::new(Self::open(PlayerOptions { null_audio: self.null_audio }));
+            next.volume = self.volume;
+            next.restore_eq(self.eq);
+            next.load_cookie_at(target, cookie, 0.0, true)?;
+            if same_album && self.normalization == Normalization::Album {
+                next.gain_db = self.gain_db;
+                next.apply_volume();
+            }
+            Some(next)
+        } else {
+            let mpv = self.mpv.as_ref().ok_or("Звук недоступен")?;
+            append_file(mpv, target, cookie).map_err(|_| "Не удалось подготовить следующий трек")?;
+            None
+        };
+        self.prepared = Some(Prepared { key: key.to_owned(), deck, same_album });
+        Ok(())
+    }
+
+    pub fn cancel_preload(&mut self) {
+        self.prepared = None;
+        self.native_ending = false;
+        if let Some(mpv) = &self.mpv { let _ = mpv.command("playlist-clear", &[]); }
+    }
+
+    /// After take_natural_end, advance the queue but never reload promoted audio.
+    pub fn take_promoted(&mut self) -> Option<String> { self.promoted.take() }
+
+    pub fn set_audio_context(&mut self, track: AudioTrack, complete_album: Vec<AudioTrack>) {
+        self.audio_track = Some(track);
+        self.album_tracks = complete_album;
+        self.update_normalization();
+    }
+
+    pub fn set_normalization(&mut self, mode: Normalization) {
+        if self.normalization != mode {
+            if let Some(analyzer) = &mut self.analyzer { analyzer.cancel(); }
+            self.normalization = mode;
+            self.gain_db = 0.0;
+            self.apply_volume();
+            self.update_normalization();
+        }
+    }
+
+    pub fn normalization(&self) -> Normalization { self.normalization }
+    pub fn normalization_status(&self) -> &str { &self.normalization_status }
+    pub fn needs_audio_context(&self) -> bool {
+        self.audio_track.is_none() && self.promoted.is_none() && !self.is_idle()
+    }
+
+    fn update_normalization(&mut self) {
+        if self.normalization == Normalization::Off {
+            self.normalization_status = "Нормализация выключена".into();
+            return;
+        }
+        let Some(track) = &self.audio_track else {
+            self.normalization_status = "Ожидание данных трека…".into();
+            return;
+        };
+        let (key, tracks) = match self.normalization {
+            Normalization::Track => (format!("track:{}", track.key), std::slice::from_ref(track)),
+            Normalization::Album if !track.album.is_empty() && !self.album_tracks.is_empty() => {
+                (format!("album:{}", track.album), self.album_tracks.as_slice())
+            }
+            _ => {
+                let tagged = self.mpv.as_ref().and_then(|m| m.get_property::<String>("metadata/by-key/REPLAYGAIN_ALBUM_GAIN").ok())
+                    .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+                    .filter(|v| v.is_finite());
+                if let Some(gain) = tagged {
+                    self.gain_db = gain.clamp(-24.0, 12.0);
+                    self.apply_volume();
+                    self.normalization_status = format!("Альбом · теги · {:+.1} дБ", self.gain_db);
+                } else {
+                    self.normalization_status = "Альбом: ожидается полный состав / нет данных альбома".into();
+                }
+                return;
+            }
+        };
+        let analyzer = self.analyzer.get_or_insert_with(analysis::Analyzer::new);
+        match analyzer.gain(&key, tracks) {
+            None => self.normalization_status = "Анализ громкости полного аудио…".into(),
+            Some(None) => self.normalization_status = "Анализ недоступен · усиление не изменено".into(),
+            Some(Some(gain)) => {
+                if (self.gain_db - gain).abs() > 0.001 {
+                    self.gain_db = gain;
+                    self.apply_volume();
+                }
+                let mode = if self.normalization == Normalization::Album { "Альбом · общий коэффициент" } else { "Трек" };
+                self.normalization_status = format!("{mode} · {gain:+.1} дБ · −18 LUFS");
+            }
+        }
+    }
+
+    /// 20 ms envelope tick. Never consumes foreground EOF/promotion notifications.
+    pub fn audio_tick(&mut self) {
+        if let Some(prepared) = &mut self.prepared {
+            if let Some(deck) = &mut prepared.deck { deck.take_natural_end(); }
+        }
+        if let Some(fade) = &mut self.fade {
+            let position = self.mpv.as_ref().and_then(|m| prop_f64(m, "time-pos")).unwrap_or(0.0);
+            let progress = (position / fade.seconds).clamp(0.0, 1.0);
+            self.fade_factor = progress;
+            fade.outgoing.fade_factor = 1.0 - progress;
+            fade.outgoing.volume = self.volume;
+            self.apply_volume();
+            if progress >= 1.0 || self.is_idle() { self.finish_fade(); }
+        } else {
+            let state = self.snapshot();
+            let remaining = f64::from(state.duration_s - state.position_s);
+            if state.phase == PlaybackPhase::Playing && state.duration_s > 0.0
+                && remaining > 0.0 && remaining <= self.crossfade_s {
+                self.promote_deck(true);
+            }
+        }
+    }
+
+    pub fn poll_normalization(&mut self) { self.update_normalization(); }
+
+    fn finish_fade(&mut self) {
+        if self.fade.take().is_some() {
+            self.fade_factor = 1.0;
+            self.apply_volume();
+        }
+    }
+
+    fn promote_deck(&mut self, overlap: bool) -> bool {
+        let Some(prepared) = &self.prepared else { return false; };
+        let Some(deck) = &prepared.deck else { return false; };
+        if deck.phase != PlaybackPhase::Playing || (overlap && prepared.same_album && !self.overlap_album) {
+            return false;
+        }
+        let state = self.snapshot();
+        let fade_seconds = self.crossfade_s.min(f64::from(state.duration_s - state.position_s)).max(0.02);
+        let prepared = self.prepared.take().unwrap();
+        let mut next = prepared.deck.unwrap();
+        let incoming_gain = next.gain_db;
+        next.volume = self.volume;
+        next.fade_factor = if overlap { 0.0 } else { 1.0 };
+        next.apply_volume();
+        next.set_paused(false);
+        std::mem::swap(&mut self.mpv, &mut next.mpv);
+        std::mem::swap(&mut self.filter_active, &mut next.filter_active);
+        next.phase = PlaybackPhase::Playing;
+        next.gain_db = self.gain_db;
+        next.fade_factor = 1.0;
+        self.phase = PlaybackPhase::Playing;
+        self.awaiting_start = false;
+        self.user_stopped = false;
+        self.notice = None;
+        self.audio_track = None;
+        self.gain_db = incoming_gain;
+        self.fade_factor = if overlap { 0.0 } else { 1.0 };
+        if overlap { self.fade = Some(Fade { outgoing: next, seconds: fade_seconds }); }
+        self.promoted = Some(prepared.key);
+        true
     }
 
     /// Status line for the window. The Navidrome line is used when mpv is quiet.
@@ -121,6 +376,13 @@ impl Player {
         position_s: f32,
         paused: bool,
     ) -> Result<(), String> {
+        self.cancel_preload();
+        self.finish_fade();
+        self.promoted = None;
+        self.audio_track = None;
+        self.album_tracks.clear();
+        self.gain_db = 0.0;
+        self.apply_volume();
         if self.mpv.is_none() {
             let err = self
                 .notice
@@ -189,9 +451,16 @@ impl Player {
         if let Some(mpv) = self.mpv.as_ref() {
             let _ = mpv.set_property("pause", paused);
         }
+        if let Some(fade) = &mut self.fade {
+            fade.outgoing.set_paused(paused);
+        }
     }
 
     pub fn stop(&mut self) {
+        self.cancel_preload();
+        self.finish_fade();
+        self.promoted = None;
+        if let Some(analyzer) = &mut self.analyzer { analyzer.cancel(); }
         // Mark this before the command, so an end event already in the queue is not a new track.
         self.user_stopped = true;
         self.awaiting_start = false;
@@ -207,6 +476,7 @@ impl Player {
     /// Drain asynchronous load and playback events before taking a snapshot.
     /// Return true exactly once for EOF, never for stop, replacement or errors.
     pub fn take_natural_end(&mut self) -> bool {
+        self.audio_tick();
         use libmpv2::events::Event;
         use libmpv2::mpv_end_file_reason as reason;
 
@@ -221,6 +491,17 @@ impl Player {
             }
             match event {
                 Ok(Event::StartFile) => {
+                    if self.native_ending {
+                        if let Some(prepared) = self.prepared.take() {
+                            self.promoted = Some(prepared.key);
+                            self.audio_track = None;
+                            if !prepared.same_album || self.normalization != Normalization::Album {
+                                self.gain_db = 0.0;
+                            }
+                            self.apply_volume();
+                        }
+                        self.native_ending = false;
+                    }
                     self.awaiting_start = false;
                     self.phase = PlaybackPhase::Loading;
                     eof = false;
@@ -236,6 +517,11 @@ impl Player {
                     // Restoring an old position beyond a shortened file must not
                     // advance into an audible next track while pause is requested.
                     eof = !flag(mpv, "pause").unwrap_or(true);
+                    if eof && self.prepared.as_ref().is_some_and(|p| p.deck.is_none()) {
+                        self.native_ending = true;
+                        self.phase = PlaybackPhase::Loading;
+                        eof = false;
+                    }
                 }
                 Ok(Event::EndFile(reason::Stop | reason::Quit)) => {
                     self.phase = PlaybackPhase::Stopped;
@@ -266,29 +552,56 @@ impl Player {
         ) {
             self.user_stopped = true;
         }
+        if eof && self.promote_deck(false) {
+            return false;
+        }
         eof
     }
 
     pub fn seek_ratio(&mut self, ratio: f32) {
-        if !self.snapshot().seekable || !ratio.is_finite() {
-            return;
+        if !ratio.is_finite() { return; }
+        let Some(duration) = self.mpv.as_ref().and_then(|mpv| prop_f64(mpv, "duration")) else { return; };
+        self.seek_seconds(f64::from(ratio.clamp(0.0, 1.0)) * duration);
+    }
+
+    /// Timestamp callers must not round-trip through the slider's f32 ratio.
+    pub fn seek_seconds(&mut self, seconds: f64) {
+        if !seconds.is_finite() || !self.snapshot().seekable { return; }
+        self.finish_fade();
+        let Some(mpv) = self.mpv.as_ref() else { return; };
+        let Some(duration) = prop_f64(mpv, "duration").filter(|v| *v > 0.0) else { return; };
+        let mut target = seconds.clamp(0.0, duration);
+        if target > 0.0 && target < duration {
+            if let Some(rate) = prop_f64(mpv, "audio-params/samplerate").filter(|v| *v > 0.0) {
+                // mpv trims PCM by truncating to a whole sample. Request the next
+                // sample, with a fractional-sample roundoff guard, rather than
+                // landing just BEFORE an exact timestamp (e.g. 17.96 at 8 kHz).
+                target = (target + 1.001 / rate).min(duration);
+            }
         }
-        let Some(mpv) = self.mpv.as_ref() else {
-            return;
-        };
-        let Some(duration) = prop_f64(mpv, "duration") else {
-            return;
-        };
-        if duration <= 0.0 {
-            return;
+        if flag(mpv, "pause") == Some(true) {
+            // mpv's push-output queue retains prepause_state.delay across seek.
+            // Reset only the output to discard that stale hardware latency;
+            // the file, decode context, filters and paused intent remain intact.
+            let _ = mpv.command("ao-reload", &[]);
         }
-        let ratio = f64::from(ratio.clamp(0.0, 1.0));
-        let target = format!("{:.3}", ratio * duration);
-        let _ = mpv.command("seek", &[&target, "absolute"]);
+        let target = format!("{target:.9}");
+        let _ = mpv.command("seek", &[&target, "absolute+exact"]);
+    }
+
+    /// Native timestamp and seekability; unseekable streams still have a playhead.
+    pub fn playback_position(&self) -> Option<(f64, bool)> {
+        if self.is_idle() || self.phase == PlaybackPhase::Loading { return None; }
+        let mpv = self.mpv.as_ref()?;
+        let position = prop_f64(mpv, "time-pos")?;
+        let seekable = prop_f64(mpv, "duration").is_some_and(|duration| duration > 0.0)
+            && flag(mpv, "seekable").unwrap_or(false);
+        Some((position, seekable))
     }
 
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
+        if let Some(fade) = &mut self.fade { fade.outgoing.volume = self.volume; }
         self.apply_volume();
     }
 
@@ -338,7 +651,7 @@ impl Player {
         let Some(mpv) = self.mpv.as_ref() else {
             return state;
         };
-        state.volume = self.volume_now(mpv);
+        state.volume = self.volume;
         if self.is_idle() {
             return state;
         }
@@ -364,14 +677,10 @@ impl Player {
 
     fn apply_volume(&self) {
         if let Some(mpv) = self.mpv.as_ref() {
-            let _ = mpv.set_property("volume", f64::from(self.volume) * 100.0);
+            let _ = mpv.set_property("volume", volume_setting(self.volume, self.gain_db, self.fade_factor));
         }
-    }
-
-    fn volume_now(&self, mpv: &Mpv) -> f32 {
-        match prop_f64(mpv, "volume") {
-            Some(value) => (value / 100.0).clamp(0.0, 1.0) as f32,
-            None => self.volume,
+        if let Some(fade) = &self.fade {
+            fade.outgoing.apply_volume();
         }
     }
 
@@ -394,6 +703,10 @@ impl Player {
             }
             None => {}
         }
+        if let Some(prepared) = &mut self.prepared {
+            if let Some(deck) = &mut prepared.deck { deck.restore_eq(self.eq); }
+        }
+        if let Some(fade) = &mut self.fade { fade.outgoing.restore_eq(self.eq); }
     }
 
     #[cfg(test)]
@@ -465,6 +778,164 @@ fn prop_f64(mpv: &Mpv, name: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalization_and_fade_have_correct_physical_pcm_amplitude() {
+        use libmpv2::{events::Event, mpv_end_file_reason};
+        ensure_c_numeric();
+        let root = std::env::temp_dir();
+        let source = root.join(format!("hm-physical-gain-{}.wav", std::process::id()));
+        let output = root.join(format!("hm-physical-gain-{}.raw", std::process::id()));
+        std::fs::write(&source, tone_wav_at_rate(0.2, 8_000)).unwrap();
+        let output_name = output.to_string_lossy();
+        let mut rms = Vec::new();
+        for (gain, fade) in [(0.0, 1.0), (-6.0, 1.0), (6.0, 1.0), (0.0, 0.5)] {
+            let mpv = Mpv::with_initializer(|init| {
+                init.set_option("vid", "no")?;
+                init.set_option("audio-display", "no")?;
+                init.set_option("msg-level", "all=no")?;
+                init.set_option("ao", "pcm")?;
+                init.set_option("ao-pcm-file", output_name.as_ref())?;
+                init.set_option("ao-pcm-waveheader", "no")?;
+                init.set_option("audio-format", "s16")?;
+                init.set_option("volume-max", "1000")?;
+                Ok(())
+            }).unwrap();
+            mpv.set_property("volume", volume_setting(0.8, gain, fade)).unwrap();
+            mpv.command("loadfile", &[source.to_string_lossy().as_ref(), "replace"]).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match mpv.wait_event(0.02) {
+                    Some(Ok(Event::EndFile(mpv_end_file_reason::Eof))) => break,
+                    Some(Err(error)) => panic!("PCM capture failed: {error}"),
+                    _ => {}
+                }
+                assert!(Instant::now() < deadline, "PCM capture did not finish");
+            }
+            drop(mpv); // Flush and close the real native audio output.
+            let bytes = std::fs::read(&output).unwrap();
+            assert_eq!(bytes.len(), 3_200);
+            let energy: f64 = bytes.chunks_exact(2).map(|sample| {
+                f64::from(i16::from_le_bytes([sample[0], sample[1]])).powi(2)
+            }).sum();
+            rms.push((energy / 1_600.0).sqrt());
+        }
+        // Allow native s16 gain quantization, not a different volume law.
+        assert!((20.0 * (rms[1] / rms[0]).log10() + 6.0).abs() < 0.08);
+        assert!((20.0 * (rms[2] / rms[0]).log10() - 6.0).abs() < 0.08);
+        assert!((rms[3] / rms[0] - 0.5).abs() < 0.005);
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn paused_timestamp_seek_lands_on_the_requested_lyric_not_before_it() {
+        let path = std::env::temp_dir().join(format!("hm-precise-seek-{}.wav", std::process::id()));
+        std::fs::write(&path, tone_wav_at_rate(20.0, 8_000)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&mut player, |state| state.position_s > 0.1);
+        player.set_paused(true);
+        wait_until(&mut player, |state| state.phase == PlaybackPhase::Paused);
+        player.seek_seconds(17.96);
+        let seeked = wait_until(&mut player, |state| {
+            f64::from(state.position_s) >= 17.96 && f64::from(state.position_s) < 17.961
+        });
+        assert_eq!(seeked.phase, PlaybackPhase::Paused);
+        assert!(!seeked.playing);
+        assert!((seeked.duration_s - 20.0).abs() < 0.001);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!((player.snapshot().position_s - seeked.position_s).abs() < 0.0002);
+        player.set_paused(false);
+        wait_until(&mut player, |state| state.playing && state.position_s > 18.0);
+        player.stop();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prepared_native_next_promotes_once_without_reopening() {
+        let root = std::env::temp_dir();
+        let first = root.join(format!("hm-gap-first-{}.wav", std::process::id()));
+        let second = root.join(format!("hm-gap-second-{}.wav", std::process::id()));
+        std::fs::write(&first, tone_wav(0.8)).unwrap();
+        std::fs::write(&second, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.load(&first.to_string_lossy()).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        player.prepare_next(&second.to_string_lossy(), "", "next-occurrence", true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(!player.take_natural_end(), "preloaded transition fell back to reload");
+            if let Some(key) = player.take_promoted() {
+                assert_eq!(key, "next-occurrence");
+                break;
+            }
+            assert!(Instant::now() < deadline, "missing promotion: {}", player.status_or(""));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let position = wait_until(&mut player, |s| s.position_s > 0.15).position_s;
+        assert!(player.take_promoted().is_none());
+        assert!(player.snapshot().position_s >= position);
+        assert!(player.snapshot().duration_s > 1.8);
+        player.stop();
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
+    fn crossfade_promotes_the_open_deck_and_pause_holds_both() {
+        let path = std::env::temp_dir().join(format!("hm-crossfade-{}.wav", std::process::id()));
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.set_crossfade(0.8, false);
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        player.prepare_next(&path.to_string_lossy(), "", "second", false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while player.take_promoted().is_none() {
+            assert!(!player.take_natural_end());
+            assert!(Instant::now() < deadline, "crossfade never promoted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(player.fade.is_some());
+        assert!(player.snapshot().position_s < 0.5);
+        player.set_paused(true);
+        assert_eq!(flag(player.mpv.as_ref().unwrap(), "pause"), Some(true));
+        assert_eq!(flag(player.fade.as_ref().unwrap().outgoing.mpv.as_ref().unwrap(), "pause"), Some(true));
+        player.seek_ratio(0.5);
+        assert!(player.fade.is_none(), "seek must silence the old track");
+        player.stop();
+        assert!(player.prepared.is_none());
+        assert!(!player.take_natural_end());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn untagged_audio_analysis_applies_gain_and_off_restores_user_volume() {
+        let path = std::env::temp_dir().join(format!("hm-normalization-{}.wav", std::process::id()));
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.load_cookie_at(&path.to_string_lossy(), "", 0.0, true).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Paused);
+        player.set_audio_context(AudioTrack {
+            key: "untagged-test".into(), target: path.to_string_lossy().into_owned(),
+            cookie: String::new(), album: String::new(),
+        }, Vec::new());
+        player.set_normalization(Normalization::Track);
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while player.gain_db.abs() < 0.01 {
+            player.poll_normalization();
+            assert!(Instant::now() < deadline, "{}", player.normalization_status());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(player.gain_db.is_finite());
+        let applied = prop_f64(player.mpv.as_ref().unwrap(), "volume").unwrap();
+        assert!((applied - f64::from(player.volume) * 100.0).abs() > 0.1);
+        player.set_normalization(Normalization::Off);
+        assert!((prop_f64(player.mpv.as_ref().unwrap(), "volume").unwrap() - 80.0).abs() < 0.01);
+        player.stop();
+        let _ = std::fs::remove_file(path);
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::path::PathBuf;
@@ -496,7 +967,10 @@ mod tests {
     }
 
     fn tone_wav(seconds: f32) -> Vec<u8> {
-        let rate = 44_100u32;
+        tone_wav_at_rate(seconds, 44_100)
+    }
+
+    fn tone_wav_at_rate(seconds: f32, rate: u32) -> Vec<u8> {
         let samples = (rate as f32 * seconds) as u32;
         let data_bytes = samples * 2;
         let mut bytes = Vec::with_capacity(44 + data_bytes as usize);

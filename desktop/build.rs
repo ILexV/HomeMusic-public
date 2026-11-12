@@ -4,7 +4,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest.join("assets/icon.png").display()
     );
-    slint_build::compile("ui/app.slint").unwrap();
+    slint_build::compile_with_config(
+        "ui/app.slint",
+        slint_build::CompilerConfiguration::new().with_style("fluent".into()),
+    ).unwrap();
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("windows") {
         compile_windows_icon(&manifest);

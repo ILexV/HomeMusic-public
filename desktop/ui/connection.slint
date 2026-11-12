@@ -1,0 +1,80 @@
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme, EqButton } from "theme.slint";
+
+export component ConnectionPanel inherits Rectangle {
+    in-out property <string> server;
+    in-out property <string> hub;
+    in-out property <string> user;
+    in-out property <string> password;
+    in property <string> status;
+    in property <string> storage;
+    in property <bool> insecure;
+    in property <bool> busy;
+    callback changed();
+    callback test();
+    callback save();
+    background: Theme.panel;
+
+    ScrollView {
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+            Text { text: "Подключение к HomeMusic"; color: Theme.text; font-size: 18px; }
+            Text {
+                text: "Войдите с логином и паролем вашей учётной записи Navidrome. Права администратора не нужны.";
+                color: Theme.muted; wrap: word-wrap;
+            }
+            Text { text: "Адрес Navidrome"; color: Theme.text; }
+            LineEdit {
+                text <=> root.server;
+                placeholder-text: "https://music.example.org";
+                edited(value) => { root.changed(); }
+            }
+            Text { text: "Адрес HomeMusic Hub"; color: Theme.text; }
+            LineEdit {
+                text <=> root.hub;
+                placeholder-text: "https://hub.example.org (пусто — тот же хост, порт 8080)";
+                edited(value) => { root.changed(); }
+            }
+            Text { text: "Имя пользователя"; color: Theme.text; }
+            LineEdit {
+                text <=> root.user;
+                placeholder-text: "Логин Navidrome";
+                edited(value) => { root.changed(); }
+            }
+            Text { text: "Пароль"; color: Theme.text; }
+            LineEdit {
+                text <=> root.password;
+                input-type: InputType.password;
+                placeholder-text: "Пароль учётной записи";
+                edited(value) => { root.changed(); }
+            }
+            if root.insecure: Text {
+                text: "Внимание: HTTP не шифрует соединение. Пароль Hub и музыка передаются без защиты. Используйте HTTP только в доверенной локальной сети.";
+                color: Theme.orange; wrap: word-wrap;
+            }
+            Text { text: root.storage; color: Theme.dim; wrap: word-wrap; font-size: 12px; }
+            HorizontalLayout {
+                spacing: 10px;
+                EqButton {
+                    label: "Проверить вход";
+                    enabled: !root.busy;
+                    clicked => { root.test(); }
+                }
+                EqButton {
+                    label: "Сохранить и переподключиться";
+                    enabled: !root.busy;
+                    clicked => { root.save(); }
+                }
+            }
+            Text {
+                text: root.status;
+                color: Theme.text; wrap: word-wrap; min-height: 42px;
+            }
+            Text {
+                text: "Сохранение повторно проверит оба сервера и перезапустит плеер. При ошибке входа прежние настройки сохранятся. Очередь и офлайн-записи привязаны к учётной записи.";
+                color: Theme.dim; wrap: word-wrap; font-size: 12px;
+            }
+        }
+    }
+}
