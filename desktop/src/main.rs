@@ -13,7 +13,7 @@ mod wave;
 mod window_place;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -70,6 +70,7 @@ enum HubEvent {
     Lists(Vec<hub::PlaylistLine>),
     Liked(hub::LikedPage),
     Taste(Vec<hub::TasteArtist>),
+    Cover { id: String, pixels: Option<CoverPixels> },
 }
 
 struct HubState {
@@ -86,7 +87,8 @@ struct HubState {
     feed: RefCell<hub::HomeFeed>,
     mix: RefCell<hub::MixSnapshot>,
     rows: RefCell<Vec<home::Row>>,
-    row_signature: RefCell<String>,
+    covers: RefCell<CoverCache>,
+    cover_requests: mpsc::Sender<String>,
     home_error: RefCell<String>,
     wave: RefCell<hub::WaveLive>,
     wave_busy: Cell<bool>,
@@ -104,6 +106,17 @@ impl HubState {
     fn start(config: &navidrome::ServerConfig) -> Self {
         let hub = Arc::new(hub::Hub::from_config(config));
         let events = Arc::new(Mutex::new(Vec::new()));
+        let (cover_requests, cover_jobs) = mpsc::channel::<String>();
+        let cover_config = config.clone();
+        let cover_events = Arc::clone(&events);
+        std::thread::spawn(move || {
+            while let Ok(id) = cover_jobs.recv() {
+                let pixels = navidrome::cover_art(&cover_config, &id)
+                    .as_deref()
+                    .and_then(decode_cover);
+                push_event(&cover_events, HubEvent::Cover { id, pixels });
+            }
+        });
         let client = Arc::clone(&hub);
         let pending = Arc::clone(&events);
         std::thread::spawn(move || {
@@ -133,7 +146,8 @@ impl HubState {
             feed: RefCell::new(hub::HomeFeed::default()),
             mix: RefCell::new(hub::MixSnapshot::default()),
             rows: RefCell::new(Vec::new()),
-            row_signature: RefCell::new(String::new()),
+            covers: RefCell::new(CoverCache::default()),
+            cover_requests,
             home_error: RefCell::new(String::new()),
             wave: RefCell::new(hub::WaveLive::default()),
             wave_busy: Cell::new(false),
@@ -147,6 +161,55 @@ impl HubState {
             mix_fetching: Cell::new(true),
         }
     }
+}
+
+const COVER_CACHE_LIMIT: usize = 256;
+
+struct CoverPixels {
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Default)]
+struct CoverCache {
+    images: HashMap<String, Option<slint::Image>>,
+    pending: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl CoverCache {
+    fn reserve(&mut self, id: &str) -> bool {
+        if id.is_empty() || self.images.contains_key(id) || self.pending.contains(id) {
+            return false;
+        }
+        self.pending.insert(id.to_string());
+        true
+    }
+
+    fn finish(&mut self, id: String, image: Option<slint::Image>) {
+        self.pending.remove(&id);
+        if self.images.len() >= COVER_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.images.remove(&oldest);
+            }
+        }
+        self.order.push_back(id.clone());
+        self.images.insert(id, image);
+    }
+}
+
+fn request_cover(hub: &HubState, id: &str) -> Option<slint::Image> {
+    let mut cache = hub.covers.borrow_mut();
+    if let Some(image) = cache.images.get(id) {
+        return image.clone();
+    }
+    if cache.reserve(id) {
+        if hub.cover_requests.send(id.to_string()).is_err() {
+            cache.pending.remove(id);
+        }
+    }
+    None
 }
 
 fn push_event(events: &Mutex<Vec<HubEvent>>, event: HubEvent) {
@@ -224,7 +287,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut browser = browser.borrow_mut();
             browser.catalog = catalog.clone();
             browser.shown = catalog;
-            show_browser(&ui, &mut browser, &hub_state.marks.borrow());
+            show_browser(&ui, &mut browser, &hub_state);
             playback_status
         }
         Err(err) => {
@@ -516,8 +579,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if hub_later.catalog_open.get() {
                     begin_catalog_query(&ui, &hub_later, ticket, &text_later);
                 } else {
-                    hub_later.pane.set(home::Pane::Library);
-                    ui.set_home_open(false);
+                    show_library_pane(&ui, &hub_later);
                     apply_search(
                         &ui,
                         &browser_later,
@@ -553,8 +615,7 @@ fn main() -> Result<(), slint::PlatformError> {
         };
         let mut browser = browser_artist.borrow_mut();
         browser.artist_id = id;
-        let marks = hub_artist.marks.borrow().clone();
-        show_browser(&ui, &mut browser, &marks);
+        show_browser(&ui, &mut browser, &hub_artist);
     });
 
     let ui_album = ui.as_weak();
@@ -589,8 +650,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     let mut browser = browser_album.borrow_mut();
                     browser.query.clear();
                     browser.shown = browser.catalog.clone();
-                    let marks = hub_album.marks.borrow().clone();
-                    show_browser(&ui, &mut browser, &marks);
+                    show_browser(&ui, &mut browser, &hub_album);
                 }
                 if hub_album.catalog_open.get() {
                     clear_catalog(&ui, &hub_album);
@@ -617,28 +677,15 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    let ui_home = ui.as_weak();
-    let hub_home = hub_state.clone();
-    let player_home = player.clone();
-    ui.on_show_home(move || {
-        let Some(ui) = ui_home.upgrade() else {
-            return;
-        };
-        hub_home.pane.set(home::Pane::Home);
-        hub_home.catalog_open.set(false);
-        ui.set_catalog_open(false);
-        ui.set_search(String::new().into());
-        refresh_home(&ui, &hub_home, player_home.borrow().snapshot().playing);
-        spawn_home(&hub_home);
-    });
-
-    let ui_library = ui.as_weak();
-    let hub_library = hub_state.clone();
-    ui.on_show_library(move || {
-        let Some(ui) = ui_library.upgrade() else {
-            return;
-        };
-        show_library_pane(&ui, &hub_library);
+    let ui_nav = ui.as_weak();
+    let hub_nav = hub_state.clone();
+    let browser_nav = browser.clone();
+    let queue_nav = queue.clone();
+    let player_nav = player.clone();
+    ui.on_navigate(move |key| {
+        if let Some(ui) = ui_nav.upgrade() {
+            navigate(&ui, &hub_nav, &browser_nav, &queue_nav, &key, player_nav.borrow().snapshot().playing);
+        }
     });
 
     let ui_pick = ui.as_weak();
@@ -648,7 +695,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let config_pick = config.clone();
     let status_pick = config_status.clone();
     let waves_pick = waves.clone();
-    let browser_pick = browser.clone();
     ui.on_pick_home(move |index| {
         if index < 0 {
             return;
@@ -667,7 +713,6 @@ fn main() -> Result<(), slint::PlatformError> {
             &config_pick,
             &status_pick,
             &waves_pick,
-            &browser_pick,
             &row,
         );
     });
@@ -824,8 +869,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 marks.albums.insert(id.clone());
             }
         }
-        let marks = hub_album_like.marks.borrow().clone();
-        show_browser(&ui, &mut browser_album_like.borrow_mut(), &marks);
+        show_browser(&ui, &mut browser_album_like.borrow_mut(), &hub_album_like);
         paint_track_marks(&ui, &queue_album_like.borrow(), &hub_album_like);
         let client = Arc::clone(&hub_album_like.hub);
         let events = Arc::clone(&hub_album_like.events);
@@ -865,8 +909,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 marks.albums.insert(album.id.clone());
             }
         }
-        let marks = hub_star_row.marks.borrow().clone();
-        show_browser(&ui, &mut browser_star_row.borrow_mut(), &marks);
+        show_browser(&ui, &mut browser_star_row.borrow_mut(), &hub_star_row);
         paint_track_marks(&ui, &queue_star_row.borrow(), &hub_star_row);
         let id = album.id;
         let client = Arc::clone(&hub_star_row.hub);
@@ -1600,11 +1643,11 @@ fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
 const EQ_PANEL_HEIGHT: f32 = 132.0;
 
 fn resize(ui: &AppWindow, mode: i32) {
-    // The 28px title strip sits above the layouts tuned in the earlier steps.
+    // Presets include the title strip; the equalizer expands the same window.
     let (width, mut height) = match mode {
-        0 => (520.0, 160.0),
+        0 => (560.0, 150.0),
         1 => (460.0, 668.0),
-        _ => (1040.0, 708.0),
+        _ => (1180.0, 760.0),
     };
     if ui.get_eq_open() {
         height += EQ_PANEL_HEIGHT;
@@ -1817,8 +1860,17 @@ fn apply_hub_events(
     }
     let mut refresh_marks = false;
     let mut refresh_hits = false;
+    let mut refresh_rows = false;
     for event in events {
         match event {
+            HubEvent::Cover { id, pixels } => {
+                let image = pixels.map(image_from_pixels);
+                hub.covers.borrow_mut().finish(id.clone(), image.clone());
+                if let Some(image) = image {
+                    apply_cover(ui, hub, &browser.borrow(), &queue.borrow(), &id, &image);
+                }
+                continue;
+            }
             HubEvent::Marks(marks) => {
                 *hub.marks.borrow_mut() = marks;
                 refresh_marks = true;
@@ -1932,22 +1984,15 @@ fn apply_hub_events(
             }
             HubEvent::Lists(lists) => {
                 *hub.playlists.borrow_mut() = lists;
-                hub.pane.set(home::Pane::Playlists);
-                hub.catalog_open.set(false);
-                ui.set_catalog_open(false);
+                // A completed request updates data, never steals newer navigation.
             }
             HubEvent::Liked(page) => {
                 *hub.liked_songs.borrow_mut() = page.songs;
                 *hub.liked_albums.borrow_mut() = page.albums;
-                hub.pane.set(home::Pane::Liked);
-                hub.catalog_open.set(false);
-                ui.set_catalog_open(false);
+                // The requested pane is selected before dispatching the fetch.
             }
             HubEvent::Taste(artists) => {
                 *hub.taste.borrow_mut() = artists;
-                hub.pane.set(home::Pane::Taste);
-                hub.catalog_open.set(false);
-                ui.set_catalog_open(false);
             }
             HubEvent::Download {
                 reference,
@@ -1968,16 +2013,18 @@ fn apply_hub_events(
                 }
             }
         }
+        refresh_rows = true;
     }
     if refresh_marks {
-        let marks = hub.marks.borrow().clone();
-        show_browser(ui, &mut browser.borrow_mut(), &marks);
+        show_browser(ui, &mut browser.borrow_mut(), hub);
         paint_track_marks(ui, &queue.borrow(), hub);
     }
     if refresh_hits && hub.catalog_open.get() {
         show_hits(ui, &hub.hits.borrow());
     }
-    refresh_home(ui, hub, player.borrow().snapshot().playing);
+    if refresh_rows {
+        refresh_home(ui, hub, player.borrow().snapshot().playing);
+    }
 }
 
 fn clear_wave(hub: &HubState) {
@@ -2101,66 +2148,142 @@ fn spawn_fetch(hub: &HubState, job: impl FnOnce(&hub::Hub) -> HubEvent + Send + 
     });
 }
 
+fn navigate(
+    ui: &AppWindow,
+    hub: &HubState,
+    browser: &RefCell<Browser>,
+    queue: &RefCell<queue::Queue>,
+    key: &str,
+    playing: bool,
+) {
+    let pane = match key {
+        "home" => home::Pane::Home,
+        "liked" => home::Pane::Liked,
+        "playlists" => home::Pane::Playlists,
+        "artists" | "albums" => home::Pane::Library,
+        _ => return,
+    };
+    hub.search_generation.set(hub.search_generation.get().wrapping_add(1));
+    hub.catalog_open.set(false);
+    ui.set_catalog_open(false);
+    clear_catalog(ui, hub);
+    ui.set_search(String::new().into());
+    hub.pane.set(pane);
+    {
+        let mut browser = browser.borrow_mut();
+        browser.query.clear();
+        browser.artist_id.clear();
+        browser.shown = browser.catalog.clone();
+        show_browser(ui, &mut browser, hub);
+    }
+    show_queue(ui, &queue.borrow(), hub);
+    refresh_home(ui, hub, playing);
+    match pane {
+        home::Pane::Home => spawn_home(hub),
+        home::Pane::Liked => spawn_fetch(hub, |client| match client.liked() {
+            Ok(page) => HubEvent::Liked(page),
+            Err(message) => HubEvent::Note(message),
+        }),
+        home::Pane::Playlists => spawn_fetch(hub, |client| match client.playlists() {
+            Ok(lists) => HubEvent::Lists(lists),
+            Err(message) => HubEvent::Note(message),
+        }),
+        _ => {}
+    }
+}
+
 fn show_library_pane(ui: &AppWindow, hub: &HubState) {
     hub.pane.set(home::Pane::Library);
     hub.catalog_open.set(false);
     ui.set_catalog_open(false);
     ui.set_home_open(false);
+    ui.set_home_page("library".into());
+    ui.set_home_title("Исполнители и альбомы".into());
 }
 
 fn refresh_home(ui: &AppWindow, hub: &HubState, playing: bool) {
-    if hub.pane.get() == home::Pane::Library {
+    let pane = hub.pane.get();
+    if pane == home::Pane::Library {
         ui.set_home_open(false);
+        ui.set_home_page("library".into());
+        ui.set_home_title("Исполнители и альбомы".into());
         return;
     }
     ui.set_home_open(true);
-    ui.set_home_title(home::greeting(home::local_hour(), &hub.user_name).into());
+    let (page, title) = match pane {
+        home::Pane::Home => ("home", home::greeting(home::local_hour(), &hub.user_name)),
+        home::Pane::Playlists => ("playlists", "Плейлисты".into()),
+        home::Pane::Liked => ("liked", "Понравившиеся".into()),
+        home::Pane::Mix => ("mix", hub.mix.borrow().title.clone()),
+        home::Pane::Taste => ("taste", "Ваш музыкальный вкус".into()),
+        home::Pane::Library => unreachable!(),
+    };
+    ui.set_home_page(page.into());
+    ui.set_home_title(title.into());
     let personal = {
         let wave = hub.wave.borrow();
         wave.personal && wave.on()
     };
     let caption = home::wave_caption(hub.wave_busy.get(), personal, playing);
-    let mut rows = match hub.pane.get() {
-        home::Pane::Library => return,
-        home::Pane::Home => home::home_rows(&caption, &hub.mix.borrow(), &hub.feed.borrow()),
+    let rows = match pane {
+        home::Pane::Library => unreachable!(),
+        home::Pane::Home => home::home_rows(caption, &hub.mix.borrow(), &hub.feed.borrow()),
         home::Pane::Playlists => home::playlist_rows(&hub.playlists.borrow()),
         home::Pane::Liked => home::liked_rows(&hub.liked_songs.borrow(), &hub.liked_albums.borrow()),
         home::Pane::Mix => home::mix_rows(&hub.mix.borrow()),
         home::Pane::Taste => home::taste_rows(&hub.taste.borrow(), &hub.taste_picked.borrow()),
     };
-    let error = hub.home_error.borrow().clone();
-    if hub.pane.get() == home::Pane::Home && !error.is_empty() {
-        rows.insert(
-            0,
-            home::Row {
-                kind: "note",
-                title: error,
-                detail: String::new(),
-                key: String::new(),
-                accent: false,
-            },
-        );
-    }
-    let signature = rows
-        .iter()
-        .map(|row| format!("{}|{}|{}|{}|{}", row.kind, row.key, row.title, row.detail, row.accent))
-        .collect::<Vec<_>>()
-        .join("\n");
-    *hub.rows.borrow_mut() = rows.clone();
-    if hub.row_signature.borrow().as_str() == signature {
+    ui.set_home_notice(if pane == home::Pane::Home {
+        hub.home_error.borrow().as_str().into()
+    } else {
+        "".into()
+    });
+    if *hub.rows.borrow() == rows {
         return;
     }
-    *hub.row_signature.borrow_mut() = signature;
-    let model = rows
-        .into_iter()
-        .map(|row| HomeRow {
+    let previous = ui.get_home_rows();
+    let previous_rows = hub.rows.borrow();
+    let model: Vec<HomeRow> = rows.iter().enumerate().map(|(source, row)| {
+        // Polling the mix may change captions, not artwork. Keep live images even
+        // after the bounded cache evicts them; missing art is not retried per poll.
+        let prior = previous_rows.iter().position(|old| {
+            old.kind == row.kind && old.key == row.key && old.cover_id == row.cover_id
+        }).and_then(|index| previous.row_data(index));
+        let (cover, has_cover) = if let Some(prior) = prior {
+            (prior.cover, prior.has_cover)
+        } else {
+            let cover = request_cover(hub, &row.cover_id);
+            let has_cover = cover.is_some();
+            (cover.unwrap_or_default(), has_cover)
+        };
+        HomeRow {
+            source: source as i32,
             kind: row.kind.into(),
-            title: row.title.into(),
-            detail: row.detail.into(),
+            title: row.title.as_str().into(),
+            detail: row.detail.as_str().into(),
             accent: row.accent,
-        })
-        .collect::<Vec<_>>();
-    ui.set_home_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(model))));
+            has_cover,
+            cover,
+        }
+    }).collect();
+    drop(previous_rows);
+    let sections: Vec<HomeSection> = if pane == home::Pane::Home {
+        home::sections(&rows).into_iter().map(|(title, range)| HomeSection {
+            title: title.into(),
+            items: Rc::new(slint::VecModel::from(model[range].to_vec())).into(),
+        }).collect()
+    } else {
+        Vec::new()
+    };
+    let features: Vec<HomeRow> = if pane == home::Pane::Home {
+        model.iter().filter(|row| row.kind == "wave" || row.kind == "mix").cloned().collect()
+    } else {
+        Vec::new()
+    };
+    *hub.rows.borrow_mut() = rows;
+    ui.set_home_features(Rc::new(slint::VecModel::from(features)).into());
+    ui.set_home_sections(Rc::new(slint::VecModel::from(sections)).into());
+    ui.set_home_rows(Rc::new(slint::VecModel::from(model)).into());
 }
 
 fn pick_home_row(
@@ -2171,7 +2294,6 @@ fn pick_home_row(
     config: &navidrome::ServerConfig,
     status: &str,
     waves: &std::sync::Arc<wave::WaveHub>,
-    browser: &Rc<RefCell<Browser>>,
     row: &home::Row,
 ) {
     let playing = player.borrow().snapshot().playing;
@@ -2198,27 +2320,11 @@ fn pick_home_row(
         "mix" => match hub.mix.borrow().phase {
             hub::MixPhase::Ready => hub.pane.set(home::Pane::Mix),
             hub::MixPhase::Onboarding => {
+                hub.pane.set(home::Pane::Taste);
                 spawn_fetch(hub, |client| match client.taste() {
                     Ok(artists) => HubEvent::Taste(artists),
-                    Err(message) => HubEvent::HomeError(message),
+                    Err(message) => HubEvent::Note(message),
                 });
-            }
-            _ => {}
-        },
-        "shortcut" => match row.key.as_str() {
-            "liked" => spawn_fetch(hub, |client| match client.liked() {
-                Ok(page) => HubEvent::Liked(page),
-                Err(message) => HubEvent::HomeError(message),
-            }),
-            "playlists" => spawn_fetch(hub, |client| match client.playlists() {
-                Ok(lists) => HubEvent::Lists(lists),
-                Err(message) => HubEvent::HomeError(message),
-            }),
-            "artists" | "albums" => {
-                browser.borrow_mut().artist_id.clear();
-                let marks = hub.marks.borrow().clone();
-                show_browser(ui, &mut browser.borrow_mut(), &marks);
-                show_library_pane(ui, hub);
             }
             _ => {}
         },
@@ -2241,10 +2347,6 @@ fn pick_home_row(
         "mode" => set_mix_mode(hub, &row.key),
         "taste" => toggle_taste(hub, &row.key),
         "action" => match row.key.as_str() {
-            "back" => {
-                hub.pane.set(home::Pane::Home);
-                spawn_home(hub);
-            }
             "play" => {
                 let (name, songs) = if hub.pane.get() == home::Pane::Mix {
                     let mix = hub.mix.borrow();
@@ -2508,7 +2610,7 @@ fn album_line(album: &navidrome::Album) -> String {
     format!("{} · {}", album.artist, album.song_count)
 }
 
-fn show_browser(ui: &AppWindow, browser: &mut Browser, marks: &hub::Marks) {
+fn show_browser(ui: &AppWindow, browser: &mut Browser, hub: &HubState) {
     let name = browser.artist_name();
     browser.visible_albums =
         navidrome::albums_for_artist(&browser.shown.albums, &browser.artist_id, &name);
@@ -2528,11 +2630,20 @@ fn show_browser(ui: &AppWindow, browser: &mut Browser, marks: &hub::Marks) {
     let albums = browser
         .visible_albums
         .iter()
-        .map(|album| AlbumItem {
-            id: album.id.clone().into(),
-            title: album.name.clone().into(),
-            artist: album_line(album).into(),
-            starred: marks.albums.contains(&album.id),
+        .map(|album| {
+            let cover = if hub.pane.get() == home::Pane::Library {
+                request_cover(hub, &album.cover_id)
+            } else {
+                hub.covers.borrow().images.get(&album.cover_id).cloned().flatten()
+            };
+            AlbumItem {
+                id: album.id.as_str().into(),
+                title: album.name.as_str().into(),
+                artist: album_line(album).into(),
+                starred: hub.marks.borrow().albums.contains(&album.id),
+                has_cover: cover.is_some(),
+                cover: cover.unwrap_or_default(),
+            }
         })
         .collect::<Vec<_>>();
     ui.set_artists(slint::ModelRc::from(Rc::new(slint::VecModel::from(
@@ -2578,8 +2689,7 @@ fn apply_search(
                 }
             }
         }
-        let marks = hub.marks.borrow().clone();
-        show_browser(ui, &mut browser, &marks);
+        show_browser(ui, &mut browser, hub);
     }
     show_queue(ui, &queue.borrow(), hub);
 }
@@ -2661,7 +2771,7 @@ fn play_current(
     };
     maybe_extend_wave(hub, &queue.borrow());
     // The previous cover must not stay on the next track when this one has none.
-    show_cover(ui, config, &cover_id);
+    show_cover(ui, hub, &cover_id);
     match loaded {
         Ok(()) => {
             ui.set_error(String::new().into());
@@ -2760,20 +2870,60 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
     ui.set_track_meta(item.meta.clone().into());
 }
 
-fn show_cover(ui: &AppWindow, config: &navidrome::ServerConfig, song_id: &str) {
-    if song_id.is_empty() {
-        ui.set_has_cover(false);
-        return;
-    }
-    match navidrome::cover_art(config, song_id)
-        .as_deref()
-        .and_then(cover_image)
-    {
-        Some(image) => {
-            ui.set_cover(image);
-            ui.set_has_cover(true);
+fn show_cover(ui: &AppWindow, hub: &HubState, song_id: &str) {
+    let cover = request_cover(hub, song_id);
+    ui.set_has_cover(cover.is_some());
+    ui.set_cover(cover.unwrap_or_default());
+}
+
+fn apply_home_cover(
+    model: &slint::ModelRc<HomeRow>,
+    rows: &[home::Row],
+    id: &str,
+    image: &slint::Image,
+) {
+    for index in 0..model.row_count() {
+        let Some(mut displayed) = model.row_data(index) else { continue };
+        let Some(row) = usize::try_from(displayed.source).ok().and_then(|source| rows.get(source)) else {
+            continue;
+        };
+        if row.cover_id == id && displayed.kind == row.kind && displayed.title == row.title.as_str() {
+            displayed.cover = image.clone();
+            displayed.has_cover = true;
+            model.set_row_data(index, displayed);
         }
-        None => ui.set_has_cover(false),
+    }
+}
+
+fn apply_cover(
+    ui: &AppWindow,
+    hub: &HubState,
+    browser: &Browser,
+    queue: &queue::Queue,
+    id: &str,
+    image: &slint::Image,
+) {
+    let rows = hub.rows.borrow();
+    apply_home_cover(&ui.get_home_rows(), &rows, id, image);
+    for section in ui.get_home_sections().iter() {
+        apply_home_cover(&section.items, &rows, id, image);
+    }
+    let albums = ui.get_albums();
+    for (index, album) in browser.visible_albums.iter().enumerate() {
+        if album.cover_id != id {
+            continue;
+        }
+        if let Some(mut displayed) = albums.row_data(index) {
+            if displayed.id == album.id.as_str() {
+                displayed.cover = image.clone();
+                displayed.has_cover = true;
+                albums.set_row_data(index, displayed);
+            }
+        }
+    }
+    if queue.current().is_some_and(|item| item.id == id) {
+        ui.set_cover(image.clone());
+        ui.set_has_cover(true);
     }
 }
 
@@ -2799,18 +2949,27 @@ fn row_duration(item: &queue::Item) -> String {
     }
 }
 
-fn cover_image(bytes: &[u8]) -> Option<slint::Image> {
-    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+fn decode_cover(bytes: &[u8]) -> Option<CoverPixels> {
+    let image = image::load_from_memory(bytes).ok()?;
+    let image = if image.width() > 256 || image.height() > 256 {
+        image.thumbnail(256, 256)
+    } else {
+        image
+    }.into_rgba8();
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return None;
     }
+    Some(CoverPixels { bytes: image.into_raw(), width, height })
+}
+
+fn image_from_pixels(pixels: CoverPixels) -> slint::Image {
     let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        image.as_raw(),
-        width,
-        height,
+        &pixels.bytes,
+        pixels.width,
+        pixels.height,
     );
-    Some(slint::Image::from_rgba8(buffer))
+    slint::Image::from_rgba8(buffer)
 }
 
 #[cfg(test)]
@@ -2818,25 +2977,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_icon_is_the_brand_mark() {
-        let image = cover_image(include_bytes!("../assets/icon.png")).expect("icon");
-        let pixels = image.to_rgba8().expect("pixels");
-        assert_eq!((pixels.width(), pixels.height()), (512, 512));
-        let raw = pixels.as_bytes();
-        // Cream disc, left of the green play triangle.
-        let cream = ((256 * 512 + 216) * 4) as usize;
-        assert!(raw[cream] > 240 && raw[cream + 1] > 230 && raw[cream + 2] > 210);
-        // Green field above the vinyl ring.
-        let field = ((40 * 512 + 256) * 4) as usize;
-        assert!(raw[field] < 40 && raw[field + 1] > 120 && raw[field + 2] < 100);
-        assert_eq!(raw[field + 3], 255);
-        // Rounded corner stays transparent.
-        assert_eq!(raw[3], 0);
-        let tray = tray_icon().to_rgba8().expect("tray");
-        assert_eq!((tray.width(), tray.height()), (64, 64));
-        let tray_raw = tray.as_bytes();
-        let top = ((5 * 64 + 32) * 4) as usize;
-        assert!(tray_raw[top + 1] > tray_raw[top] + 40);
+    fn late_cover_updates_only_current_identity_and_every_duplicate() {
+        let rows = vec![
+            home::Row {
+                kind: "album", key: "new".into(), title: "Same title".into(),
+                detail: String::new(), cover_id: "new-art".into(), accent: false,
+            },
+            home::Row {
+                kind: "album", key: "old".into(), title: "Same title".into(),
+                detail: String::new(), cover_id: "old-art".into(), accent: false,
+            },
+        ];
+        let displayed = |source| HomeRow {
+            source, kind: "album".into(), title: "Same title".into(),
+            ..HomeRow::default()
+        };
+        let model: slint::ModelRc<HomeRow> = Rc::new(slint::VecModel::from(vec![
+            displayed(0), displayed(1), displayed(1), displayed(99),
+        ])).into();
+        apply_home_cover(&model, &rows, "old-art", &slint::Image::default());
+        assert!(!model.row_data(0).unwrap().has_cover);
+        assert!(model.row_data(1).unwrap().has_cover);
+        assert!(model.row_data(2).unwrap().has_cover);
+        assert!(!model.row_data(3).unwrap().has_cover);
+    }
+
+    #[test]
+    fn cover_cache_deduplicates_pending_and_missing_art_and_bounds_images() {
+        let mut cache = CoverCache::default();
+        assert!(cache.reserve("missing"));
+        assert!(!cache.reserve("missing"));
+        cache.finish("missing".into(), None);
+        assert!(!cache.reserve("missing"));
+        for index in 0..COVER_CACHE_LIMIT {
+            let id = format!("album-{index}");
+            assert!(cache.reserve(&id));
+            cache.finish(id, Some(slint::Image::default()));
+        }
+        assert_eq!(cache.images.len(), COVER_CACHE_LIMIT);
+        assert_eq!(cache.order.len(), COVER_CACHE_LIMIT);
+        assert!(cache.pending.is_empty());
+        assert!(!cache.images.contains_key("missing"));
     }
 
     #[test]
@@ -2846,14 +3027,15 @@ mod tests {
         image::codecs::png::PngEncoder::new(&mut bytes)
             .write_image(&[10, 20, 30, 255], 1, 1, image::ExtendedColorType::Rgba8)
             .unwrap();
-        let image = cover_image(&bytes).expect("png");
+        let image = image_from_pixels(decode_cover(&bytes).expect("png"));
         let pixels = image.to_rgba8().expect("pixels");
         assert_eq!((pixels.width(), pixels.height()), (1, 1));
+        assert_eq!(pixels.as_bytes(), &[10, 20, 30, 255]);
     }
 
     #[test]
     fn a_json_error_is_not_a_cover() {
-        assert!(cover_image(br#"{"status":"failed"}"#).is_none());
+        assert!(decode_cover(br#"{"status":"failed"}"#).is_none());
     }
 
     fn tone_wav(seconds: f32) -> Vec<u8> {

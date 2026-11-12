@@ -577,6 +577,7 @@ fn detail_message(body: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HomeAlbum {
     pub id: String,
+    pub cover_id: String,
     pub title: String,
     pub artist: String,
     pub year: Option<u32>,
@@ -586,6 +587,7 @@ pub struct HomeAlbum {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HomeArtist {
     pub id: String,
+    pub cover_id: String,
     pub name: String,
 }
 
@@ -714,7 +716,7 @@ pub fn parse_home(value: &Value) -> HomeFeed {
                         }
                         let name = text(row, "name");
                         let name = if name.is_empty() { text(row, "title") } else { name };
-                        Some(HomeArtist { id, name })
+                        Some(HomeArtist { id, name, cover_id: home_cover_id(row) })
                     })
                     .collect()
             })
@@ -870,6 +872,31 @@ pub fn wave_event(
     Some(event)
 }
 
+// Keep the Subsonic identity, not a URL or an arbitrary remote image endpoint.
+fn home_cover_id(row: &Value) -> String {
+    let url = text(row, "cover_url");
+    let Some(path) = url.strip_prefix("/api/nd/cover/") else {
+        return String::new();
+    };
+    let encoded = path.split('?').next().unwrap_or_default();
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut chars = encoded.as_bytes().iter().copied();
+    while let Some(byte) = chars.next() {
+        if byte == b'%' {
+            let Some(high) = chars.next().and_then(|c| (c as char).to_digit(16)) else {
+                return String::new();
+            };
+            let Some(low) = chars.next().and_then(|c| (c as char).to_digit(16)) else {
+                return String::new();
+            };
+            bytes.push((high * 16 + low) as u8);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
 fn albums_of(value: &Value, key: &str) -> Vec<HomeAlbum> {
     value
         .get(key)
@@ -887,6 +914,7 @@ fn albums_of(value: &Value, key: &str) -> Vec<HomeAlbum> {
                     };
                     Some(HomeAlbum {
                         id,
+                        cover_id: home_cover_id(row),
                         title,
                         artist: text(row, "artist"),
                         year: row.get("year").and_then(Value::as_u64).map(|year| year as u32),
@@ -1095,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn home_rows_drop_covers_and_keep_the_radio_order() {
+    fn home_keeps_cover_identity_and_radio_order_without_remote_urls() {
         let feed = parse_home(&serde_json::json!({
             "recent": [{
                 "id": "a1",
@@ -1103,7 +1131,7 @@ mod tests {
                 "artist": "V",
                 "year": 2024,
                 "starred": true,
-                "cover_url": "https://example.test/secret-cover"
+                "cover_url": "/api/nd/cover/al-a1%2Fart?size=300"
             }],
             "frequent": [],
             "newest": [{"id": "", "title": "Пустой"}],
@@ -1115,6 +1143,7 @@ mod tests {
         }));
         assert_eq!(feed.recent.len(), 1);
         assert_eq!(feed.recent[0].year, Some(2024));
+        assert_eq!(feed.recent[0].cover_id, "al-a1/art");
         assert!(feed.recent[0].starred);
         assert!(feed.newest.is_empty());
         assert_eq!(feed.radio[0].name, "Первый");
@@ -1122,7 +1151,8 @@ mod tests {
         let dumped = format!("{feed:?}");
         assert!(!dumped.contains("example.test"));
         assert!(!dumped.contains("secret"));
-        assert!(!dumped.contains("cover"));
+        assert!(feed.radio[0].cover_id.is_empty());
+        assert_eq!(home_cover_id(&serde_json::json!({"cover_url": "/api/nd/cover/a%ZZ"})), "");
     }
 
     #[test]

@@ -1,5 +1,131 @@
-import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, Heading, QueueRow, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
-import { AlbumItem, ArtistItem, CatalogHit, HomeRow, QueueItem } from "types.slint";
+import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, QueueRow, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
+
+component NavigationItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    height: 36px;
+    background: root.active ? #e8872a20 : (touch.has-hover ? Theme.raised : transparent);
+    border-radius: 4px;
+    if root.active : Rectangle { x: 0px; width: 3px; height: 20px; y: 8px; background: Theme.orange; }
+    Text {
+        x: 12px;
+        width: parent.width - 20px;
+        height: 100%;
+        text: root.label;
+        color: root.active ? Theme.orange : Theme.text;
+        font-size: 13px;
+        font-weight: root.active ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component FeatureCard inherits Rectangle {
+    in property <HomeRow> item;
+    callback clicked();
+    horizontal-stretch: 1;
+    min-width: 160px;
+    height: 132px;
+    border-radius: 6px;
+    background: touch.has-hover ? #38312a : Theme.panel;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.orange : Theme.line;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        HorizontalLayout {
+            cross-axis-alignment: center;
+            Text {
+                text: root.item.kind == "wave" ? "МОЯ ВОЛНА" : "МИКС ДНЯ";
+                color: Theme.orange;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-stretch: 1;
+            }
+            Glyph { kind: root.item.kind == "wave" ? "play" : "next"; tint: Theme.orange; }
+        }
+        Text {
+            text: root.item.kind == "wave" ? "Музыка под ваш вкус" : root.item.title;
+            color: Theme.text;
+            font-size: 15px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.item.detail;
+            color: Theme.muted;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+            vertical-stretch: 1;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component HomeCard inherits Rectangle {
+    in property <HomeRow> item;
+    callback clicked();
+    width: root.item.kind == "radio" ? 160px : 136px;
+    height: root.item.kind == "radio" ? 64px : 190px;
+    border-radius: 5px;
+    background: touch.has-hover ? Theme.raised : transparent;
+    if root.item.kind == "radio" : HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+        cross-axis-alignment: center;
+        Rectangle {
+            width: 32px;
+            height: 32px;
+            border-radius: 16px;
+            background: Theme.raised;
+            clip: true;
+            if root.item.has-cover : Image { source: root.item.cover; width: 100%; height: 100%; image-fit: cover; }
+            if !root.item.has-cover : Glyph { kind: "play"; tint: Theme.orange; x: 8px; y: 8px; }
+        }
+        Text { text: root.item.title; color: Theme.text; font-size: 12px; overflow: elide; horizontal-stretch: 1; }
+    }
+    if root.item.kind != "radio" : VerticalLayout {
+        padding: 4px;
+        spacing: 5px;
+        CoverArt { width: 128px; height: 128px; cover: root.item.cover; has-cover: root.item.has-cover; mark: 36px; }
+        Text { text: root.item.title; color: root.item.accent ? Theme.orange : Theme.text; font-size: 13px; overflow: elide; }
+        Text { text: root.item.detail; color: Theme.muted; font-size: 11px; overflow: elide; }
+        Rectangle { vertical-stretch: 1; }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component AlbumCard inherits Rectangle {
+    in property <AlbumItem> item;
+    callback clicked();
+    callback like();
+    height: root.width + 62px;
+    border-radius: 5px;
+    background: touch.has-hover ? Theme.raised : transparent;
+    VerticalLayout {
+        padding: 4px;
+        spacing: 5px;
+        CoverArt { height: self.width; cover: root.item.cover; has-cover: root.item.has-cover; mark: 36px; }
+        Text { text: root.item.title; color: Theme.text; font-size: 13px; overflow: elide; }
+        Text { text: root.item.artist; color: Theme.muted; font-size: 11px; overflow: elide; }
+        Rectangle { vertical-stretch: 1; }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    EqButton {
+        width: 28px;
+        background: #242424e0;
+        x: parent.width - self.width - 8px;
+        y: 8px;
+        label: "♥";
+        tip: "Лайк альбома";
+        active: root.item.starred;
+        clicked => { root.like(); }
+    }
+}
 
 export component Large inherits Rectangle {
     in property <string> track-title;
@@ -25,7 +151,11 @@ export component Large inherits Rectangle {
     in property <[CatalogHit]> hits;
     in property <bool> home-open;
     in property <string> home-title;
+    in property <string> home-page;
+    in property <string> home-notice;
     in property <[HomeRow]> home-rows;
+    in property <[HomeRow]> home-features;
+    in property <[HomeSection]> home-sections;
     in property <[QueueItem]> queue;
     in property <string> queue-title;
     in property <string> queue-total;
@@ -49,373 +179,239 @@ export component Large inherits Rectangle {
     callback search-edited(string);
     callback pick-artist(int);
     callback open-album(int);
-    callback show-home();
-    callback show-library();
+    callback navigate(string);
     callback pick-home(int);
 
     background: Theme.bg;
-
     VerticalLayout {
         HorizontalLayout {
             vertical-stretch: 1;
-
-            VerticalLayout {
-                min-width: 200px;
-                preferred-width: 230px;
-                padding: 12px;
-                spacing: 6px;
-
-                CoverArt {
-                    height: 148px;
-                    cover: root.cover;
-                    has-cover: root.has-cover;
-                    mark: 72px;
-                }
-                Text {
-                    text: root.track-title;
-                    color: Theme.text;
-                    font-size: 16px;
-                    font-weight: 600;
-                    overflow: elide;
-                }
-                Text { text: root.track-artist; color: Theme.muted; font-size: 13px; overflow: elide; }
-                Text { text: root.track-album; color: Theme.dim; font-size: 12px; overflow: elide; }
-                Text { text: root.track-meta; color: Theme.dim; font-size: 11px; overflow: elide; }
-                SeekBar {
-                    bar-height: 28px;
-                    position: root.position;
-                    duration: root.duration;
-                    wave: root.wave;
-                    seek(ratio) => { root.seek(ratio); }
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                    min-height: 40px;
-                    preferred-height: 40px;
-                    if root.queue.length == 0 : EmptyNote { message: "Нет треков"; }
-                    if root.queue.length > 0 : ScrollPort {
-                        for item in root.queue : Rectangle {
-                            height: 24px;
-                            background: row_touch.has-hover && !item.current ? Theme.raised : transparent;
-                            if item.current : Rectangle {
-                                x: 0px;
-                                width: 2px;
-                                height: 100%;
-                                background: Theme.orange;
-                            }
-                            Text {
-                                x: 8px;
-                                width: parent.width - 12px;
-                                height: 100%;
-                                text: item.number == "" ? item.title : item.number + "  " + item.title;
-                                color: item.current ? Theme.orange : Theme.muted;
-                                font-size: 12px;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            row_touch := TouchArea {
-                                width: 100%;
-                                height: 100%;
-                                mouse-cursor: pointer;
-                                clicked => { root.play-row(item.source); }
-                            }
-                        }
+            Rectangle {
+                width: 208px;
+                background: Theme.panel;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 4px;
+                    Text { height: 24px; text: "МУЗЫКА"; color: Theme.dim; font-size: 10px; font-weight: 600; }
+                    NavigationItem { label: "Главная"; active: root.home-page == "home" && !root.catalog-open; clicked => { root.navigate("home"); } }
+                    NavigationItem { label: "Понравившиеся"; active: root.home-page == "liked" && !root.catalog-open; clicked => { root.navigate("liked"); } }
+                    NavigationItem { label: "Плейлисты"; active: root.home-page == "playlists" && !root.catalog-open; clicked => { root.navigate("playlists"); } }
+                    NavigationItem { label: "Библиотека"; active: !root.home-open && !root.catalog-open; clicked => { root.navigate("albums"); } }
+                    Rectangle { vertical-stretch: 1; min-height: 12px; }
+                    Text { height: 24px; text: "СЕЙЧАС ИГРАЕТ"; color: Theme.dim; font-size: 10px; font-weight: 600; }
+                    CoverArt { width: 176px; height: 176px; cover: root.cover; has-cover: root.has-cover; mark: 56px; }
+                    Text { height: 24px; text: root.track-title; color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; vertical-alignment: center; }
+                    Text { height: 18px; text: root.track-artist; color: Theme.muted; font-size: 12px; overflow: elide; }
+                    Text { height: 18px; text: root.track-album; color: Theme.muted; font-size: 12px; overflow: elide; }
+                    HorizontalLayout {
+                        height: 28px;
+                        cross-axis-alignment: center;
+                        Text { text: root.track-meta; color: Theme.dim; font-size: 11px; overflow: elide; horizontal-stretch: 1; }
+                        if root.album-known : EqButton { label: "♥ альбом"; active: root.album-liked; clicked => { root.toggle-album-like(); } }
                     }
                 }
             }
-
             Rectangle { width: 1px; background: Theme.line; }
-
             VerticalLayout {
                 horizontal-stretch: 1;
-                min-width: 220px;
-                padding: 12px;
-                spacing: 8px;
-
-                Text {
-                    text: root.catalog-open ? "Поиск" : (root.home-open ? root.home-title : "Библиотека");
-                    color: Theme.text;
-                    font-size: 14px;
-                    font-weight: 600;
-                    overflow: elide;
-                }
-
+                min-width: 380px;
+                padding: 16px;
+                spacing: 16px;
                 HorizontalLayout {
-                    spacing: 6px;
-                    EqButton {
-                        label: "главная";
-                        tip: "Главная";
-                        active: root.home-open && !root.catalog-open;
-                        clicked => { root.show-home(); }
-                    }
-                    EqButton {
-                        label: "библиотека";
-                        tip: "Библиотека";
-                        active: !root.home-open && !root.catalog-open;
-                        clicked => { root.show-library(); }
-                    }
-                }
-
-                if root.catalog-open : Rectangle {
-                    vertical-stretch: 1;
-                    min-height: 40px;
-                    preferred-height: 40px;
-                    if root.hits.length == 0 : EmptyNote { message: "Ничего не найдено"; }
-                    if root.hits.length > 0 : ScrollPort {
-                        for hit[index] in root.hits : CatalogRow {
-                            hit: hit;
-                            clicked => { root.pick-hit(index); }
-                        }
-                    }
-                }
-
-                if !root.catalog-open && root.home-open : Rectangle {
-                    vertical-stretch: 1;
-                    min-height: 40px;
-                    preferred-height: 40px;
-                    if root.home-rows.length == 0 : EmptyNote { message: "Главная загружается"; }
-                    if root.home-rows.length > 0 : ScrollPort {
-                        for row[index] in root.home-rows : Rectangle {
-                            height: row.kind == "section" ? 26px : (row.detail == "" ? 32px : 44px);
-                            background: home_touch.has-hover && row.kind != "section" && row.kind != "note" ? Theme.raised : transparent;
-                            VerticalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                alignment: center;
-                                Text {
-                                    text: row.title;
-                                    color: row.accent ? Theme.orange : (row.kind == "section" ? Theme.muted : Theme.text);
-                                    font-size: row.kind == "section" ? 12px : 13px;
-                                    font-weight: row.kind == "section" || row.kind == "shortcut" || row.kind == "wave" ? 600 : 400;
-                                    overflow: elide;
-                                }
-                                if row.detail != "" : Text {
-                                    text: row.detail;
-                                    color: Theme.muted;
-                                    font-size: 11px;
-                                    overflow: elide;
-                                }
-                            }
-                            home_touch := TouchArea {
-                                width: 100%;
-                                height: 100%;
-                                mouse-cursor: pointer;
-                                clicked => { root.pick-home(index); }
-                            }
-                        }
-                    }
-                }
-
-                if !root.catalog-open && !root.home-open : HorizontalLayout {
-                    spacing: 8px;
-                    vertical-stretch: 1;
-
-                    VerticalLayout {
-                        min-width: 120px;
-                        preferred-width: 150px;
-                        spacing: 4px;
-                        Text { text: "Исполнители"; color: Theme.muted; font-size: 12px; }
-                        Rectangle {
-                            vertical-stretch: 1;
-                            min-height: 40px;
-                            preferred-height: 40px;
-                            ScrollPort {
-                                for artist[index] in root.artists : Rectangle {
-                                    height: 28px;
-                                    background: artist.current ? Theme.orange : (artist_touch.has-hover ? Theme.raised : transparent);
-                                    Text {
-                                        text: artist.name;
-                                        color: artist.current ? #1b1b1b : Theme.text;
-                                        font-size: 12px;
-                                        overflow: elide;
-                                        vertical-alignment: center;
-                                        x: 8px;
-                                        width: parent.width - 16px;
-                                    }
-                                    artist_touch := TouchArea {
-                                        width: 100%;
-                                        height: 100%;
-                                        mouse-cursor: pointer;
-                                        clicked => { root.pick-artist(index); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle { width: 1px; background: Theme.line; }
-
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 4px;
-                        Text { text: "Альбомы"; color: Theme.muted; font-size: 12px; }
-                        Rectangle {
-                            vertical-stretch: 1;
-                            min-height: 40px;
-                            preferred-height: 40px;
-                            if root.albums.length == 0 : EmptyNote { message: "Нет альбомов"; }
-                            if root.albums.length > 0 : ScrollPort {
-                                for album[index] in root.albums : Rectangle {
-                                    height: 40px;
-                                    background: album_touch.has-hover ? Theme.raised : transparent;
-                                    HorizontalLayout {
-                                        padding-right: 2px;
-                                        cross-axis-alignment: center;
-                                        Rectangle {
-                                            horizontal-stretch: 1;
-                                            VerticalLayout {
-                                                padding-left: 8px;
-                                                alignment: center;
-                                                Text {
-                                                    text: album.title;
-                                                    color: album.starred ? Theme.orange : Theme.text;
-                                                    font-size: 13px;
-                                                    overflow: elide;
-                                                }
-                                                Text {
-                                                    text: album.artist;
-                                                    color: Theme.muted;
-                                                    font-size: 11px;
-                                                    overflow: elide;
-                                                }
-                                            }
-                                            album_touch := TouchArea {
-                                                width: 100%;
-                                                height: 100%;
-                                                mouse-cursor: pointer;
-                                                clicked => { root.open-album(index); }
-                                            }
-                                        }
-                                        EqButton {
-                                            label: "♥";
-                                            tip: "Лайк альбома";
-                                            active: album.starred;
-                                            clicked => { root.star-album(index); }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                HorizontalLayout {
+                    height: 32px;
                     spacing: 8px;
                     cross-axis-alignment: center;
-                    EqButton {
-                        label: "сеть";
-                        active: root.catalog-open;
-                        clicked => { root.toggle-catalog(); }
-                    }
                     SearchField {
-                        hint: root.catalog-open ? "Поиск в сети" : "Поиск";
+                        hint: root.catalog-open ? "Найти музыку в сети" : "Поиск по библиотеке";
                         text <=> root.search;
                         edited(text) => { root.search-edited(text); }
                     }
+                    EqButton { label: "В сети"; tip: "Переключить поиск в сети"; active: root.catalog-open; clicked => { root.toggle-catalog(); } }
                 }
-            }
-
-            Rectangle { width: 1px; background: Theme.line; }
-
-            VerticalLayout {
-                min-width: 220px;
-                preferred-width: 280px;
-                padding-top: 12px;
-                padding-bottom: 8px;
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 6px;
-
-                Heading {
-                    title: root.catalog-open ? root.catalog-note : root.queue-title;
-                    aside: root.catalog-open ? "" : root.queue-total;
-                    title-size: 14px;
-                    if root.album-known && !root.catalog-open : EqButton {
-                        label: "♥ альбом";
-                        active: root.album-liked;
-                        clicked => { root.toggle-album-like(); }
+                Text {
+                    height: 26px;
+                    text: root.catalog-open ? "Поиск в сети" : (root.home-open ? root.home-title : "Исполнители и альбомы");
+                    color: Theme.text;
+                    font-size: 20px;
+                    font-weight: 600;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                if root.catalog-open : VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 8px;
+                    Text { text: root.catalog-note; color: Theme.muted; font-size: 12px; overflow: elide; }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        min-height: 40px;
+                        if root.hits.length == 0 : EmptyNote { message: "Ничего не найдено"; }
+                        if root.hits.length > 0 : ScrollPort {
+                            for hit[index] in root.hits : CatalogRow { hit: hit; clicked => { root.pick-hit(index); } }
+                        }
                     }
                 }
-
+                if !root.catalog-open && root.home-open && root.home-page == "home" : Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 40px;
+                    ScrollPort {
+                        VerticalLayout {
+                            spacing: 16px;
+                            if root.home-notice != "" : Text { text: root.home-notice; color: Theme.orange; font-size: 12px; wrap: word-wrap; }
+                            features := HorizontalLayout {
+                                spacing: 12px;
+                                for item in root.home-features : FeatureCard {
+                                    width: (features.width - 12px) / 2;
+                                    item: item;
+                                    clicked => { root.pick-home(item.source); }
+                                }
+                            }
+                            for section in root.home-sections : VerticalLayout {
+                                spacing: 8px;
+                                Text { text: section.title; color: Theme.text; font-size: 15px; font-weight: 600; }
+                                Rectangle {
+                                    height: section.items[0].kind == "radio" ? 68px : 198px;
+                                    clip: true;
+                                    Flickable {
+                                        width: 100%;
+                                        height: 100%;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            for item in section.items : HomeCard { item: item; clicked => { root.pick-home(item.source); } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !root.catalog-open && root.home-open && root.home-page != "home" : Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 40px;
+                    if root.home-rows.length == 0 : EmptyNote { message: "Загрузка…"; }
+                    ScrollPort {
+                        for row in root.home-rows : Rectangle {
+                            height: row.kind == "section" ? 36px : (row.kind == "note" ? max(52px, detail-text.preferred-height + 20px) : 56px);
+                            background: row.accent ? #e8872a18 : (home-touch.has-hover && row.kind != "section" && row.kind != "note" ? Theme.raised : transparent);
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                padding: 10px;
+                                spacing: 10px;
+                                cross-axis-alignment: center;
+                                if row.kind == "album" : CoverArt { width: 36px; height: 36px; cover: row.cover; has-cover: row.has-cover; mark: 20px; }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    detail-text := Text {
+                                        text: row.title;
+                                        color: row.accent ? Theme.orange : (row.kind == "note" ? Theme.muted : Theme.text);
+                                        font-size: row.kind == "section" ? 14px : 13px;
+                                        font-weight: row.kind == "section" ? 600 : 400;
+                                        wrap: row.kind == "note" ? word-wrap : no-wrap;
+                                        overflow: elide;
+                                    }
+                                    if row.detail != "" : Text { text: row.detail; color: Theme.muted; font-size: 11px; overflow: elide; }
+                                }
+                            }
+                            home-touch := TouchArea {
+                                enabled: row.kind != "section" && row.kind != "note";
+                                mouse-cursor: pointer;
+                                clicked => { root.pick-home(row.source); }
+                            }
+                        }
+                    }
+                }
+                if !root.catalog-open && !root.home-open : HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+                    Rectangle {
+                        width: 136px;
+                        ScrollPort {
+                            for artist[index] in root.artists : NavigationItem { label: artist.name; active: artist.current; clicked => { root.pick-artist(index); } }
+                        }
+                    }
+                    album-area := Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 240px;
+                        property <int> columns: max(2, floor(self.width / 148px));
+                        property <length> card-width: (self.width - 8px - (self.columns - 1) * 8px) / self.columns;
+                        if root.albums.length == 0 : EmptyNote { message: "Нет альбомов"; }
+                        ScrollPort {
+                            Rectangle {
+                                height: ceil(root.albums.length / album-area.columns) * (album-area.card-width + 70px);
+                                for album[index] in root.albums : AlbumCard {
+                                    x: mod(index, album-area.columns) * (album-area.card-width + 8px);
+                                    y: floor(index / album-area.columns) * (album-area.card-width + 70px);
+                                    width: album-area.card-width;
+                                    item: album;
+                                    clicked => { root.open-album(index); }
+                                    like => { root.star-album(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { width: 1px; background: Theme.line; }
+            VerticalLayout {
+                width: 304px;
+                padding: 12px;
+                spacing: 8px;
+                Text { height: 24px; text: "Очередь"; color: Theme.text; font-size: 15px; font-weight: 600; vertical-alignment: center; }
+                Text { height: 20px; text: root.queue-title; color: Theme.orange; font-size: 12px; overflow: elide; }
                 Rectangle {
                     vertical-stretch: 1;
                     min-height: 40px;
-                    preferred-height: 40px;
-                    if !root.catalog-open && root.queue.length == 0 : EmptyNote { message: "Очередь пуста"; }
-                    if root.catalog-open && root.hits.length == 0 : EmptyNote { message: "Ничего не найдено"; }
-                    if !root.catalog-open && root.queue.length > 0 : ScrollPort {
-                        for item in root.queue : QueueRow {
-                            item: item;
-                            clicked => { root.play-row(item.source); }
-                        }
-                    }
-                    if root.catalog-open && root.hits.length > 0 : ScrollPort {
-                        for hit[index] in root.hits : CatalogRow {
-                            hit: hit;
-                            clicked => { root.pick-hit(index); }
-                        }
+                    if root.queue.length == 0 : EmptyNote { message: "Очередь пуста"; }
+                    if root.queue.length > 0 : ScrollPort {
+                        for item in root.queue : QueueRow { item: item; clicked => { root.play-row(item.source); } }
                     }
                 }
+                Rectangle { height: 1px; background: Theme.line; }
+                Text { height: 20px; text: root.queue-total; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
             }
         }
-
         Rectangle {
-            height: 72px;
+            height: 80px;
             background: Theme.orange;
-            clip: true;
-
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 12px;
-                spacing: 10px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 14px;
                 cross-axis-alignment: center;
-
                 HorizontalLayout {
-                    spacing: 0px;
-                    alignment: center;
+                    horizontal-stretch: 0;
+                    spacing: 4px;
+                    cross-axis-alignment: center;
                     TransportButton { kind: "prev"; inverted: true; clicked => { root.prev(); } }
+                    TransportButton { kind: root.playing ? "pause" : "play"; primary: true; clicked => { root.play-pause(); } }
                     TransportButton { kind: "stop"; inverted: true; clicked => { root.stop(); } }
-                    TransportButton {
-                        kind: root.playing ? "pause" : "play";
-                        primary: true;
-                        clicked => { root.play-pause(); }
-                    }
                     TransportButton { kind: "next"; inverted: true; clicked => { root.next(); } }
                 }
-
-                Text {
-                    text: root.time-label;
-                    color: #1b1b1b;
-                    font-size: 12px;
-                    vertical-alignment: center;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    SeekBar { inverted: true; bar-height: 32px; position: root.position; duration: root.duration; wave: root.wave; seek(ratio) => { root.seek(ratio); } }
+                    HorizontalLayout {
+                        Text { text: root.time-label; color: #1b1b1b; font-size: 11px; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text { text: root.duration-label; color: #1b1b1b; font-size: 11px; }
+                    }
                 }
-                SeekBar {
-                    inverted: true;
-                    bar-height: 40px;
-                    position: root.position;
-                    duration: root.duration;
-                    wave: root.wave;
-                    seek(ratio) => { root.seek(ratio); }
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: 6px;
+                    cross-axis-alignment: center;
+                    EqButton { label: "♥"; inverted: true; active: root.liked; clicked => { root.toggle-like(); } }
+                    EqButton { label: "нет"; inverted: true; active: root.disliked; clicked => { root.toggle-dislike(); } }
+                    EqButton { inverted: true; active: root.eq-on; clicked => { root.toggle-eq(); } }
                 }
-                Text {
-                    text: root.duration-label;
-                    color: #1b1b1b;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-                EqButton { label: "♥"; inverted: true; active: root.liked; clicked => { root.toggle-like(); } }
-                EqButton { label: "нет"; inverted: true; active: root.disliked; clicked => { root.toggle-dislike(); } }
-                EqButton {
-                    inverted: true;
-                    active: root.eq-on;
-                    clicked => { root.toggle-eq(); }
-                }
-                Glyph { kind: "speaker"; tint: #1b1b1b; }
-                VolumeBar {
-                    inverted: true;
-                    volume: root.volume;
-                    set-volume(value) => { root.set-volume(value); }
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: 6px;
+                    cross-axis-alignment: center;
+                    Glyph { kind: "speaker"; tint: #1b1b1b; }
+                    VolumeBar { volume: root.volume; inverted: true; set-volume(value) => { root.set-volume(value); } }
                 }
             }
         }

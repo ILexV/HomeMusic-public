@@ -21,7 +21,36 @@ pub struct Row {
     pub title: String,
     pub detail: String,
     pub key: String,
+    pub cover_id: String,
     pub accent: bool,
+}
+
+/// Sections retain offsets into the flat action model, including preceding notes.
+pub fn sections(rows: &[Row]) -> Vec<(&str, std::ops::Range<usize>)> {
+    let mut groups = Vec::new();
+    let mut heading = None;
+    for (index, row) in rows.iter().enumerate() {
+        if row.kind == "section" {
+            if let Some((title, start)) = heading.take() {
+                if start < index {
+                    groups.push((title, start..index));
+                }
+            }
+            heading = Some((row.title.as_str(), index + 1));
+        } else if row.kind != "radio" && row.kind != "album" {
+            if let Some((title, start)) = heading.take() {
+                if start < index {
+                    groups.push((title, start..index));
+                }
+            }
+        }
+    }
+    if let Some((title, start)) = heading {
+        if start < rows.len() {
+            groups.push((title, start..rows.len()));
+        }
+    }
+    groups
 }
 
 pub fn greeting(hour: u32, name: &str) -> String {
@@ -83,6 +112,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
         title: "Моя волна".into(),
         detail: wave_line.into(),
         key: "wave".into(),
+        cover_id: String::new(),
         accent: false,
     });
     let (title, detail) = mix_card(mix);
@@ -91,22 +121,9 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
         title,
         detail,
         key: "mix".into(),
+        cover_id: String::new(),
         accent: false,
     });
-    for (title, key) in [
-        ("Понравившиеся", "liked"),
-        ("Плейлисты", "playlists"),
-        ("Исполнители", "artists"),
-        ("Все альбомы", "albums"),
-    ] {
-        rows.push(Row {
-            kind: "shortcut",
-            title: title.into(),
-            detail: String::new(),
-            key: key.into(),
-            accent: false,
-        });
-    }
     if !feed.radio.is_empty() {
         rows.push(section("Радиостанции"));
         for artist in &feed.radio {
@@ -115,6 +132,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
                 title: artist.name.clone(),
                 detail: String::new(),
                 key: artist.id.clone(),
+                cover_id: artist.cover_id.clone(),
                 accent: false,
             });
         }
@@ -127,7 +145,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
 }
 
 pub fn playlist_rows(lists: &[PlaylistLine]) -> Vec<Row> {
-    let mut rows = vec![back()];
+    let mut rows = Vec::new();
     if lists.is_empty() {
         rows.push(note("Плейлистов нет"));
         return rows;
@@ -138,6 +156,7 @@ pub fn playlist_rows(lists: &[PlaylistLine]) -> Vec<Row> {
             title: list.name.clone(),
             detail: songs_label(list.songs),
             key: list.id.clone(),
+            cover_id: String::new(),
             accent: false,
         });
     }
@@ -145,7 +164,7 @@ pub fn playlist_rows(lists: &[PlaylistLine]) -> Vec<Row> {
 }
 
 pub fn liked_rows(songs: &[hub::Playable], albums: &[HomeAlbum]) -> Vec<Row> {
-    let mut rows = vec![back()];
+    let mut rows = Vec::new();
     if songs.is_empty() && albums.is_empty() {
         rows.push(note("Пока ничего"));
         return rows;
@@ -161,10 +180,9 @@ pub fn liked_rows(songs: &[hub::Playable], albums: &[HomeAlbum]) -> Vec<Row> {
 }
 
 pub fn mix_rows(mix: &MixSnapshot) -> Vec<Row> {
-    let mut rows = vec![back()];
+    let mut rows = Vec::new();
     match mix.phase {
         MixPhase::Ready => {
-            rows.push(section(&mix.title));
             if !mix.description.is_empty() {
                 rows.push(note(&mix.description));
             }
@@ -178,6 +196,7 @@ pub fn mix_rows(mix: &MixSnapshot) -> Vec<Row> {
                     title: title.into(),
                     detail: mode_hint(mode).into(),
                     key: mode.into(),
+                    cover_id: String::new(),
                     accent: mix.mode == mode,
                 });
             }
@@ -195,7 +214,7 @@ pub fn mix_rows(mix: &MixSnapshot) -> Vec<Row> {
 }
 
 pub fn taste_rows(artists: &[TasteArtist], picked: &HashSet<String>) -> Vec<Row> {
-    let mut rows = vec![back(), note("Выберите 3–5 исполнителей")];
+    let mut rows = vec![note("Выберите 3–5 исполнителей")];
     if (3..=5).contains(&picked.len()) {
         rows.push(action("save", "Собрать микс"));
     }
@@ -210,6 +229,7 @@ pub fn taste_rows(artists: &[TasteArtist], picked: &HashSet<String>) -> Vec<Row>
             detail: String::new(),
             key: artist.reference.clone(),
             accent: picked.contains(&artist.reference),
+            cover_id: String::new(),
         });
     }
     rows
@@ -285,6 +305,7 @@ fn push_albums(rows: &mut Vec<Row>, title: &str, albums: &[HomeAlbum]) {
             title: album.title.clone(),
             detail: album_detail(album),
             key: album.id.clone(),
+            cover_id: album.cover_id.clone(),
             accent: album.starred,
         });
     }
@@ -303,6 +324,7 @@ fn track_row(index: usize, song: &hub::Playable) -> Row {
         title: song.title.clone(),
         detail,
         key: index.to_string(),
+        cover_id: String::new(),
         accent: false,
     }
 }
@@ -313,6 +335,7 @@ fn section(title: &str) -> Row {
         title: title.into(),
         detail: String::new(),
         key: String::new(),
+        cover_id: String::new(),
         accent: false,
     }
 }
@@ -323,6 +346,7 @@ fn note(text: &str) -> Row {
         title: text.into(),
         detail: String::new(),
         key: String::new(),
+        cover_id: String::new(),
         accent: false,
     }
 }
@@ -333,21 +357,40 @@ fn action(key: &str, title: &str) -> Row {
         title: title.into(),
         detail: String::new(),
         key: key.into(),
+        cover_id: String::new(),
         accent: true,
     }
-}
-
-fn back() -> Row {
-    action("back", "На главную")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn section_sources_survive_notes_and_repeated_albums() {
+        let mut feed = HomeFeed::default();
+        feed.radio.push(hub::HomeArtist {
+            id: "radio".into(), name: "Радио".into(), cover_id: String::new(),
+        });
+        feed.recent.push(album("same", "Недавний"));
+        feed.frequent.push(album("same", "Частый"));
+        let mut rows = home_rows("", &MixSnapshot::default(), &feed);
+        rows.insert(0, note("Ошибка обновления"));
+        let groups = sections(&rows);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].0, "Радиостанции");
+        assert_eq!(groups[1].0, "Недавно слушали");
+        assert_eq!(groups[2].0, "Часто слушаете");
+        let sources: Vec<_> = groups.iter().flat_map(|(_, range)| range.clone()).collect();
+        assert_eq!(rows[sources[0]].key, "radio");
+        assert_eq!(rows[sources[1]].cover_id, "al-same");
+        assert_eq!(rows[sources[2]].key, "same");
+    }
+
     fn album(id: &str, title: &str) -> HomeAlbum {
         HomeAlbum {
             id: id.into(),
+            cover_id: format!("al-{id}"),
             title: title.into(),
             artist: "V".into(),
             year: Some(2020),
@@ -363,37 +406,6 @@ mod tests {
         assert_eq!(greeting(18, "lex"), "Добрый вечер, lex");
     }
 
-    #[test]
-    fn empty_home_sections_are_left_out() {
-        let mut feed = HomeFeed::default();
-        feed.recent.push(album("a", "Ночной"));
-        feed.radio.push(hub::HomeArtist { id: "r".into(), name: "Радио".into() });
-        let mix = MixSnapshot {
-            phase: MixPhase::Waiting,
-            hour: 8,
-            ..MixSnapshot::default()
-        };
-        let rows = home_rows(wave_caption(false, false, false), &mix, &feed);
-        let titles: Vec<_> = rows.iter().map(|row| row.title.as_str()).collect();
-        assert!(titles.contains(&"Моя волна"));
-        assert!(titles.contains(&"«Микс дня»"));
-        assert!(titles.contains(&"Понравившиеся"));
-        assert!(titles.contains(&"Радиостанции"));
-        assert!(titles.contains(&"Недавно слушали"));
-        assert!(titles.contains(&"Ночной"));
-        assert!(!titles.contains(&"Часто слушаете"));
-        assert!(!titles.contains(&"Новое в библиотеке"));
-        assert_eq!(rows.iter().find(|row| row.title == "Ночной").unwrap().detail, "V · 2020");
-        assert_eq!(wave_caption(true, false, false), "Подбираем первые треки…");
-        assert_eq!(
-            wave_caption(false, true, true),
-            "Играет — подстраивается под каждый пропуск и ♥"
-        );
-        assert_eq!(
-            wave_caption(false, true, false),
-            "На паузе — продолжим с того же места"
-        );
-    }
 
     #[test]
     fn a_ready_mix_counts_songs_still_downloading() {

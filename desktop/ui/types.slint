@@ -13,6 +13,8 @@ export struct AlbumItem {
     title: string,
     artist: string,
     starred: bool,
+    cover: image,
+    has-cover: bool,
 }
 
 export struct CatalogHit {
@@ -29,8 +31,16 @@ export struct ArtistItem {
 }
 
 export struct HomeRow {
+    source: int,
+    cover: image,
+    has-cover: bool,
     kind: string,
     title: string,
     detail: string,
     accent: bool,
+}
+
+export struct HomeSection {
+    title: string,
+    items: [HomeRow],
 }

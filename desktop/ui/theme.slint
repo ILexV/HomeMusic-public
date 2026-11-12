@@ -56,6 +56,8 @@ export component Glyph inherits Rectangle {
     in property <color> tint: Theme.text;
     width: 16px;
     height: 16px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
 
     if root.kind == "play" : Path {
         width: 100%;
@@ -124,6 +126,22 @@ export component Glyph inherits Rectangle {
         commands: "M 1 6 L 5 6 L 9 2 L 9 14 L 5 10 L 1 10 Z";
         fill: root.tint;
     }
+    if root.kind == "heart" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 8 14 L 2 8 C -2 3 4 -1 8 4 C 12 -1 18 3 14 8 Z";
+        fill: root.tint;
+    }
+    if root.kind == "dislike" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 1 2 L 3 2 L 3 9 L 1 9 Z M 5 2 L 12 2 C 13 2 14 3 14 4 L 13 8 C 13 9 12 10 11 10 L 9 10 L 9 14 L 7 14 L 5 9 Z";
+        fill: root.tint;
+    }
 }
 
 export component TransportButton inherits Rectangle {
@@ -133,6 +151,8 @@ export component TransportButton inherits Rectangle {
     callback clicked();
     width: root.primary ? 40px : 32px;
     height: root.primary ? 40px : 32px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
     border-radius: root.primary ? 20px : 4px;
     background: root.primary
         ? (touch.pressed ? #dedede : touch.has-hover ? #ffffff : #f4f4f4)
@@ -321,14 +341,17 @@ component ModeChip inherits Rectangle {
     border-radius: 3px;
     background: root.active ? (touch.has-hover ? #f0a04a : Theme.orange) : (touch.has-hover ? #3a3a3a : Theme.raised);
 
-    Text {
-        width: 100%;
-        height: 100%;
-        text: root.glyph;
-        color: root.active ? #1b1b1b : (touch.has-hover ? Theme.text : Theme.muted);
-        font-size: 10px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    Path {
+        width: 18px;
+        height: 18px;
+        viewbox-width: 18;
+        viewbox-height: 18;
+        commands: root.glyph == "–" ? "M 5 9 L 13 9"
+            : root.glyph == "☰" ? "M 5 4 L 13 4 L 13 14 L 5 14 Z M 5 8 L 13 8"
+            : "M 4 4 L 14 4 L 14 14 L 4 14 Z M 7 4 L 7 14 M 11 4 L 11 14 M 4 11 L 14 11";
+        fill: transparent;
+        stroke: root.active ? #1b1b1b : (touch.has-hover ? Theme.text : Theme.muted);
+        stroke-width: 1px;
     }
 
     touch := TouchArea {
@@ -343,11 +366,15 @@ component ModeChip inherits Rectangle {
 
 export component EqButton inherits Rectangle {
     in property <string> label: "EQ";
+    in property <string> icon: root.label == "♥" || root.label == "♥ альбом" ? "heart" : root.label == "нет" ? "dislike" : "";
     in property <string> tip;
     in property <bool> active;
     in property <bool> inverted: false;
     callback clicked();
-    height: 22px;
+    height: 28px;
+    min-width: 28px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
     border-radius: 3px;
     background: root.active
         ? (touch.has-hover ? #333333 : #1b1b1b)
@@ -360,6 +387,9 @@ export component EqButton inherits Rectangle {
         : (touch.has-hover
             ? (root.inverted ? #1b1b1b : Theme.orange)
             : (root.inverted ? #1b1b1b : Theme.dim));
+    property <string> shown-label: root.label == "♥" || root.label == "нет" ? "" : root.label == "♥ альбом" ? "альбом" : root.label;
+    property <color> foreground: root.active || (touch.has-hover && !root.inverted)
+        ? Theme.orange : (root.inverted ? #1b1b1b : Theme.text);
 
     pure function name-for(label: string) -> string {
         if label == "EQ" { "Эквалайзер" }
@@ -376,16 +406,19 @@ export component EqButton inherits Rectangle {
     HorizontalLayout {
         padding-left: 6px;
         padding-right: 6px;
+        spacing: 5px;
         alignment: center;
-        Text {
-            text: root.label;
-            color: root.active
-                ? Theme.orange
-                : (touch.has-hover && !root.inverted
-                    ? Theme.orange
-                    : (root.inverted ? #1b1b1b : Theme.text));
-            font-size: 10px;
+        cross-axis-alignment: center;
+        if root.icon != "" : Glyph {
+            kind: root.icon;
+            tint: root.foreground;
+        }
+        if root.shown-label != "" : Text {
+            text: root.shown-label;
+            color: root.foreground;
+            font-size: 11px;
             vertical-alignment: center;
+            horizontal-stretch: 0;
         }
     }
 
@@ -419,6 +452,7 @@ export component EqSlider inherits Rectangle {
 
         track := Rectangle {
             height: 72px;
+            vertical-stretch: 0;
             width: 100%;
 
             Rectangle {
@@ -472,6 +506,8 @@ export component EqSlider inherits Rectangle {
         }
 
         Text {
+            height: 14px;
+            vertical-stretch: 0;
             text: root.label;
             color: Theme.muted;
             font-size: 10px;
@@ -505,21 +541,27 @@ export component Equalizer inherits Rectangle {
         spacing: 4px;
 
         HorizontalLayout {
+            height: 22px;
+            vertical-stretch: 0;
             spacing: 6px;
             cross-axis-alignment: center;
             EqButton {
+                height: 22px;
                 label: root.enabled ? "вкл" : "выкл";
                 active: root.enabled;
                 clicked => { root.set-enabled(!root.enabled); }
             }
             Rectangle { horizontal-stretch: 1; }
             EqButton {
+                height: 22px;
                 label: "сброс";
                 clicked => { root.reset(); }
             }
         }
 
         HorizontalLayout {
+            height: 94px;
+            vertical-stretch: 0;
             spacing: 2px;
             EqSlider {
                 label: "Пр";
@@ -709,9 +751,13 @@ export component ScrollPort inherits Rectangle {
 
     flick := Flickable {
         x: 0px;
-        width: parent.width - (root.overflow ? 7px : 0px);
+        // Reserve the gutter even without overflow: wrapped text must not
+        // change its width when its own height causes a scrollbar.
+        width: parent.width - 7px;
         height: 100%;
+        content-width: self.width;
         VerticalLayout {
+            alignment: start;
             @children
         }
     }
@@ -729,6 +775,7 @@ export component ScrollPort inherits Rectangle {
 export component ModeSwitch inherits HorizontalLayout {
     in property <int> mode;
     callback set-mode(int);
+    horizontal-stretch: 0;
     spacing: 3px;
     alignment: center;
 

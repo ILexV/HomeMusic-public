@@ -46,25 +46,33 @@ export component Medium inherits Rectangle {
 
     VerticalLayout {
         Rectangle {
+            height: 258px;
+            vertical-stretch: 0;
             background: Theme.panel;
 
             VerticalLayout {
-                padding: 12px;
+                padding: 14px;
                 spacing: 8px;
 
                 HorizontalLayout {
-                    spacing: 12px;
+                    height: 112px;
+                    vertical-stretch: 0;
+                    spacing: 14px;
+                    cross-axis-alignment: center;
 
                     CoverArt {
-                        width: 104px;
-                        height: 104px;
+                        width: 112px;
+                        height: 112px;
+                        horizontal-stretch: 0;
+                        vertical-stretch: 0;
                         cover: root.cover;
                         has-cover: root.has-cover;
-                        mark: 52px;
+                        mark: 56px;
                     }
 
                     VerticalLayout {
-                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        spacing: 5px;
                         alignment: center;
 
                         Text {
@@ -81,56 +89,77 @@ export component Medium inherits Rectangle {
                 }
 
                 HorizontalLayout {
-                    spacing: 2px;
-                    alignment: center;
-                    TransportButton { kind: "prev"; clicked => { root.prev(); } }
-                    TransportButton {
-                        kind: root.playing ? "pause" : "play";
-                        primary: true;
-                        clicked => { root.play-pause(); }
+                    height: 40px;
+                    vertical-stretch: 0;
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 2px;
+                        horizontal-stretch: 0;
+                        cross-axis-alignment: center;
+                        TransportButton { kind: "prev"; clicked => { root.prev(); } }
+                        TransportButton {
+                            kind: root.playing ? "pause" : "play";
+                            primary: true;
+                            clicked => { root.play-pause(); }
+                        }
+                        TransportButton { kind: "stop"; clicked => { root.stop(); } }
+                        TransportButton { kind: "next"; clicked => { root.next(); } }
                     }
-                    TransportButton { kind: "stop"; clicked => { root.stop(); } }
-                    TransportButton { kind: "next"; clicked => { root.next(); } }
-                    EqButton { label: "♥"; active: root.liked; clicked => { root.toggle-like(); } }
-                    EqButton { label: "нет"; active: root.disliked; clicked => { root.toggle-dislike(); } }
-                    EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        horizontal-stretch: 0;
+                        cross-axis-alignment: center;
+                        EqButton { label: "♥"; active: root.liked; clicked => { root.toggle-like(); } }
+                        EqButton { label: "нет"; active: root.disliked; clicked => { root.toggle-dislike(); } }
+                        EqButton { active: root.eq-on; clicked => { root.toggle-eq(); } }
+                    }
+                }
+
+                SeekBar {
+                    bar-height: 32px;
+                    vertical-stretch: 0;
+                    position: root.position;
+                    duration: root.duration;
+                    wave: root.wave;
+                    seek(ratio) => { root.seek(ratio); }
+                }
+
+                HorizontalLayout {
+                    height: 22px;
+                    vertical-stretch: 0;
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: root.time-label + " / " + root.duration-label;
+                        color: Theme.muted;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 0;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Glyph { kind: "speaker"; tint: Theme.muted; }
+                    VolumeBar {
+                        width: 96px;
+                        volume: root.volume;
+                        set-volume(value) => { root.set-volume(value); }
+                    }
                 }
             }
         }
 
-        SeekBar {
-            bar-height: 36px;
-            position: root.position;
-            duration: root.duration;
-            wave: root.wave;
-            seek(ratio) => { root.seek(ratio); }
-        }
-
-        HorizontalLayout {
-            padding-left: 12px;
-            padding-right: 12px;
-            spacing: 8px;
-            cross-axis-alignment: center;
-            Text { text: root.time-label; color: Theme.muted; font-size: 11px; }
-            Rectangle { horizontal-stretch: 1; }
-            Glyph { kind: "speaker"; tint: Theme.muted; }
-            VolumeBar {
-                volume: root.volume;
-                set-volume(value) => { root.set-volume(value); }
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Text { text: root.duration-label; color: Theme.muted; font-size: 11px; }
-        }
-
         VerticalLayout {
-            padding-left: 8px;
-            padding-right: 8px;
+            padding-left: 10px;
+            padding-right: 10px;
             padding-top: 6px;
             vertical-stretch: 1;
 
             Heading {
+                height: 36px;
+                vertical-stretch: 0;
                 title: root.catalog-open ? root.catalog-note : root.queue-title;
-                aside: root.catalog-open ? "" : root.queue-total;
                 if root.album-known && !root.catalog-open : EqButton {
                     label: "♥ альбом";
                     active: root.album-liked;
@@ -160,8 +189,23 @@ export component Medium inherits Rectangle {
             }
         }
 
+        if !root.catalog-open : HorizontalLayout {
+            height: 28px;
+            vertical-stretch: 0;
+            padding-left: 14px;
+            padding-right: 14px;
+            cross-axis-alignment: center;
+            Text {
+                text: root.queue-total;
+                color: Theme.dim;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
         Rectangle {
             height: 46px;
+            vertical-stretch: 0;
             background: Theme.orange;
 
             HorizontalLayout {

@@ -116,6 +116,7 @@ pub struct Artist {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Album {
     pub id: String,
+    pub cover_id: String,
     pub name: String,
     pub artist: String,
     pub artist_id: String,
@@ -379,7 +380,7 @@ fn all_albums(config: &ServerConfig) -> Result<Vec<Album>, String> {
     Ok(albums)
 }
 
-/// Album art for a song id. `None` when the server has no picture or cannot be reached.
+/// Art for a Subsonic cover id (or song id). Missing pictures return `None`.
 /// The returned bytes are a JPEG or a PNG, never an error page.
 pub fn cover_art(config: &ServerConfig, song_id: &str) -> Option<Vec<u8>> {
     if !config.loaded || config.password.is_empty() || song_id.is_empty() {
@@ -610,6 +611,7 @@ fn album_parts(value: &Value) -> Option<Album> {
     let name = album_name(value);
     Some(Album {
         id: id.to_string(),
+        cover_id: text_field(value, "coverArt"),
         name: if name.is_empty() {
             "Без названия".into()
         } else {
@@ -968,6 +970,7 @@ mod tests {
         let by_name = albums_for_artist(
             &[Album {
                 id: "al3".into(),
+                cover_id: String::new(),
                 name: "Без id".into(),
                 artist: "Damned Anthem".into(),
                 artist_id: String::new(),

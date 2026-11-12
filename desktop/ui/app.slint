@@ -3,7 +3,7 @@ import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
 import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
 
-import { AlbumItem, ArtistItem, CatalogHit, HomeRow, QueueItem } from "types.slint";
+import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
 
 export enum Mode { mini, medium, large }
 
@@ -16,6 +16,8 @@ export component AppWindow inherits Window {
     always-on-top: root.mode == Mode.mini;
     resize-border-width: 6px;
     forward-focus: keys;
+    min-width: root.mode == Mode.mini ? 520px : (root.mode == Mode.medium ? 420px : 1000px);
+    min-height: (root.mode == Mode.mini ? 150px : (root.mode == Mode.medium ? 560px : 660px)) + (root.eq-open ? 132px : 0px);
 
     in-out property <Mode> mode: Mode.mini;
     property <int> mode-index: root.mode == Mode.mini ? 0 : root.mode == Mode.medium ? 1 : 2;
@@ -54,6 +56,10 @@ export component AppWindow inherits Window {
     in-out property <bool> home-open: true;
     in-out property <string> home-title;
     in-out property <[HomeRow]> home-rows;
+    in-out property <string> home-page: "home";
+    in-out property <string> home-notice;
+    in-out property <[HomeRow]> home-features;
+    in-out property <[HomeSection]> home-sections;
 
     callback play-pause();
     callback stop();
@@ -77,9 +83,8 @@ export component AppWindow inherits Window {
     callback toggle-catalog();
     callback pick-hit(int);
     callback star-album(int);
-    callback show-home();
-    callback show-library();
     callback pick-home(int);
+    callback navigate(string);
     callback minimize();
     callback close-window();
     // text, control, alt, shift, meta. True when the player handled the key.
@@ -105,6 +110,7 @@ export component AppWindow inherits Window {
             border-color: Theme.orange;
 
             VerticalLayout {
+                padding: 1px;
                 Rectangle {
                     height: 28px;
                     background: Theme.panel;
@@ -117,6 +123,7 @@ export component AppWindow inherits Window {
                             cross-axis-alignment: center;
 
                             HorizontalLayout {
+                                horizontal-stretch: 0;
                                 spacing: 6px;
                                 cross-axis-alignment: center;
                                 Image {
@@ -271,8 +278,11 @@ export component AppWindow inherits Window {
                         home-open: root.home-open;
                         home-title: root.home-title;
                         home-rows: root.home-rows;
-                        show-home => { root.show-home(); }
-                        show-library => { root.show-library(); }
+                        home-page: root.home-page;
+                        home-notice: root.home-notice;
+                        home-features: root.home-features;
+                        home-sections: root.home-sections;
+                        navigate(page) => { root.navigate(page); }
                         pick-home(index) => { root.pick-home(index); }
                     }
                 }
