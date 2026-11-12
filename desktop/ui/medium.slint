@@ -16,6 +16,7 @@ export component Medium inherits Rectangle {
     in property <float> duration;
     in property <float> volume;
     in property <[float]> wave;
+    in property <string> wave-message;
     in property <bool> playing;
     in property <bool> eq-on;
     in property <bool> liked;
@@ -69,6 +70,7 @@ export component Medium inherits Rectangle {
     callback toggle-album-like();
     callback toggle-catalog();
     callback pick-hit(int);
+    callback download-hit(int);
 
     background: Theme.bg;
 
@@ -153,6 +155,7 @@ export component Medium inherits Rectangle {
                     position: root.position;
                     duration: root.duration;
                     wave: root.wave;
+                    wave-message: root.wave-message;
                     seek-enabled: root.seek-enabled;
                     seek(ratio) => { root.seek(ratio); }
                 }
@@ -219,6 +222,7 @@ export component Medium inherits Rectangle {
                     for hit[index] in root.hits : CatalogRow {
                         hit: hit;
                         clicked => { root.pick-hit(index); }
+                        download => { root.download-hit(index); }
                     }
                 }
             }

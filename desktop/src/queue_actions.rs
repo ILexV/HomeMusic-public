@@ -76,7 +76,7 @@ pub fn connect_queue_actions(
             if items.borrow().is_empty() {
                 clear_wave(&state);
                 state.album_id.borrow_mut().clear();
-                waves.load(None);
+                waves.load(None, "");
                 ui.set_wave(empty_wave());
                 clear_track(&ui);
                 ui.set_error(String::new().into());

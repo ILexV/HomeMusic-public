@@ -60,6 +60,11 @@ enum HubEvent {
         id: String,
         starred: bool,
     },
+    ReferenceStar {
+        reference: String,
+        starred: bool,
+        result: Result<String, String>,
+    },
     AlbumStar {
         id: String,
         starred: bool,
@@ -102,6 +107,7 @@ struct AlbumPreview {
 struct HubState {
     hub: Arc<hub::Hub>,
     marks: RefCell<hub::Marks>,
+    pending_reference_stars: RefCell<HashSet<String>>,
     hits: RefCell<Vec<hub::CatalogHit>>,
     album_id: RefCell<String>,
     catalog_open: Cell<bool>,
@@ -117,6 +123,7 @@ struct HubState {
     playback_ready: Cell<bool>,
     mix_control: mix_actions::State,
     mini_position: Cell<Option<(f32, f32)>>,
+    normal_position: Cell<Option<(f32, f32)>>,
     user_name: String,
     pane: Cell<home::Pane>,
     feed: RefCell<hub::HomeFeed>,
@@ -169,6 +176,7 @@ impl HubState {
         Self {
             hub,
             marks: RefCell::new(hub::Marks::default()),
+            pending_reference_stars: RefCell::new(HashSet::new()),
             hits: RefCell::new(Vec::new()),
             album_id: RefCell::new(String::new()),
             catalog_open: Cell::new(false),
@@ -184,6 +192,7 @@ impl HubState {
             playback_ready: Cell::new(false),
             mix_control: mix_actions::State::default(),
             mini_position: Cell::new(None),
+            normal_position: Cell::new(None),
             user_name: config.user.clone(),
             pane: Cell::new(home::Pane::Home),
             feed: RefCell::new(hub::HomeFeed::default()),
@@ -292,6 +301,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let hub_state = Rc::new(HubState::start(&config));
     hub_state.mini_position.set(session.and_then(|place| {
         place.mini_position.or_else(|| (place.mode.unwrap_or(0) == 0).then_some((place.x, place.y)))
+    }));
+    hub_state.normal_position.set(session.and_then(|place| {
+        place.normal_position.or_else(|| (place.mode.unwrap_or(0) != 0).then_some((place.x, place.y)))
     }));
     let queue = Rc::new(RefCell::new(queue::Queue::from_tracks("", Vec::new())));
     let browser = Rc::new(RefCell::new(Browser::empty()));
@@ -754,13 +766,35 @@ fn main() -> Result<(), slint::PlatformError> {
             return;
         };
         if item.id.is_empty() {
+            if item.listen_ref.is_empty() {
+                remember_note(&ui, &player_like.borrow(), &hub_like, &status_like, "У трека нет ссылки на каталог");
+                return;
+            }
+            if !hub_like.pending_reference_stars.borrow_mut().insert(item.listen_ref.clone()) {
+                return;
+            }
+            let was = hub_like.marks.borrow().refs.contains(&item.listen_ref);
+            {
+                let mut marks = hub_like.marks.borrow_mut();
+                if was {
+                    marks.refs.remove(&item.listen_ref);
+                } else {
+                    marks.refs.insert(item.listen_ref.clone());
+                }
+            }
+            paint_track_marks(&ui, &queue_like.borrow(), &hub_like);
             remember_note(
-                &ui,
-                &player_like.borrow(),
-                &hub_like,
-                &status_like,
-                "Лайк только у треков библиотеки",
+                &ui, &player_like.borrow(), &hub_like, &status_like,
+                if was { "Убираем лайк…" } else { "Лайк: добавляем трек в загрузки…" },
             );
+            note_wave_mark(&item, &hub_like, if was { "unlike" } else { "like" });
+            let reference = item.listen_ref;
+            let client = Arc::clone(&hub_like.hub);
+            let events = Arc::clone(&hub_like.events);
+            std::thread::spawn(move || {
+                let result = client.star_reference(&reference, was);
+                push_event(&events, HubEvent::ReferenceStar { reference, starred: !was, result });
+            });
             return;
         }
         let was = hub_like.marks.borrow().songs.contains(&item.id);
@@ -989,82 +1023,19 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.invoke_search_edited(hit.title.into());
                 }
             }
-            hub::HitKind::Album if hit.downloading => {
-                remember_note(
-                    &ui,
-                    &player_hit.borrow(),
-                    &hub_hit,
-                    &status_hit,
-                    "Уже качается",
-                );
-            }
             hub::HitKind::Album => {
-                if hit.reference.is_empty() {
-                    remember_note(
-                        &ui,
-                        &player_hit.borrow(),
-                        &hub_hit,
-                        &status_hit,
-                        "Нет ссылки на альбом",
-                    );
-                    return;
-                }
-                {
-                    let mut hits = hub_hit.hits.borrow_mut();
-                    if let Some(row) = hits.iter_mut().find(|row| row.reference == hit.reference) {
-                        row.downloading = true;
-                    }
-                }
-                show_hits(&ui, &hub_hit.hits.borrow());
-                remember_note(
-                    &ui,
-                    &player_hit.borrow(),
-                    &hub_hit,
-                    &status_hit,
-                    "Отправляем альбом…",
-                );
-                let reference = hit.reference;
-                let client = Arc::clone(&hub_hit.hub);
-                let events = Arc::clone(&hub_hit.events);
-                std::thread::spawn(move || match client.download_album(&reference) {
-                    Ok(message) => push_event(
-                        &events,
-                        HubEvent::Download {
-                            reference,
-                            message,
-                            failed: false,
-                        },
-                    ),
-                    Err(message) => push_event(
-                        &events,
-                        HubEvent::Download {
-                            reference,
-                            message,
-                            failed: true,
-                        },
-                    ),
-                });
+                download_catalog_hit(&ui, &player_hit.borrow(), &hub_hit, &status_hit, hit);
             }
-            hub::HitKind::Track if hit.owned => {
-                if hit.nd_song_id.is_empty() {
+            hub::HitKind::Track => {
+                let Some(item) = catalog_track(hit) else {
                     remember_note(
                         &ui,
                         &player_hit.borrow(),
                         &hub_hit,
                         &status_hit,
-                        "Трек без номера в библиотеке",
+                        "Нет ссылки для прослушивания трека",
                     );
                     return;
-                }
-                let item = queue::Item {
-                    id: hit.nd_song_id,
-                    path: String::new(),
-                    listen_ref: String::new(),
-                    title: hit.title,
-                    artist: hit.artist,
-                    album: hit.album,
-                    meta: String::new(),
-                    duration_s: hit.duration_s,
                 };
                 *hub_hit.album_id.borrow_mut() = String::new();
                 cancel_queue_load(&ui, &hub_hit);
@@ -1080,62 +1051,18 @@ fn main() -> Result<(), slint::PlatformError> {
                     moved,
                 );
             }
-            hub::HitKind::Track if hit.downloading => {
-                remember_note(
-                    &ui,
-                    &player_hit.borrow(),
-                    &hub_hit,
-                    &status_hit,
-                    "Уже качается",
-                );
-            }
-            hub::HitKind::Track => {
-                if hit.reference.is_empty() {
-                    remember_note(
-                        &ui,
-                        &player_hit.borrow(),
-                        &hub_hit,
-                        &status_hit,
-                        "Нет ссылки на трек",
-                    );
-                    return;
-                }
-                {
-                    let mut hits = hub_hit.hits.borrow_mut();
-                    if let Some(row) = hits.iter_mut().find(|row| row.reference == hit.reference) {
-                        row.downloading = true;
-                    }
-                }
-                show_hits(&ui, &hub_hit.hits.borrow());
-                remember_note(
-                    &ui,
-                    &player_hit.borrow(),
-                    &hub_hit,
-                    &status_hit,
-                    "Отправляем…",
-                );
-                let reference = hit.reference;
-                let client = Arc::clone(&hub_hit.hub);
-                let events = Arc::clone(&hub_hit.events);
-                std::thread::spawn(move || match client.download_track(&reference) {
-                    Ok(message) => push_event(
-                        &events,
-                        HubEvent::Download {
-                            reference,
-                            message,
-                            failed: false,
-                        },
-                    ),
-                    Err(message) => push_event(
-                        &events,
-                        HubEvent::Download {
-                            reference,
-                            message,
-                            failed: true,
-                        },
-                    ),
-                });
-            }
+        }
+    });
+
+    let ui_download = ui.as_weak();
+    let hub_download = hub_state.clone();
+    let player_download = player.clone();
+    let status_download = config_status.clone();
+    ui.on_download_hit(move |index| {
+        let Some(ui) = ui_download.upgrade() else { return };
+        let hit = hub_download.hits.borrow().get(index as usize).cloned();
+        if let Some(hit) = hit {
+            download_catalog_hit(&ui, &player_download.borrow(), &hub_download, &status_download, hit);
         }
     });
 
@@ -1144,9 +1071,11 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_set_mode(move |mode| {
         let mode = mode.clamp(0, 2);
         if let Some(ui) = ui_mode.upgrade() {
+            let position = ui.window().position().to_logical(ui.window().scale_factor());
             if ui.get_mode() == Mode::Mini {
-                let position = ui.window().position().to_logical(ui.window().scale_factor());
                 hub_mode.mini_position.set(Some((position.x, position.y)));
+            } else {
+                hub_mode.normal_position.set(Some((position.x, position.y)));
             }
             ui.set_mode(match mode {
                 0 => Mode::Mini,
@@ -1154,10 +1083,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 _ => Mode::Large,
             });
             resize(&ui, mode);
-            if mode == 0 {
-                if let Some((x, y)) = hub_mode.mini_position.get() {
-                    ui.window().set_position(slint::LogicalPosition::new(x, y));
-                }
+            let position = if mode == 0 {
+                hub_mode.mini_position.get()
+            } else {
+                hub_mode.normal_position.get()
+            };
+            if let Some((x, y)) = position {
+                ui.window().set_position(slint::LogicalPosition::new(x, y));
             }
         }
     });
@@ -1283,8 +1215,16 @@ fn main() -> Result<(), slint::PlatformError> {
                     &status_tick,
                 );
                 poll_mix(&hub_tick);
-                if let Some(peaks) = waves_tick.poll() {
-                    show_wave(&ui, &peaks);
+                if let Some(update) = waves_tick.poll() {
+                    match update {
+                        wave::Update::Loading => ui.set_wave_message("Загрузка волны…".into()),
+                        wave::Update::Cleared => ui.set_wave_message("".into()),
+                        wave::Update::Unavailable => ui.set_wave_message("Нет данных волны".into()),
+                        wave::Update::Ready(peaks) => {
+                            ui.set_wave_message("".into());
+                            show_wave(&ui, peaks);
+                        }
+                    }
                 }
                 let player = player_tick.borrow();
                 let snapshot = player.snapshot();
@@ -1381,7 +1321,7 @@ fn remember_place(ui: &AppWindow, watch: &mut PlaceWatch, hub: &HubState) {
             None => return,
         }
     }
-    if watch.last.is_some_and(|last| same_place(last, place)) {
+    if watch.last.is_some_and(|last| window_place::same(last, place)) {
         return;
     }
     watch.last = Some(place);
@@ -1406,6 +1346,8 @@ fn current_place(ui: &AppWindow, hub: &HubState) -> Option<window_place::Place> 
     }
     if ui.get_mode() == Mode::Mini {
         hub.mini_position.set(Some((pos.x, pos.y)));
+    } else {
+        hub.normal_position.set(Some((pos.x, pos.y)));
     }
     Some(window_place::Place {
         x: pos.x,
@@ -1419,35 +1361,10 @@ fn current_place(ui: &AppWindow, hub: &HubState) -> Option<window_place::Place> 
         preamp: Some(ui.get_preamp()),
         bands: Some(bands_from_ui(ui)),
         mini_position: hub.mini_position.get(),
+        normal_position: hub.normal_position.get(),
     })
 }
 
-fn same_place(left: window_place::Place, right: window_place::Place) -> bool {
-    (left.x - right.x).abs() < 0.5
-        && (left.y - right.y).abs() < 0.5
-        && left.mode == right.mode
-        && left.mini_position == right.mini_position
-        && match (left.width, left.height, right.width, right.height) {
-            (Some(lw), Some(lh), Some(rw), Some(rh)) => {
-                (lw - rw).abs() < 0.5 && (lh - rh).abs() < 0.5
-            }
-            _ => false,
-        }
-        && match (left.volume, right.volume) {
-            (Some(lv), Some(rv)) => (lv - rv).abs() < 0.005,
-            _ => false,
-        }
-        && left.eq_on == right.eq_on
-        && left.eq_open == right.eq_open
-        && match (left.preamp, right.preamp) {
-            (Some(lp), Some(rp)) => (lp - rp).abs() < 0.05,
-            _ => false,
-        }
-        && match (left.bands, right.bands) {
-            (Some(lb), Some(rb)) => lb.iter().zip(rb).all(|(a, b)| (a - b).abs() < 0.05),
-            _ => false,
-        }
-}
 
 fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
     let mode = session
@@ -1653,10 +1570,8 @@ fn empty_wave() -> slint::ModelRc<f32> {
     slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<f32>::new())))
 }
 
-fn show_wave(ui: &AppWindow, peaks: &[f32]) {
-    ui.set_wave(slint::ModelRc::from(Rc::new(slint::VecModel::from(
-        peaks.to_vec(),
-    ))));
+fn show_wave(ui: &AppWindow, peaks: Vec<f32>) {
+    ui.set_wave(slint::ModelRc::from(Rc::new(slint::VecModel::from(peaks))));
 }
 
 fn tray_icon() -> slint::Image {
@@ -1697,7 +1612,7 @@ fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
     let position_known = matches!(state.phase,
         PlaybackPhase::Playing | PlaybackPhase::Paused | PlaybackPhase::Buffering);
     ui.set_time_label(if position_known { clock(state.position_s) } else { "—:—".into() }.into());
-    let duration = if state.duration_s > 0.0 { state.duration_s } else { ui.get_track_duration() };
+    let duration = state.duration_s;
     ui.set_duration_label(if duration > 0.0 { clock(duration) } else { "—:—".into() }.into());
 }
 
@@ -1869,11 +1784,24 @@ fn clear_catalog(ui: &AppWindow, hub: &HubState) {
 fn show_hits(ui: &AppWindow, hits: &[hub::CatalogHit]) {
     let rows = hits
         .iter()
-        .map(|hit| CatalogHit {
+        .enumerate()
+        .map(|(index, hit)| CatalogHit {
+            section: if index == 0 || hits[index - 1].kind != hit.kind {
+                if hit.kind == hub::HitKind::Album { "АЛЬБОМЫ" } else { "ТРЕКИ" }
+            } else {
+                ""
+            }.into(),
+            is_album: hit.kind == hub::HitKind::Album,
             title: hit.title.clone().into(),
             artist: hit.artist.clone().into(),
             detail: hit.detail.clone().into(),
             action: hit.action().into(),
+            download_action: if hit.kind == hub::HitKind::Track && !hit.owned {
+                if hit.downloading { "качается" } else { "скачать" }
+            } else {
+                ""
+            }.into(),
+            can_download: !hit.owned && !hit.downloading && !hit.reference.is_empty(),
         })
         .collect::<Vec<_>>();
     ui.set_hits(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
@@ -1885,14 +1813,71 @@ fn show_hits(ui: &AppWindow, hits: &[hub::CatalogHit]) {
     ui.set_catalog_note(note.into());
 }
 
+fn catalog_track(hit: hub::CatalogHit) -> Option<queue::Item> {
+    if hit.kind != hub::HitKind::Track {
+        return None;
+    }
+    let id = if hit.owned { hit.nd_song_id } else { String::new() };
+    let listen_ref = if id.is_empty() { hit.reference } else { String::new() };
+    if id.is_empty() && listen_ref.is_empty() {
+        return None;
+    }
+    let meta = if id.is_empty() { "Поток из сети".into() } else { String::new() };
+    Some(queue::Item {
+        id,
+        path: String::new(),
+        listen_ref,
+        title: hit.title,
+        artist: hit.artist,
+        album: hit.album,
+        meta,
+        duration_s: hit.duration_s,
+    })
+}
+
+fn download_catalog_hit(
+    ui: &AppWindow,
+    player: &Player,
+    hub: &HubState,
+    status: &str,
+    hit: hub::CatalogHit,
+) {
+    if hit.owned || hit.downloading {
+        return;
+    }
+    if hit.reference.is_empty() {
+        remember_note(ui, player, hub, status, "Нет ссылки для скачивания");
+        return;
+    }
+    if let Some(row) = hub.hits.borrow_mut().iter_mut().find(|row| row.reference == hit.reference) {
+        row.downloading = true;
+    }
+    show_hits(ui, &hub.hits.borrow());
+    remember_note(ui, player, hub, status, "Отправляем в загрузки…");
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || {
+        let result = match hit.kind {
+            hub::HitKind::Album => client.download_album(&hit.reference),
+            hub::HitKind::Track => client.download_track(&hit.reference),
+        };
+        let failed = result.is_err();
+        let message = result.unwrap_or_else(|message| message);
+        push_event(&events, HubEvent::Download { reference: hit.reference, message, failed });
+    });
+}
+
 fn paint_track_marks(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
-    let id = queue
-        .current()
-        .map(|item| item.id.clone())
-        .unwrap_or_default();
+    let item = queue.current();
     let marks = hub.marks.borrow();
-    ui.set_liked(!id.is_empty() && marks.songs.contains(&id));
-    ui.set_disliked(!id.is_empty() && marks.disliked.contains(&id));
+    ui.set_liked(item.is_some_and(|item| {
+        if !item.id.is_empty() {
+            marks.songs.contains(&item.id)
+        } else {
+            !item.listen_ref.is_empty() && marks.refs.contains(&item.listen_ref)
+        }
+    }));
+    ui.set_disliked(item.is_some_and(|item| !item.id.is_empty() && marks.disliked.contains(&item.id)));
     let album_id = hub.album_id.borrow();
     ui.set_album_known(!album_id.is_empty());
     ui.set_album_liked(!album_id.is_empty() && marks.albums.contains(album_id.as_str()));
@@ -1969,7 +1954,7 @@ fn apply_hub_events(
                             jump(ui, player, queue, config, status, waves, hub, true);
                         } else {
                             player.borrow_mut().stop();
-                            waves.load(None);
+                            waves.load(None, "");
                             ui.set_wave(empty_wave());
                             clear_track(ui);
                             show_queue(ui, &queue.borrow(), hub);
@@ -2014,6 +1999,18 @@ fn apply_hub_events(
                 } else {
                     marks.songs.remove(&id);
                 }
+                refresh_marks = true;
+            }
+            HubEvent::ReferenceStar { reference, starred, result } => {
+                hub.pending_reference_stars.borrow_mut().remove(&reference);
+                let effective = if result.is_ok() { starred } else { !starred };
+                let mut marks = hub.marks.borrow_mut();
+                if effective {
+                    marks.refs.insert(reference);
+                } else {
+                    marks.refs.remove(&reference);
+                }
+                *hub.hub_note.borrow_mut() = result.unwrap_or_else(|message| message);
                 refresh_marks = true;
             }
             HubEvent::AlbumStar { id, starred } => {
@@ -2750,12 +2747,7 @@ fn play_current_at(
         show_queue(ui, &queue, hub);
     }
     ui.set_wave(empty_wave());
-    // A Hub stream needs the session cookie. The waveform reader has no cookie, so it stays flat.
-    waves.load(if cookie.is_empty() {
-        target.clone()
-    } else {
-        None
-    });
+    waves.load(target.clone(), &cookie);
     let loaded = match target {
         Some(target) => player.borrow_mut().load_cookie_at(&target, &cookie, position_s, paused),
         None => Err("Нет трека".into()),
@@ -2785,7 +2777,7 @@ fn current_target(
     if !item.id.is_empty() {
         Some((navidrome::stream_url(config, &item.id), String::new()))
     } else if !item.listen_ref.is_empty() {
-        let url = hub.hub.listen_url(&item.listen_ref);
+        let url = hub.hub.listen_url(&item.listen_ref, hub.wave.borrow().on());
         let cookie = hub.hub.session_token();
         if url.is_empty() || cookie.is_empty() {
             return None;
@@ -3147,5 +3139,26 @@ mod tests {
         assert_eq!(visible_sources(&queue, "речк"), vec![1]);
         assert_eq!(visible_sources(&queue, "anthem"), vec![0]);
         assert!(visible_sources(&queue, "нет такого").is_empty());
+    }
+
+    #[test]
+    fn catalog_listening_uses_library_ids_or_stream_refs_even_during_download() {
+        let hits = hub::parse_search(&serde_json::json!({
+            "tracks": [
+                {"ref": "dz:1", "title": "Remote", "owned": false},
+                {"ref": "dz:2", "title": "Downloading", "owned": false, "downloading": true},
+                {"ref": "dz:3", "title": "Library", "owned": true, "nd_song_id": "nd3"},
+                {"ref": "dz:4", "title": "Pending scan", "owned": true}
+            ]
+        }));
+        let mut items = hits.into_iter().map(|hit| catalog_track(hit).unwrap());
+        let remote = items.next().unwrap();
+        assert!(remote.id.is_empty() && remote.path.is_empty());
+        assert_eq!(remote.listen_ref, "dz:1");
+        assert_eq!(items.next().unwrap().listen_ref, "dz:2");
+        let library = items.next().unwrap();
+        assert_eq!(library.id, "nd3");
+        assert!(library.listen_ref.is_empty());
+        assert_eq!(items.next().unwrap().listen_ref, "dz:4");
     }
 }

@@ -40,6 +40,7 @@ export component AppWindow inherits Window {
     in-out property <bool> seek-enabled;
     in-out property <float> volume;
     in-out property <[float]> wave;
+    in-out property <string> wave-message;
     in-out property <bool> eq-on;
     in-out property <bool> eq-open;
     in-out property <float> preamp;
@@ -111,6 +112,7 @@ export component AppWindow inherits Window {
     callback toggle-album-like();
     callback toggle-catalog();
     callback pick-hit(int);
+    callback download-hit(int);
     callback star-album(int);
     callback pick-home(int);
     callback navigate(string);
@@ -200,6 +202,7 @@ export component AppWindow inherits Window {
                         duration: root.duration;
                         volume: root.volume;
                         wave: root.wave;
+                        wave-message: root.wave-message;
                         playing: root.playing;
                         playback-message: root.playback-message;
                         playback-busy: root.playback-busy;
@@ -233,6 +236,7 @@ export component AppWindow inherits Window {
                         duration: root.duration;
                         volume: root.volume;
                         wave: root.wave;
+                        wave-message: root.wave-message;
                         playing: root.playing;
                         playback-message: root.playback-message;
                         playback-busy: root.playback-busy;
@@ -286,6 +290,7 @@ export component AppWindow inherits Window {
                         toggle-album-like => { root.toggle-album-like(); }
                         toggle-catalog => { root.toggle-catalog(); }
                         pick-hit(index) => { root.pick-hit(index); }
+                        download-hit(index) => { root.download-hit(index); }
                     }
                     if root.mode == Mode.large : Large {
                         width: 100%;
@@ -300,6 +305,7 @@ export component AppWindow inherits Window {
                         duration: root.duration;
                         volume: root.volume;
                         wave: root.wave;
+                        wave-message: root.wave-message;
                         playing: root.playing;
                         playback-message: root.playback-message;
                         playback-busy: root.playback-busy;
@@ -361,6 +367,7 @@ export component AppWindow inherits Window {
                         toggle-album-like => { root.toggle-album-like(); }
                         toggle-catalog => { root.toggle-catalog(); }
                         pick-hit(index) => { root.pick-hit(index); }
+                        download-hit(index) => { root.download-hit(index); }
                         star-album(index) => { root.star-album(index); }
                         home-open: root.home-open;
                         home-title: root.home-title;

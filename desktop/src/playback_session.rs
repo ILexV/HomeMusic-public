@@ -14,7 +14,7 @@ use crate::player::{PlaybackPhase, PlaybackState};
 use crate::queue::{Item, Queue};
 
 const SCHEMA: u64 = 1;
-const POSITION_INTERVAL: Duration = Duration::from_secs(5);
+const POSITION_INTERVAL: Duration = Duration::from_secs(15);
 
 pub struct SavedPlayback {
     pub queue: Queue,
@@ -451,13 +451,71 @@ mod tests {
         let queue = queue();
         let now = Instant::now();
         assert!(store.record_at(&queue, &state(PlaybackPhase::Playing, 1.0), "", None, false, now).unwrap());
-        for second in 1..5 {
+        for second in 1..POSITION_INTERVAL.as_secs() {
             assert!(!store.record_at(&queue, &state(PlaybackPhase::Playing, second as f32 + 1.0), "", None, false, now + Duration::from_secs(second)).unwrap());
         }
-        assert!(store.record_at(&queue, &state(PlaybackPhase::Playing, 6.0), "", None, false, now + Duration::from_secs(5)).unwrap());
-        assert!(store.record_at(&queue, &state(PlaybackPhase::Paused, 6.5), "", None, false, now + Duration::from_secs(5)).unwrap());
-        assert!(store.record_at(&queue, &state(PlaybackPhase::Playing, 7.0), "", None, true, now + Duration::from_secs(6)).unwrap());
-        assert_eq!(fixture.store(&config).load().unwrap().unwrap().position_s, 7.0);
+        let checkpoint = now + POSITION_INTERVAL;
+        assert!(store.record_at(&queue, &state(PlaybackPhase::Playing, 16.0), "", None, false, checkpoint).unwrap());
+        assert!(store.record_at(&queue, &state(PlaybackPhase::Paused, 16.5), "", None, false, checkpoint).unwrap());
+        assert!(store.record_at(&queue, &state(PlaybackPhase::Playing, 17.0), "", None, true, checkpoint + Duration::from_secs(1)).unwrap());
+        assert_eq!(fixture.store(&config).load().unwrap().unwrap().position_s, 17.0);
+    }
+
+    #[test]
+    fn steady_playback_and_wave_telemetry_write_only_position_checkpoints() {
+        let fixture = Fixture::new();
+        let config = config();
+        let mut store = fixture.store(&config);
+        let queue = queue();
+        let now = Instant::now();
+        let mut wave = WaveLive {
+            id: "wave-1".into(), personal: true, origin: "home".into(),
+            ..WaveLive::default()
+        };
+        assert!(store.record_at(&queue, &state(PlaybackPhase::Playing, 0.0), "", Some(&wave), false, now).unwrap());
+        for tick in 1..=300 {
+            let elapsed = Duration::from_millis(tick * 200);
+            wave.asking = tick % 2 == 0;
+            wave.pending = vec![json!({"elapsed": tick})];
+            let wrote = store.record_at(
+                &queue, &state(PlaybackPhase::Playing, elapsed.as_secs_f32()),
+                "", Some(&wave), false, now + elapsed,
+            ).unwrap();
+            assert_eq!(wrote, elapsed.as_millis() % POSITION_INTERVAL.as_millis() == 0, "tick {tick}");
+        }
+        let saved = fixture.store(&config).load().unwrap().unwrap();
+        assert_eq!(saved.position_s, 60.0);
+        assert!(saved.wave.unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn stationary_paused_restore_does_not_write_but_context_edits_do() {
+        let fixture = Fixture::new();
+        let config = config();
+        let mut store = fixture.store(&config);
+        let queue = queue();
+        let now = Instant::now();
+        assert!(store.record_at(&queue, &state(PlaybackPhase::Paused, 23.5), "", None, false, now).unwrap());
+        let mut reopened = fixture.store(&config);
+        let saved = reopened.load().unwrap().unwrap();
+        let now = Instant::now();
+        for second in 0..=60 {
+            assert!(!reopened.record_at(
+                &saved.queue, &state(PlaybackPhase::Paused, saved.position_s),
+                "", None, second == 60, now + Duration::from_secs(second),
+            ).unwrap());
+        }
+        let now = now + Duration::from_secs(60);
+        assert!(reopened.record_at(&saved.queue, &state(PlaybackPhase::Paused, 23.5), "album-2", None, false, now).unwrap());
+        let mut wave = WaveLive { id: "wave-2".into(), ..WaveLive::default() };
+        assert!(reopened.record_at(&saved.queue, &state(PlaybackPhase::Paused, 23.5), "album-2", Some(&wave), false, now).unwrap());
+        wave.personal = true;
+        wave.origin = "artist".into();
+        assert!(reopened.record_at(&saved.queue, &state(PlaybackPhase::Paused, 23.5), "album-2", Some(&wave), false, now).unwrap());
+        let restored = fixture.store(&config).load().unwrap().unwrap();
+        assert_eq!(restored.position_s, 23.5);
+        assert_eq!(restored.album_id, "album-2");
+        assert!(same_wave(restored.wave.as_ref(), Some(&wave)));
     }
 
     #[test]

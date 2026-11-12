@@ -9,6 +9,7 @@ export component Mini inherits Rectangle {
     in property <float> duration;
     in property <float> volume;
     in property <[float]> wave;
+    in property <string> wave-message;
     in property <bool> playing;
     in property <string> playback-message;
     in property <bool> playback-busy;
@@ -81,6 +82,7 @@ export component Mini inherits Rectangle {
             position: root.position;
             duration: root.duration;
             wave: root.wave;
+            wave-message: root.wave-message;
             seek-enabled: root.seek-enabled;
             seek(ratio) => { root.seek(ratio); }
         }

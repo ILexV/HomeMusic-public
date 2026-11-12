@@ -770,6 +770,30 @@ mod tests {
     }
 
     #[test]
+    fn full_stream_unavailable_stops_without_duration_or_queue_advance() {
+        let url = format!(
+            "{}?ref=dz%3A370418141&full=1",
+            serve_response(
+                br#"{"detail":"Full recording unavailable"}"#.to_vec(),
+                "503 Service Unavailable",
+            )
+        );
+        let mut player = open_null();
+        player.load_cookie(&url, "private-session").unwrap();
+        let failed = wait_until(&mut player, |state| state.phase == PlaybackPhase::Error);
+        assert!(!failed.playing);
+        assert!(!failed.seekable);
+        assert_eq!(failed.duration_s, 0.0);
+        assert_eq!(failed.position_s, 0.0);
+        assert_eq!(player.notice(), Some("Не удалось воспроизвести файл"));
+        for _ in 0..5 {
+            assert!(!player.take_natural_end(), "unavailable audio advanced the queue");
+            assert_eq!(player.snapshot().phase, PlaybackPhase::Error);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
+    #[test]
     fn replacing_playback_clears_old_timing_and_honors_pause_during_load() {
         let path = std::env::temp_dir().join(format!(
             "home-music-replacement-{}.wav",
@@ -909,6 +933,10 @@ mod tests {
     }
 
     fn serve_wav(body: Vec<u8>) -> String {
+        serve_response(body, "200 OK")
+    }
+
+    fn serve_response(body: Vec<u8>, response_status: &'static str) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -925,9 +953,10 @@ mod tests {
                         let mut start = 0usize;
                         let mut end = body.len();
                         let mut partial = false;
-                        if let Some(line) = req
-                            .lines()
-                            .find(|line| line.to_ascii_lowercase().starts_with("range:"))
+                        if let Some(line) = req.lines().find(|line| {
+                            response_status == "200 OK"
+                                && line.to_ascii_lowercase().starts_with("range:")
+                        })
                         {
                             if let Some(spec) = line.split('=').nth(1) {
                                 if let Some((left, right)) = spec.trim().split_once('-') {
@@ -948,7 +977,7 @@ mod tests {
                         let status = if partial {
                             "206 Partial Content"
                         } else {
-                            "200 OK"
+                            response_status
                         };
                         let range_header = if partial {
                             format!(

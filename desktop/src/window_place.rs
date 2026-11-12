@@ -1,7 +1,7 @@
 //! Where the window was last left. Also the mode, the size, the volume, and the equalizer.
 //! A file that only has `x` and `y` still loads.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Place {
@@ -16,6 +16,41 @@ pub struct Place {
     pub preamp: Option<f32>,
     pub bands: Option<[f32; 10]>,
     pub mini_position: Option<(f32, f32)>,
+    pub normal_position: Option<(f32, f32)>,
+}
+
+/// Compare persisted settings, ignoring subpixel window-manager rounding.
+pub fn same(left: Place, right: Place) -> bool {
+    fn near(left: Option<f32>, right: Option<f32>, tolerance: f32) -> bool {
+        match (left, right) {
+            (Some(left), Some(right)) => (left - right).abs() < tolerance,
+            (None, None) => true,
+            _ => false,
+        }
+    }
+    fn same_position(left: Option<(f32, f32)>, right: Option<(f32, f32)>) -> bool {
+        match (left, right) {
+            (Some((lx, ly)), Some((rx, ry))) => (lx - rx).abs() < 0.5 && (ly - ry).abs() < 0.5,
+            (None, None) => true,
+            _ => false,
+        }
+    }
+    (left.x - right.x).abs() < 0.5
+        && (left.y - right.y).abs() < 0.5
+        && left.mode == right.mode
+        && same_position(left.mini_position, right.mini_position)
+        && same_position(left.normal_position, right.normal_position)
+        && near(left.width, right.width, 0.5)
+        && near(left.height, right.height, 0.5)
+        && near(left.volume, right.volume, 0.005)
+        && left.eq_on == right.eq_on
+        && left.eq_open == right.eq_open
+        && near(left.preamp, right.preamp, 0.05)
+        && match (left.bands, right.bands) {
+            (Some(left), Some(right)) => left.iter().zip(right).all(|(a, b)| (a - b).abs() < 0.05),
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 pub fn path() -> PathBuf {
@@ -28,9 +63,23 @@ pub fn load() -> Option<Place> {
 }
 
 pub fn save(place: Place) {
+    let _ = save_at(&path(), place);
+}
+
+fn save_at(path: &Path, place: Place) -> std::io::Result<bool> {
+    // The timer filters unchanged snapshots in memory. Also deduplicate explicit
+    // saves (notably shutdown) against the file, without touching its timestamp.
+    if std::fs::read_to_string(path).ok().and_then(|text| parse(&text))
+        .is_some_and(|saved| same(saved, place))
+    {
+        return Ok(false);
+    }
     let mut body = format!("x = {}\ny = {}\n", place.x, place.y);
     if let Some((x, y)) = place.mini_position {
         body.push_str(&format!("mini-x = {x}\nmini-y = {y}\n"));
+    }
+    if let Some((x, y)) = place.normal_position {
+        body.push_str(&format!("normal-x = {x}\nnormal-y = {y}\n"));
     }
     if let Some(mode) = place.mode {
         body.push_str(&format!("mode = {mode}\n"));
@@ -64,7 +113,8 @@ pub fn save(place: Place) {
             .join(",");
         body.push_str(&format!("bands = {text}\n"));
     }
-    let _ = std::fs::write(path(), body);
+    std::fs::write(path, body)?;
+    Ok(true)
 }
 
 pub fn parse(text: &str) -> Option<Place> {
@@ -80,6 +130,8 @@ pub fn parse(text: &str) -> Option<Place> {
     let mut bands = None;
     let mut mini_x = None;
     let mut mini_y = None;
+    let mut normal_x = None;
+    let mut normal_y = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -94,6 +146,8 @@ pub fn parse(text: &str) -> Option<Place> {
             "y" => y = parse_f32(value),
             "mini-x" => mini_x = parse_f32(value),
             "mini-y" => mini_y = parse_f32(value),
+            "normal-x" => normal_x = parse_f32(value),
+            "normal-y" => normal_y = parse_f32(value),
             "mode" => {
                 if let Ok(parsed) = value.parse::<i32>() {
                     if (0..=2).contains(&parsed) {
@@ -129,6 +183,7 @@ pub fn parse(text: &str) -> Option<Place> {
         preamp,
         bands,
         mini_position: mini_x.zip(mini_y),
+        normal_position: normal_x.zip(normal_y),
     })
 }
 
@@ -195,6 +250,7 @@ mod tests {
             preamp: None,
             bands: None,
             mini_position: None,
+            normal_position: None,
         }
     }
 
@@ -262,5 +318,72 @@ mod tests {
         let broken = parse("x=80\ny=60\nmini-x=NaN\nmini-y=430\n").unwrap();
         assert_eq!(broken.mini_position, None);
         assert_eq!((broken.x, broken.y), (80.0, 60.0));
+    }
+
+    #[test]
+    fn normal_position_survives_a_session_closed_in_mini_mode() {
+        let place = parse(
+            "x=880\ny=920\nmode=0\nmini-x=880\nmini-y=920\nnormal-x=-1200\nnormal-y=60\n",
+        )
+        .unwrap();
+        assert_eq!((place.x, place.y), (880.0, 920.0));
+        assert_eq!(place.mini_position, Some((880.0, 920.0)));
+        assert_eq!(place.normal_position, Some((-1200.0, 60.0)));
+        for coordinates in ["normal-x=80", "normal-x=80\nnormal-y=NaN"] {
+            let broken = parse(&format!("x=880\ny=920\n{coordinates}\n")).unwrap();
+            assert_eq!(broken.normal_position, None);
+            assert_eq!((broken.x, broken.y), (880.0, 920.0));
+        }
+    }
+
+    #[test]
+    fn unchanged_optional_settings_and_subpixel_positions_compare_equal() {
+        let place = bare(80.0, 60.0);
+        assert!(same(place, place));
+        let mut place = place;
+        place.mini_position = Some((-520.0, 430.0));
+        place.normal_position = Some((80.0, 60.0));
+        let mut rounded = place;
+        rounded.x += 0.25;
+        rounded.normal_position = Some((80.25, 60.25));
+        rounded.mini_position = Some((-519.75, 430.25));
+        assert!(same(place, rounded));
+        rounded.mini_position = Some((-519.0, 430.0));
+        assert!(!same(place, rounded));
+        rounded = place;
+        rounded.normal_position = Some((81.0, 60.0));
+        assert!(!same(place, rounded));
+    }
+
+    #[test]
+    fn explicit_saves_write_only_geometry_mode_or_settings_changes() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SERIAL: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "home-music-window-{}-{}.toml",
+            std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed),
+        ));
+        let mut place = bare(80.0, 60.0);
+        assert!(save_at(&path, place).unwrap());
+        assert!(!save_at(&path, place).unwrap());
+        for change in 0..11 {
+            match change {
+                0 => place.x = 100.0,
+                1 => place.mode = Some(0),
+                2 => place.width = Some(400.0),
+                3 => place.height = Some(100.0),
+                4 => place.volume = Some(0.4),
+                5 => place.eq_on = Some(true),
+                6 => place.eq_open = Some(true),
+                7 => place.preamp = Some(-2.0),
+                8 => place.bands = Some([1.0; 10]),
+                9 => place.mini_position = Some((100.0, 60.0)),
+                _ => place.normal_position = Some((-1200.0, 80.0)),
+            }
+            assert!(save_at(&path, place).unwrap(), "change {change}");
+            assert!(!save_at(&path, place).unwrap(), "unchanged {change}");
+            assert_eq!(parse(&std::fs::read_to_string(&path).unwrap()), Some(place));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

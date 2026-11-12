@@ -142,6 +142,7 @@ export component Large inherits Rectangle {
     in property <float> duration;
     in property <float> volume;
     in property <[float]> wave;
+    in property <string> wave-message;
     in property <bool> playing;
     in property <bool> eq-on;
     in property <bool> liked;
@@ -175,6 +176,8 @@ export component Large inherits Rectangle {
     in property <bool> playback-error;
     in property <bool> seek-enabled;
     in property <bool> album-open;
+    property <length> library-artists-y: 0px;
+    property <length> library-albums-y: 0px;
     in property <string> album-title;
     in property <string> album-artist;
     in property <image> album-cover;
@@ -205,6 +208,7 @@ export component Large inherits Rectangle {
     callback toggle-album-like();
     callback toggle-catalog();
     callback pick-hit(int);
+    callback download-hit(int);
     callback star-album(int);
     callback search-edited(string);
     callback pick-artist(int);
@@ -254,7 +258,13 @@ export component Large inherits Rectangle {
                     SearchField {
                         hint: root.catalog-open ? "Найти музыку в сети" : (root.home-page == "taste" ? "Найти исполнителя" : "Поиск по библиотеке");
                         text <=> root.search;
-                        edited(text) => { root.search-edited(text); }
+                        edited(text) => {
+                            if !root.catalog-open {
+                                root.library-artists-y = 0px;
+                                root.library-albums-y = 0px;
+                            }
+                            root.search-edited(text);
+                        }
                     }
                     EqButton { label: "В сети"; tip: "Переключить поиск в сети"; active: root.catalog-open; clicked => { root.toggle-catalog(); } }
                 }
@@ -296,7 +306,11 @@ export component Large inherits Rectangle {
                         if root.catalog-busy : EmptyNote { message: "Поиск в сети…"; }
                         if !root.catalog-busy && root.hits.length == 0 : EmptyNote { message: root.catalog-note; }
                         if !root.catalog-busy && root.hits.length > 0 : ScrollPort {
-                            for hit[index] in root.hits : CatalogRow { hit: hit; clicked => { root.pick-hit(index); } }
+                            for hit[index] in root.hits : CatalogRow {
+                                hit: hit;
+                                clicked => { root.pick-hit(index); }
+                                download => { root.download-hit(index); }
+                            }
                         }
                     }
                 }
@@ -381,7 +395,12 @@ export component Large inherits Rectangle {
                     Rectangle {
                         width: 136px;
                         ScrollPort {
-                            for artist[index] in root.artists : NavigationItem { label: artist.name; active: artist.current; clicked => { root.pick-artist(index); } }
+                            scroll-y <=> root.library-artists-y;
+                            for artist[index] in root.artists : NavigationItem {
+                                label: artist.name;
+                                active: artist.current;
+                                clicked => { root.library-albums-y = 0px; root.pick-artist(index); }
+                            }
                         }
                     }
                     album-area := Rectangle {
@@ -391,6 +410,7 @@ export component Large inherits Rectangle {
                         property <length> card-width: (self.width - 8px - (self.columns - 1) * 8px) / self.columns;
                         if root.albums.length == 0 : EmptyNote { message: "Нет альбомов"; }
                         ScrollPort {
+                            scroll-y <=> root.library-albums-y;
                             Rectangle {
                                 height: ceil(root.albums.length / album-area.columns) * (album-area.card-width + 70px);
                                 for album[index] in root.albums : AlbumCard {
@@ -452,7 +472,7 @@ export component Large inherits Rectangle {
                 VerticalLayout {
                     horizontal-stretch: 1;
                     spacing: 4px;
-                    SeekBar { inverted: true; bar-height: 32px; position: root.position; duration: root.duration; wave: root.wave; seek-enabled: root.seek-enabled; seek(ratio) => { root.seek(ratio); } }
+                    SeekBar { inverted: true; bar-height: 32px; position: root.position; duration: root.duration; wave: root.wave; wave-message: root.wave-message; seek-enabled: root.seek-enabled; seek(ratio) => { root.seek(ratio); } }
                     HorizontalLayout {
                         spacing: 8px;
                         Text { text: root.time-label; color: #1b1b1b; font-size: 11px; }

@@ -14,6 +14,7 @@ const CLIENT: &str = "desktop";
 pub struct Marks {
     pub songs: HashSet<String>,
     pub albums: HashSet<String>,
+    pub refs: HashSet<String>,
     pub disliked: HashSet<String>,
 }
 
@@ -22,6 +23,7 @@ impl Default for Marks {
         Self {
             songs: HashSet::new(),
             albums: HashSet::new(),
+            refs: HashSet::new(),
             disliked: HashSet::new(),
         }
     }
@@ -54,8 +56,7 @@ impl CatalogHit {
             HitKind::Album if self.downloading => "качается",
             HitKind::Album => "скачать",
             HitKind::Track if self.owned => "играть",
-            HitKind::Track if self.downloading => "качается",
-            HitKind::Track => "скачать",
+            HitKind::Track => "слушать",
         }
     }
 }
@@ -91,6 +92,23 @@ impl Hub {
     pub fn star_song(&self, id: &str, unstar: bool) -> Result<(), String> {
         self.send("POST", "/api/star", Some(star_body(&[id], &[], unstar)))?;
         Ok(())
+    }
+
+    pub fn star_reference(&self, reference: &str, unstar: bool) -> Result<String, String> {
+        if unstar {
+            self.send("POST", "/api/star", Some(serde_json::json!({
+                "refs": [reference],
+                "unstar": true,
+                "client": CLIENT,
+            })))?;
+            Ok("Лайк снят".into())
+        } else {
+            let body = self.send("POST", "/api/downloads", Some(serde_json::json!({
+                "track_refs": [reference],
+                "star": true,
+            })))?;
+            Ok(format!("Лайк сохранён. {}", download_summary(&body)))
+        }
     }
 
     pub fn star_album(&self, id: &str, unstar: bool) -> Result<(), String> {
@@ -226,12 +244,14 @@ impl Hub {
         Ok(parse_wave(&body))
     }
 
-    /// Stream URL for a catalog ref. The session cookie is not part of the URL.
-    pub fn listen_url(&self, reference: &str) -> String {
+    /// Stream URL for a catalog ref. Wave playback requires a full recording;
+    /// explicit listening may keep the Hub's preview fallback. No session in URLs.
+    pub fn listen_url(&self, reference: &str, full_only: bool) -> String {
         if self.base.is_empty() || reference.is_empty() {
             return String::new();
         }
-        format!("{}/api/listen/stream?ref={}", self.base, encode(reference))
+        let policy = if full_only { "&full=1" } else { "" };
+        format!("{}/api/listen/stream?ref={}{}", self.base, encode(reference), policy)
     }
 
     pub fn session_token(&self) -> String {
@@ -377,6 +397,7 @@ pub fn parse_starred(value: &Value) -> Marks {
     Marks {
         songs: ids("song_ids"),
         albums: ids("album_ids"),
+        refs: ids("refs"),
         disliked: HashSet::new(),
     }
 }
@@ -1084,6 +1105,32 @@ mod tests {
     }
 
     #[test]
+    fn wave_stream_requires_full_audio_without_changing_explicit_listening() {
+        let mut hub = Hub {
+            base: "http://hub.test".into(),
+            user: String::new(),
+            password: "private-password".into(),
+            cookie: Mutex::new("private-session".into()),
+            is_admin: AtomicBool::new(false),
+        };
+        assert_eq!(
+            hub.listen_url("dz:370418141", true),
+            "http://hub.test/api/listen/stream?ref=dz%3A370418141&full=1"
+        );
+        assert_eq!(
+            hub.listen_url("dz:370418141", false),
+            "http://hub.test/api/listen/stream?ref=dz%3A370418141"
+        );
+        assert_eq!(
+            hub.listen_url("file:hitmoz:a&full=0", true),
+            "http://hub.test/api/listen/stream?ref=file%3Ahitmoz%3Aa%26full%3D0&full=1"
+        );
+        assert!(hub.listen_url("", true).is_empty());
+        hub.base.clear();
+        assert!(hub.listen_url("dz:370418141", true).is_empty());
+    }
+
+    #[test]
     fn session_cookie_is_the_token_only() {
         assert_eq!(
             session_cookie("hm_session=abc.def; HttpOnly; Path=/; SameSite=lax"),
@@ -1101,6 +1148,7 @@ mod tests {
         }));
         assert_eq!(marks.songs, HashSet::from(["s1".into()]));
         assert_eq!(marks.albums, HashSet::from(["a1".into()]));
+        assert_eq!(marks.refs, HashSet::from(["dz:1".into()]));
         let disliked = parse_dislike_ids(&serde_json::json!([
             {"id": 1, "nd_song_id": "s1", "title": "V"},
             {"id": 2, "ref": "dz:9"}

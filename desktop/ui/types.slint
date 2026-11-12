@@ -18,10 +18,14 @@ export struct AlbumItem {
 }
 
 export struct CatalogHit {
+    section: string,
+    is-album: bool,
     title: string,
     artist: string,
     detail: string,
     action: string,
+    download-action: string,
+    can-download: bool,
 }
 
 export struct ArtistItem {
