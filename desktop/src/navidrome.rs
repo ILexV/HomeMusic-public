@@ -283,6 +283,25 @@ pub fn load_catalog(config: &ServerConfig) -> Result<Catalog, String> {
     Ok(Catalog { artists, albums })
 }
 
+/// Tracks of one saved playlist. The name is the playlist name.
+pub fn playlist_by_id(config: &ServerConfig, playlist_id: &str) -> Result<LibraryQueue, String> {
+    require_login(config)?;
+    if playlist_id.is_empty() {
+        return Err("Navidrome: плейлист не выбран".into());
+    }
+    let body = http_json(&view_url(
+        config,
+        "getPlaylist.view",
+        &format!("id={}", encode(playlist_id)),
+    ))?;
+    check_body(config, &body)?;
+    let (name, tracks) = playlist_tracks(&body);
+    if tracks.is_empty() {
+        return Err("Navidrome: в плейлисте нет треков".into());
+    }
+    Ok(LibraryQueue { name, tracks })
+}
+
 /// Tracks of one album, in the server's order. The name is the album name.
 pub fn album_tracks(config: &ServerConfig, album_id: &str) -> Result<LibraryQueue, String> {
     require_login(config)?;

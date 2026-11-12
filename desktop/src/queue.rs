@@ -4,6 +4,9 @@
 pub struct Item {
     pub id: String,
     pub path: String,
+    /// Catalog ref for a Hub stream. Empty for a library song or a local file.
+    /// The stream URL is built at play time and is not stored here.
+    pub listen_ref: String,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -16,6 +19,7 @@ impl Item {
         Self {
             id: String::new(),
             path: path.to_string(),
+            listen_ref: String::new(),
             title: title.to_string(),
             artist: String::new(),
             album: String::new(),
@@ -76,6 +80,10 @@ impl Queue {
     }
 
     /// Put a track after the current one and make it current. An idle queue starts with it.
+    pub fn extend(&mut self, items: impl IntoIterator<Item = Item>) {
+        self.items.extend(items);
+    }
+
     pub fn play_inserted(&mut self, item: Item) -> bool {
         let at = self.index.map(|index| index + 1).unwrap_or(0);
         self.items.insert(at, item);
@@ -160,6 +168,7 @@ mod tests {
         Item {
             id: id.into(),
             path: String::new(),
+            listen_ref: String::new(),
             title: title.into(),
             artist: String::new(),
             album: String::new(),

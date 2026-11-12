@@ -2,6 +2,7 @@
 
 mod commands;
 mod eq;
+mod home;
 mod hub;
 mod media_keys;
 mod navidrome;
@@ -12,6 +13,7 @@ mod wave;
 mod window_place;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -51,6 +53,23 @@ enum HubEvent {
         message: String,
         failed: bool,
     },
+    Home(hub::HomeFeed),
+    HomeError(String),
+    Mix(hub::MixSnapshot),
+    MixError(String),
+    WaveStarted {
+        batch: hub::WaveBatch,
+        personal: bool,
+        origin: String,
+    },
+    WaveMore(hub::WaveBatch),
+    WaveFailed {
+        message: String,
+        played: Vec<serde_json::Value>,
+    },
+    Lists(Vec<hub::PlaylistLine>),
+    Liked(hub::LikedPage),
+    Taste(Vec<hub::TasteArtist>),
 }
 
 struct HubState {
@@ -62,6 +81,23 @@ struct HubState {
     events: Arc<Mutex<Vec<HubEvent>>>,
     hub_note: RefCell<String>,
     search_generation: Rc<Cell<u64>>,
+    user_name: String,
+    pane: Cell<home::Pane>,
+    feed: RefCell<hub::HomeFeed>,
+    mix: RefCell<hub::MixSnapshot>,
+    rows: RefCell<Vec<home::Row>>,
+    row_signature: RefCell<String>,
+    home_error: RefCell<String>,
+    wave: RefCell<hub::WaveLive>,
+    wave_busy: Cell<bool>,
+    was_playing: Cell<bool>,
+    playlists: RefCell<Vec<hub::PlaylistLine>>,
+    liked_songs: RefCell<Vec<hub::Playable>>,
+    liked_albums: RefCell<Vec<hub::HomeAlbum>>,
+    taste: RefCell<Vec<hub::TasteArtist>>,
+    taste_picked: RefCell<HashSet<String>>,
+    mix_poll_at: Cell<Option<Instant>>,
+    mix_fetching: Cell<bool>,
 }
 
 impl HubState {
@@ -74,6 +110,14 @@ impl HubState {
             if let Ok(marks) = client.load_marks() {
                 push_event(&pending, HubEvent::Marks(marks));
             }
+            match client.home() {
+                Ok(feed) => push_event(&pending, HubEvent::Home(feed)),
+                Err(message) => push_event(&pending, HubEvent::HomeError(message)),
+            }
+            match client.mix_today() {
+                Ok(mix) => push_event(&pending, HubEvent::Mix(mix)),
+                Err(message) => push_event(&pending, HubEvent::MixError(message)),
+            }
         });
         Self {
             hub,
@@ -84,6 +128,23 @@ impl HubState {
             events,
             hub_note: RefCell::new(String::new()),
             search_generation: Rc::new(Cell::new(0)),
+            user_name: config.user.clone(),
+            pane: Cell::new(home::Pane::Home),
+            feed: RefCell::new(hub::HomeFeed::default()),
+            mix: RefCell::new(hub::MixSnapshot::default()),
+            rows: RefCell::new(Vec::new()),
+            row_signature: RefCell::new(String::new()),
+            home_error: RefCell::new(String::new()),
+            wave: RefCell::new(hub::WaveLive::default()),
+            wave_busy: Cell::new(false),
+            was_playing: Cell::new(false),
+            playlists: RefCell::new(Vec::new()),
+            liked_songs: RefCell::new(Vec::new()),
+            liked_albums: RefCell::new(Vec::new()),
+            taste: RefCell::new(Vec::new()),
+            taste_picked: RefCell::new(HashSet::new()),
+            mix_poll_at: Cell::new(Some(Instant::now())),
+            mix_fetching: Cell::new(true),
         }
     }
 }
@@ -121,6 +182,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_eq_on(player.borrow().eq().enabled);
     let waves = wave::WaveHub::shared();
     let config = Rc::new(navidrome::ServerConfig::load());
+    ui.set_home_title(home::greeting(home::local_hour(), &config.user).into());
     let hub_state = Rc::new(HubState::start(&config));
     let queue = Rc::new(RefCell::new(queue::Queue::from_tracks("", Vec::new())));
     let browser = Rc::new(RefCell::new(Browser::empty()));
@@ -176,6 +238,7 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     let config_status = Rc::new(library_status);
     show_status(&ui, &player.borrow(), &hub_state, &config_status);
+    refresh_home(&ui, &hub_state, player.borrow().snapshot().playing);
     push_playback(&ui, &player.borrow().snapshot());
     apply_session(&ui, session);
 
@@ -299,6 +362,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let waves_prev = waves.clone();
     let hub_prev = hub_state.clone();
     ui.on_prev(move || {
+        if let Some(item) = queue_prev.borrow().current().cloned() {
+            note_wave_leave(&player_prev.borrow(), &item, &hub_prev, false);
+        }
         let moved = queue_prev.borrow_mut().prev();
         let Some(ui) = ui_prev.upgrade() else {
             return;
@@ -323,6 +389,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let waves_next = waves.clone();
     let hub_next = hub_state.clone();
     ui.on_next(move || {
+        if let Some(item) = queue_next.borrow().current().cloned() {
+            note_wave_leave(&player_next.borrow(), &item, &hub_next, false);
+        }
         let moved = queue_next.borrow_mut().next();
         let Some(ui) = ui_next.upgrade() else {
             return;
@@ -350,7 +419,14 @@ fn main() -> Result<(), slint::PlatformError> {
         if index < 0 {
             return;
         }
-        let moved = queue_row.borrow_mut().select(index as usize);
+        let index = index as usize;
+        let same = queue_row.borrow().index() == Some(index);
+        if !same {
+            if let Some(item) = queue_row.borrow().current().cloned() {
+                note_wave_leave(&player_row.borrow(), &item, &hub_row, false);
+            }
+        }
+        let moved = queue_row.borrow_mut().select(index);
         let Some(ui) = ui_row.upgrade() else {
             return;
         };
@@ -440,6 +516,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 if hub_later.catalog_open.get() {
                     begin_catalog_query(&ui, &hub_later, ticket, &text_later);
                 } else {
+                    hub_later.pane.set(home::Pane::Library);
+                    ui.set_home_open(false);
                     apply_search(
                         &ui,
                         &browser_later,
@@ -517,7 +595,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 if hub_album.catalog_open.get() {
                     clear_catalog(&ui, &hub_album);
                 }
-                *hub_album.album_id.borrow_mut() = album.id;
+                *hub_album.album_id.borrow_mut() = album.id.clone();
+                clear_wave(&hub_album);
                 *queue_album.borrow_mut() = library_to_queue(library);
                 let moved = queue_album.borrow_mut().select(0);
                 jump(
@@ -536,6 +615,61 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_status(err.into());
             }
         }
+    });
+
+    let ui_home = ui.as_weak();
+    let hub_home = hub_state.clone();
+    let player_home = player.clone();
+    ui.on_show_home(move || {
+        let Some(ui) = ui_home.upgrade() else {
+            return;
+        };
+        hub_home.pane.set(home::Pane::Home);
+        hub_home.catalog_open.set(false);
+        ui.set_catalog_open(false);
+        ui.set_search(String::new().into());
+        refresh_home(&ui, &hub_home, player_home.borrow().snapshot().playing);
+        spawn_home(&hub_home);
+    });
+
+    let ui_library = ui.as_weak();
+    let hub_library = hub_state.clone();
+    ui.on_show_library(move || {
+        let Some(ui) = ui_library.upgrade() else {
+            return;
+        };
+        show_library_pane(&ui, &hub_library);
+    });
+
+    let ui_pick = ui.as_weak();
+    let hub_pick = hub_state.clone();
+    let player_pick = player.clone();
+    let queue_pick = queue.clone();
+    let config_pick = config.clone();
+    let status_pick = config_status.clone();
+    let waves_pick = waves.clone();
+    let browser_pick = browser.clone();
+    ui.on_pick_home(move |index| {
+        if index < 0 {
+            return;
+        }
+        let Some(row) = hub_pick.rows.borrow().get(index as usize).cloned() else {
+            return;
+        };
+        let Some(ui) = ui_pick.upgrade() else {
+            return;
+        };
+        pick_home_row(
+            &ui,
+            &hub_pick,
+            &player_pick,
+            &queue_pick,
+            &config_pick,
+            &status_pick,
+            &waves_pick,
+            &browser_pick,
+            &row,
+        );
     });
 
     let ui_like = ui.as_weak();
@@ -578,6 +712,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
         paint_track_marks(&ui, &queue_like.borrow(), &hub_like);
+        note_wave_mark(&item, &hub_like, if was { "unlike" } else { "like" });
         let id = item.id;
         let client = Arc::clone(&hub_like.hub);
         let events = Arc::clone(&hub_like.events);
@@ -636,6 +771,7 @@ fn main() -> Result<(), slint::PlatformError> {
         if was {
             paint_track_marks(&ui, &queue_dislike.borrow(), &hub_dislike);
         } else {
+            note_wave_leave(&player_dislike.borrow(), &item, &hub_dislike, false);
             let moved = queue_dislike.borrow_mut().next();
             if moved {
                 jump(
@@ -864,6 +1000,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let item = queue::Item {
                     id: hit.nd_song_id,
                     path: String::new(),
+                    listen_ref: String::new(),
                     title: hit.title,
                     artist: hit.artist,
                     album: hit.album,
@@ -1037,8 +1174,20 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let moved = {
                 let mut player = player_tick.borrow_mut();
-                let mut queue = queue_tick.borrow_mut();
-                take_queue_step(&mut player, &mut queue)
+                let ended = player.take_natural_end();
+                let left = if ended {
+                    queue_tick.borrow().current().cloned()
+                } else {
+                    None
+                };
+                if let Some(item) = left.as_ref() {
+                    note_wave_leave(&player, item, &hub_tick, true);
+                }
+                let moved = ended && queue_tick.borrow_mut().next();
+                if ended {
+                    maybe_extend_wave(&hub_tick, &queue_tick.borrow());
+                }
+                moved
             };
             if moved {
                 if let Some(ui) = ui_tick.upgrade() {
@@ -1053,13 +1202,28 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
             if let Some(ui) = ui_tick.upgrade() {
-                apply_hub_events(&ui, &hub_tick, &browser_tick, &queue_tick);
+                apply_hub_events(
+                    &ui,
+                    &hub_tick,
+                    &browser_tick,
+                    &queue_tick,
+                    &player_tick,
+                    &config_tick,
+                    &waves_tick,
+                    &status_tick,
+                );
+                poll_mix(&hub_tick);
                 if let Some(peaks) = waves_tick.poll() {
                     show_wave(&ui, &peaks);
                 }
                 let player = player_tick.borrow();
                 push_playback(&ui, &player.snapshot());
                 show_status(&ui, &player, &hub_tick, &status_tick);
+                let playing = player.snapshot().playing;
+                if playing != hub_tick.was_playing.get() {
+                    hub_tick.was_playing.set(playing);
+                    refresh_home(&ui, &hub_tick, playing);
+                }
                 publish_media(
                     &mut media_tick.borrow_mut(),
                     &ui,
@@ -1357,11 +1521,17 @@ fn dispatch(
         }
         Command::Stop => player.borrow_mut().stop(),
         Command::Next => {
+            if let Some(item) = queue.borrow().current().cloned() {
+                note_wave_leave(&player.borrow(), &item, hub, false);
+            }
             let moved = queue.borrow_mut().next();
             jump(ui, player, queue, config, status, waves, hub, moved);
             return;
         }
         Command::Previous => {
+            if let Some(item) = queue.borrow().current().cloned() {
+                note_wave_leave(&player.borrow(), &item, hub, false);
+            }
             let moved = queue.borrow_mut().prev();
             jump(ui, player, queue, config, status, waves, hub, moved);
             return;
@@ -1636,6 +1806,10 @@ fn apply_hub_events(
     hub: &HubState,
     browser: &RefCell<Browser>,
     queue: &RefCell<queue::Queue>,
+    player: &RefCell<Player>,
+    config: &navidrome::ServerConfig,
+    waves: &std::sync::Arc<wave::WaveHub>,
+    status: &str,
 ) {
     let events = take_events(&hub.events);
     if events.is_empty() {
@@ -1693,6 +1867,88 @@ fn apply_hub_events(
                 }
                 refresh_marks = true;
             }
+            HubEvent::Home(feed) => {
+                *hub.feed.borrow_mut() = feed;
+                hub.home_error.borrow_mut().clear();
+            }
+            HubEvent::HomeError(message) => {
+                *hub.home_error.borrow_mut() = message;
+            }
+            HubEvent::Mix(mix) => {
+                hub.mix_fetching.set(false);
+                *hub.mix.borrow_mut() = mix;
+            }
+            HubEvent::MixError(message) => {
+                hub.mix_fetching.set(false);
+                *hub.hub_note.borrow_mut() = message;
+            }
+            HubEvent::WaveStarted {
+                batch,
+                personal,
+                origin,
+            } => {
+                hub.wave_busy.set(false);
+                if batch.tracks.is_empty() || batch.session_id.is_empty() {
+                    *hub.hub_note.borrow_mut() = "Волна пока пустая: попробуйте чуть позже".into();
+                } else {
+                    *hub.wave.borrow_mut() = hub::WaveLive {
+                        id: batch.session_id.clone(),
+                        personal,
+                        origin,
+                        pending: Vec::new(),
+                        asking: false,
+                    };
+                    *hub.album_id.borrow_mut() = String::new();
+                    let name = if batch.title.is_empty() {
+                        "Моя волна".into()
+                    } else {
+                        batch.title.clone()
+                    };
+                    *queue.borrow_mut() = queue_from_playables(&name, &batch.tracks);
+                    let moved = queue.borrow_mut().select(0);
+                    jump(ui, player, queue, config, status, waves, hub, moved);
+                }
+            }
+            HubEvent::WaveMore(batch) => {
+                hub.wave.borrow_mut().asking = false;
+                let at_end = {
+                    let queue = queue.borrow();
+                    queue.index().map(|index| index + 1 >= queue.items().len()).unwrap_or(false)
+                };
+                let idle = player.borrow().is_idle();
+                append_playables(queue, &batch.tracks);
+                if idle && at_end {
+                    let moved = queue.borrow_mut().next();
+                    jump(ui, player, queue, config, status, waves, hub, moved);
+                } else {
+                    show_queue(ui, &queue.borrow(), hub);
+                }
+            }
+            HubEvent::WaveFailed { message, played } => {
+                hub.wave_busy.set(false);
+                hub.wave.borrow_mut().asking = false;
+                hub.wave.borrow_mut().pending.extend(played);
+                *hub.hub_note.borrow_mut() = message;
+            }
+            HubEvent::Lists(lists) => {
+                *hub.playlists.borrow_mut() = lists;
+                hub.pane.set(home::Pane::Playlists);
+                hub.catalog_open.set(false);
+                ui.set_catalog_open(false);
+            }
+            HubEvent::Liked(page) => {
+                *hub.liked_songs.borrow_mut() = page.songs;
+                *hub.liked_albums.borrow_mut() = page.albums;
+                hub.pane.set(home::Pane::Liked);
+                hub.catalog_open.set(false);
+                ui.set_catalog_open(false);
+            }
+            HubEvent::Taste(artists) => {
+                *hub.taste.borrow_mut() = artists;
+                hub.pane.set(home::Pane::Taste);
+                hub.catalog_open.set(false);
+                ui.set_catalog_open(false);
+            }
             HubEvent::Download {
                 reference,
                 message,
@@ -1721,6 +1977,525 @@ fn apply_hub_events(
     if refresh_hits && hub.catalog_open.get() {
         show_hits(ui, &hub.hits.borrow());
     }
+    refresh_home(ui, hub, player.borrow().snapshot().playing);
+}
+
+fn clear_wave(hub: &HubState) {
+    *hub.wave.borrow_mut() = hub::WaveLive::default();
+    hub.wave_busy.set(false);
+}
+
+fn note_wave_leave(player: &Player, item: &queue::Item, hub: &HubState, natural_end: bool) {
+    let (session, origin) = {
+        let wave = hub.wave.borrow();
+        if !wave.on() {
+            return;
+        }
+        (wave.id.clone(), wave.origin.clone())
+    };
+    let snap = player.snapshot();
+    let finish = natural_end || (snap.duration_s > 0.5 && snap.position_s / snap.duration_s >= 0.9);
+    let kind = if finish { "finish" } else { "skip" };
+    if let Some(event) = hub::wave_event(
+        kind,
+        &item.id,
+        &item.listen_ref,
+        snap.position_s,
+        snap.duration_s,
+        &session,
+        &origin,
+    ) {
+        hub.wave.borrow_mut().pending.push(event);
+    }
+}
+
+fn note_wave_mark(item: &queue::Item, hub: &HubState, kind: &str) {
+    let (session, origin) = {
+        let wave = hub.wave.borrow();
+        if !wave.on() {
+            return;
+        }
+        (wave.id.clone(), wave.origin.clone())
+    };
+    if let Some(event) = hub::wave_event(kind, &item.id, &item.listen_ref, 0.0, 0.0, &session, &origin)
+    {
+        hub.wave.borrow_mut().pending.push(event);
+    }
+}
+
+fn maybe_extend_wave(hub: &HubState, queue: &queue::Queue) {
+    let index = queue.index().unwrap_or(0);
+    let left = queue.items().len().saturating_sub(index + 1);
+    if left > 1 {
+        return;
+    }
+    let queued: Vec<String> = queue.items()[index + 1..]
+        .iter()
+        .filter(|item| !item.listen_ref.is_empty())
+        .map(|item| item.listen_ref.clone())
+        .collect();
+    let (id, played) = {
+        let mut wave = hub.wave.borrow_mut();
+        if !wave.on() || wave.asking {
+            return;
+        }
+        wave.asking = true;
+        (wave.id.clone(), std::mem::take(&mut wave.pending))
+    };
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || match client.wave_next(&id, &played, &queued) {
+        Ok(batch) => push_event(&events, HubEvent::WaveMore(batch)),
+        Err(message) => push_event(
+            &events,
+            HubEvent::WaveFailed {
+                message,
+                played,
+            },
+        ),
+    });
+}
+
+fn spawn_home(hub: &HubState) {
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || {
+        match client.home() {
+            Ok(feed) => push_event(&events, HubEvent::Home(feed)),
+            Err(message) => push_event(&events, HubEvent::HomeError(message)),
+        }
+        match client.mix_today() {
+            Ok(mix) => push_event(&events, HubEvent::Mix(mix)),
+            Err(message) => push_event(&events, HubEvent::MixError(message)),
+        }
+    });
+}
+
+fn poll_mix(hub: &HubState) {
+    if !hub.mix.borrow().poll || hub.mix_fetching.get() {
+        return;
+    }
+    let due = hub
+        .mix_poll_at
+        .get()
+        .map(|at| at.elapsed() >= Duration::from_secs(8))
+        .unwrap_or(true);
+    if !due {
+        return;
+    }
+    hub.mix_fetching.set(true);
+    hub.mix_poll_at.set(Some(Instant::now()));
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || match client.mix_today() {
+        Ok(mix) => push_event(&events, HubEvent::Mix(mix)),
+        Err(message) => push_event(&events, HubEvent::MixError(message)),
+    });
+}
+
+fn spawn_fetch(hub: &HubState, job: impl FnOnce(&hub::Hub) -> HubEvent + Send + 'static) {
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || {
+        push_event(&events, job(&client));
+    });
+}
+
+fn show_library_pane(ui: &AppWindow, hub: &HubState) {
+    hub.pane.set(home::Pane::Library);
+    hub.catalog_open.set(false);
+    ui.set_catalog_open(false);
+    ui.set_home_open(false);
+}
+
+fn refresh_home(ui: &AppWindow, hub: &HubState, playing: bool) {
+    if hub.pane.get() == home::Pane::Library {
+        ui.set_home_open(false);
+        return;
+    }
+    ui.set_home_open(true);
+    ui.set_home_title(home::greeting(home::local_hour(), &hub.user_name).into());
+    let personal = {
+        let wave = hub.wave.borrow();
+        wave.personal && wave.on()
+    };
+    let caption = home::wave_caption(hub.wave_busy.get(), personal, playing);
+    let mut rows = match hub.pane.get() {
+        home::Pane::Library => return,
+        home::Pane::Home => home::home_rows(&caption, &hub.mix.borrow(), &hub.feed.borrow()),
+        home::Pane::Playlists => home::playlist_rows(&hub.playlists.borrow()),
+        home::Pane::Liked => home::liked_rows(&hub.liked_songs.borrow(), &hub.liked_albums.borrow()),
+        home::Pane::Mix => home::mix_rows(&hub.mix.borrow()),
+        home::Pane::Taste => home::taste_rows(&hub.taste.borrow(), &hub.taste_picked.borrow()),
+    };
+    let error = hub.home_error.borrow().clone();
+    if hub.pane.get() == home::Pane::Home && !error.is_empty() {
+        rows.insert(
+            0,
+            home::Row {
+                kind: "note",
+                title: error,
+                detail: String::new(),
+                key: String::new(),
+                accent: false,
+            },
+        );
+    }
+    let signature = rows
+        .iter()
+        .map(|row| format!("{}|{}|{}|{}|{}", row.kind, row.key, row.title, row.detail, row.accent))
+        .collect::<Vec<_>>()
+        .join("\n");
+    *hub.rows.borrow_mut() = rows.clone();
+    if hub.row_signature.borrow().as_str() == signature {
+        return;
+    }
+    *hub.row_signature.borrow_mut() = signature;
+    let model = rows
+        .into_iter()
+        .map(|row| HomeRow {
+            kind: row.kind.into(),
+            title: row.title.into(),
+            detail: row.detail.into(),
+            accent: row.accent,
+        })
+        .collect::<Vec<_>>();
+    ui.set_home_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(model))));
+}
+
+fn pick_home_row(
+    ui: &AppWindow,
+    hub: &HubState,
+    player: &RefCell<Player>,
+    queue: &RefCell<queue::Queue>,
+    config: &navidrome::ServerConfig,
+    status: &str,
+    waves: &std::sync::Arc<wave::WaveHub>,
+    browser: &Rc<RefCell<Browser>>,
+    row: &home::Row,
+) {
+    let playing = player.borrow().snapshot().playing;
+    match row.kind {
+        "section" | "note" => {}
+        "wave" => {
+            let personal = {
+                let wave = hub.wave.borrow();
+                wave.personal && wave.on()
+            };
+            if personal {
+                if player.borrow().is_idle() {
+                    let _ = play_current(ui, player, queue, config, waves, hub);
+                } else {
+                    player.borrow_mut().toggle();
+                }
+                let player = player.borrow();
+                push_playback(ui, &player.snapshot());
+                show_status(ui, &player, hub, status);
+            } else if !hub.wave_busy.get() {
+                begin_wave(hub, String::new(), "home_card");
+            }
+        }
+        "mix" => match hub.mix.borrow().phase {
+            hub::MixPhase::Ready => hub.pane.set(home::Pane::Mix),
+            hub::MixPhase::Onboarding => {
+                spawn_fetch(hub, |client| match client.taste() {
+                    Ok(artists) => HubEvent::Taste(artists),
+                    Err(message) => HubEvent::HomeError(message),
+                });
+            }
+            _ => {}
+        },
+        "shortcut" => match row.key.as_str() {
+            "liked" => spawn_fetch(hub, |client| match client.liked() {
+                Ok(page) => HubEvent::Liked(page),
+                Err(message) => HubEvent::HomeError(message),
+            }),
+            "playlists" => spawn_fetch(hub, |client| match client.playlists() {
+                Ok(lists) => HubEvent::Lists(lists),
+                Err(message) => HubEvent::HomeError(message),
+            }),
+            "artists" | "albums" => {
+                browser.borrow_mut().artist_id.clear();
+                let marks = hub.marks.borrow().clone();
+                show_browser(ui, &mut browser.borrow_mut(), &marks);
+                show_library_pane(ui, hub);
+            }
+            _ => {}
+        },
+        "album" => open_saved_album(ui, hub, player, queue, config, status, waves, &row.key),
+        "radio" => {
+            if !hub.wave_busy.get() {
+                begin_wave(hub, row.key.clone(), "radio");
+            }
+        }
+        "playlist" => open_saved_playlist(ui, hub, player, queue, config, status, waves, &row.key),
+        "track" => {
+            let index = row.key.parse::<usize>().unwrap_or(usize::MAX);
+            let songs = if hub.pane.get() == home::Pane::Mix {
+                hub.mix.borrow().tracks.clone()
+            } else {
+                hub.liked_songs.borrow().clone()
+            };
+            play_songs(ui, hub, player, queue, config, status, waves, "Список", &songs, index);
+        }
+        "mode" => set_mix_mode(hub, &row.key),
+        "taste" => toggle_taste(hub, &row.key),
+        "action" => match row.key.as_str() {
+            "back" => {
+                hub.pane.set(home::Pane::Home);
+                spawn_home(hub);
+            }
+            "play" => {
+                let (name, songs) = if hub.pane.get() == home::Pane::Mix {
+                    let mix = hub.mix.borrow();
+                    (mix.title.clone(), mix.tracks.clone())
+                } else {
+                    ("Понравившиеся".into(), hub.liked_songs.borrow().clone())
+                };
+                play_songs(ui, hub, player, queue, config, status, waves, &name, &songs, 0);
+            }
+            "rebuild" => rebuild_mix(hub),
+            "save" => save_taste(hub),
+            _ => {}
+        },
+        _ => {}
+    }
+    refresh_home(ui, hub, player.borrow().snapshot().playing || playing);
+}
+
+fn begin_wave(hub: &HubState, artist_id: String, origin: &'static str) {
+    hub.wave_busy.set(true);
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    let personal = origin == "home_card";
+    std::thread::spawn(move || {
+        for attempt in 0..3 {
+            match client.wave_start(&artist_id, origin) {
+                Ok(batch) if !batch.tracks.is_empty() || !batch.pending || attempt == 2 => {
+                    push_event(
+                        &events,
+                        HubEvent::WaveStarted {
+                            batch,
+                            personal,
+                            origin: origin.to_string(),
+                        },
+                    );
+                    return;
+                }
+                Ok(_) => std::thread::sleep(Duration::from_secs(2)),
+                Err(message) => {
+                    push_event(
+                        &events,
+                        HubEvent::WaveFailed {
+                            message,
+                            played: Vec::new(),
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn set_mix_mode(hub: &HubState, mode: &str) {
+    if hub.mix.borrow().mode == mode {
+        return;
+    }
+    let mode = mode.to_string();
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || match client.set_mix_mode(&mode) {
+        Ok(()) => {
+            push_event(
+                &events,
+                HubEvent::Note("Режим сменится в следующем миксе".into()),
+            );
+            if let Ok(mix) = client.mix_today() {
+                push_event(&events, HubEvent::Mix(mix));
+            }
+        }
+        Err(message) => push_event(&events, HubEvent::Note(message)),
+    });
+}
+
+fn rebuild_mix(hub: &HubState) {
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || match client.rebuild_mix() {
+        Ok(()) => {
+            push_event(&events, HubEvent::Note("Собираем новый микс".into()));
+            if let Ok(mut mix) = client.mix_today() {
+                mix.poll = true;
+                push_event(&events, HubEvent::Mix(mix));
+            }
+        }
+        Err(message) => push_event(&events, HubEvent::Note(message)),
+    });
+}
+
+fn toggle_taste(hub: &HubState, reference: &str) {
+    let mut picked = hub.taste_picked.borrow_mut();
+    if picked.contains(reference) {
+        picked.remove(reference);
+        return;
+    }
+    if picked.len() >= 5 {
+        *hub.hub_note.borrow_mut() = "Не больше 5 исполнителей".into();
+        return;
+    }
+    picked.insert(reference.to_string());
+}
+
+fn save_taste(hub: &HubState) {
+    let refs: Vec<String> = hub.taste_picked.borrow().iter().cloned().collect();
+    if !(3..=5).contains(&refs.len()) {
+        *hub.hub_note.borrow_mut() = "Выберите 3–5 исполнителей".into();
+        return;
+    }
+    let client = Arc::clone(&hub.hub);
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || match client.pick_taste(&refs) {
+        Ok(()) => {
+            push_event(&events, HubEvent::Note("Собираем «Микс дня»".into()));
+            match client.mix_today() {
+                Ok(mix) => push_event(&events, HubEvent::Mix(mix)),
+                Err(message) => push_event(&events, HubEvent::MixError(message)),
+            }
+            match client.home() {
+                Ok(feed) => push_event(&events, HubEvent::Home(feed)),
+                Err(message) => push_event(&events, HubEvent::HomeError(message)),
+            }
+        }
+        Err(message) => push_event(&events, HubEvent::Note(message)),
+    });
+    hub.pane.set(home::Pane::Home);
+}
+
+fn open_saved_album(
+    ui: &AppWindow,
+    hub: &HubState,
+    player: &RefCell<Player>,
+    queue: &RefCell<queue::Queue>,
+    config: &navidrome::ServerConfig,
+    status: &str,
+    waves: &std::sync::Arc<wave::WaveHub>,
+    album_id: &str,
+) {
+    match navidrome::album_tracks(config, album_id) {
+        Ok(library) => {
+            *hub.album_id.borrow_mut() = album_id.to_string();
+            clear_wave(hub);
+            *queue.borrow_mut() = library_to_queue(library);
+            let moved = queue.borrow_mut().select(0);
+            jump(ui, player, queue, config, status, waves, hub, moved);
+        }
+        Err(err) => {
+            ui.set_error(err.clone().into());
+            ui.set_status(err.into());
+        }
+    }
+}
+
+fn open_saved_playlist(
+    ui: &AppWindow,
+    hub: &HubState,
+    player: &RefCell<Player>,
+    queue: &RefCell<queue::Queue>,
+    config: &navidrome::ServerConfig,
+    status: &str,
+    waves: &std::sync::Arc<wave::WaveHub>,
+    playlist_id: &str,
+) {
+    match navidrome::playlist_by_id(config, playlist_id) {
+        Ok(library) => {
+            *hub.album_id.borrow_mut() = String::new();
+            clear_wave(hub);
+            *queue.borrow_mut() = library_to_queue(library);
+            let moved = queue.borrow_mut().select(0);
+            jump(ui, player, queue, config, status, waves, hub, moved);
+        }
+        Err(err) => {
+            ui.set_error(err.clone().into());
+            ui.set_status(err.into());
+        }
+    }
+}
+
+fn play_songs(
+    ui: &AppWindow,
+    hub: &HubState,
+    player: &RefCell<Player>,
+    queue: &RefCell<queue::Queue>,
+    config: &navidrome::ServerConfig,
+    status: &str,
+    waves: &std::sync::Arc<wave::WaveHub>,
+    name: &str,
+    songs: &[hub::Playable],
+    index: usize,
+) {
+    let queue_next = queue_from_playables(name, songs);
+    if queue_next.is_empty() {
+        remember_note(ui, &player.borrow(), hub, status, "Нет треков");
+        return;
+    }
+    let index = index.min(queue_next.items().len().saturating_sub(1));
+    *hub.album_id.borrow_mut() = String::new();
+    clear_wave(hub);
+    *queue.borrow_mut() = queue_next;
+    let moved = queue.borrow_mut().select(index);
+    jump(ui, player, queue, config, status, waves, hub, moved);
+}
+
+fn queue_from_playables(name: &str, songs: &[hub::Playable]) -> queue::Queue {
+    let items = songs
+        .iter()
+        .filter(|song| song.can_play())
+        .map(|song| queue::Item {
+            id: song.nd_song_id.clone(),
+            path: String::new(),
+            listen_ref: song.reference.clone(),
+            title: song.title.clone(),
+            artist: song.artist.clone(),
+            album: song.album.clone(),
+            meta: String::new(),
+            duration_s: song.duration_s,
+        })
+        .collect();
+    queue::Queue::from_tracks(name, items)
+}
+
+fn append_playables(queue: &RefCell<queue::Queue>, songs: &[hub::Playable]) {
+    let mut queue = queue.borrow_mut();
+    let have: HashSet<String> = queue
+        .items()
+        .iter()
+        .map(|item| {
+            if item.listen_ref.is_empty() {
+                item.id.clone()
+            } else {
+                item.listen_ref.clone()
+            }
+        })
+        .collect();
+    let items = songs.iter().filter(|song| song.can_play()).filter(|song| {
+        let key = if song.reference.is_empty() {
+            song.nd_song_id.as_str()
+        } else {
+            song.reference.as_str()
+        };
+        !have.contains(key)
+    });
+    queue.extend(items.map(|song| queue::Item {
+        id: song.nd_song_id.clone(),
+        path: String::new(),
+        listen_ref: song.reference.clone(),
+        title: song.title.clone(),
+        artist: song.artist.clone(),
+        album: song.album.clone(),
+        meta: String::new(),
+        duration_s: song.duration_s,
+    }));
 }
 
 fn album_line(album: &navidrome::Album) -> String {
@@ -1837,6 +2612,7 @@ fn library_to_queue(library: navidrome::LibraryQueue) -> queue::Queue {
         .map(|track| queue::Item {
             id: track.id,
             path: String::new(),
+            listen_ref: String::new(),
             title: track.title,
             artist: track.artist,
             album: track.album,
@@ -1855,24 +2631,35 @@ fn play_current(
     waves: &std::sync::Arc<wave::WaveHub>,
     hub: &HubState,
 ) -> Result<(), String> {
-    let (target, cover_id) = {
+    let (target, cookie, cover_id) = {
         let queue = queue.borrow();
         let cover_id = queue
             .current()
             .map(|item| item.id.clone())
             .unwrap_or_default();
-        (current_target(&queue, config), cover_id)
+        let play = current_target(&queue, config, hub);
+        (
+            play.as_ref().map(|(url, _)| url.clone()),
+            play.map(|(_, cookie)| cookie).unwrap_or_default(),
+            cover_id,
+        )
     };
     {
         let queue = queue.borrow();
         show_queue(ui, &queue, hub);
     }
     ui.set_wave(empty_wave());
-    waves.load(target.clone());
+    // A Hub stream needs the session cookie. The waveform reader has no cookie, so it stays flat.
+    waves.load(if cookie.is_empty() {
+        target.clone()
+    } else {
+        None
+    });
     let loaded = match target {
-        Some(target) => player.borrow_mut().load(&target),
+        Some(target) => player.borrow_mut().load_cookie(&target, &cookie),
         None => Err("Нет трека".into()),
     };
+    maybe_extend_wave(hub, &queue.borrow());
     // The previous cover must not stay on the next track when this one has none.
     show_cover(ui, config, &cover_id);
     match loaded {
@@ -1887,12 +2674,24 @@ fn play_current(
     }
 }
 
-fn current_target(queue: &queue::Queue, config: &navidrome::ServerConfig) -> Option<String> {
+/// URL plus a Hub session cookie. The cookie is empty for a library song or a local file.
+fn current_target(
+    queue: &queue::Queue,
+    config: &navidrome::ServerConfig,
+    hub: &HubState,
+) -> Option<(String, String)> {
     let item = queue.current()?;
     if !item.id.is_empty() {
-        Some(navidrome::stream_url(config, &item.id))
+        Some((navidrome::stream_url(config, &item.id), String::new()))
+    } else if !item.listen_ref.is_empty() {
+        let url = hub.hub.listen_url(&item.listen_ref);
+        let cookie = hub.hub.session_token();
+        if url.is_empty() || cookie.is_empty() {
+            return None;
+        }
+        Some((url, cookie))
     } else if !item.path.is_empty() {
-        Some(item.path.clone())
+        Some((item.path.clone(), String::new()))
     } else {
         None
     }
@@ -2120,6 +2919,7 @@ mod tests {
                 queue::Item {
                     id: "a".into(),
                     path: String::new(),
+                    listen_ref: String::new(),
                     title: "Visions".into(),
                     artist: "Damned Anthem".into(),
                     album: "Visions".into(),
@@ -2129,6 +2929,7 @@ mod tests {
                 queue::Item {
                     id: "b".into(),
                     path: String::new(),
+                    listen_ref: String::new(),
                     title: "За речкою".into(),
                     artist: "FOLKBEAT".into(),
                     album: "За речкою".into(),

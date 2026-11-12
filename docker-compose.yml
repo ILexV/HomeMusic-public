@@ -106,6 +106,7 @@ services:
       - "8090"
     environment:
       EMBEDDER_TOKEN: ${EMBEDDER_TOKEN:-}
+      EMBEDDER_DEVICE: cpu
       DATA_DIR: /data
       MODELS_DIR: /models
       HF_HOME: /models/hf
@@ -116,18 +117,10 @@ services:
       # weights (~3 GB) are downloaded on the first job and kept here, not in the image
       - embedder-models:/models
       - ${MUSIC_ROOT}/library:/music:ro
-    # loading the model onto the GPU peaks at ~3.4 GB (with the checkpoint's page cache), working ~2.5 GB; a runaway
-    # is killed here, not the whole WSL VM and Docker Desktop with it (Windows' page file is small). No swap.
-    # EMBEDDER_DEVICE=cpu needs ~7 GB: raise both limits first.
-    mem_limit: 4g
-    memswap_limit: 4g
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # This host has no GPU. On CPU the model needs ~7 GB; the cap leaves the rest of the 12 GB guest for the Hub.
+    # A runaway is killed here. No swap inside the limit (memswap equals mem).
+    mem_limit: 8g
+    memswap_limit: 8g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5).status == 200 else 1)"]
       interval: 30s

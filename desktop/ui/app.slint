@@ -3,7 +3,7 @@ import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
 import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
 
-import { AlbumItem, ArtistItem, CatalogHit, QueueItem } from "types.slint";
+import { AlbumItem, ArtistItem, CatalogHit, HomeRow, QueueItem } from "types.slint";
 
 export enum Mode { mini, medium, large }
 
@@ -51,6 +51,9 @@ export component AppWindow inherits Window {
     in-out property <bool> catalog-open;
     in-out property <string> catalog-note: "Поиск в сети";
     in-out property <[CatalogHit]> hits;
+    in-out property <bool> home-open: true;
+    in-out property <string> home-title;
+    in-out property <[HomeRow]> home-rows;
 
     callback play-pause();
     callback stop();
@@ -74,6 +77,9 @@ export component AppWindow inherits Window {
     callback toggle-catalog();
     callback pick-hit(int);
     callback star-album(int);
+    callback show-home();
+    callback show-library();
+    callback pick-home(int);
     callback minimize();
     callback close-window();
     // text, control, alt, shift, meta. True when the player handled the key.
@@ -262,6 +268,12 @@ export component AppWindow inherits Window {
                         toggle-catalog => { root.toggle-catalog(); }
                         pick-hit(index) => { root.pick-hit(index); }
                         star-album(index) => { root.star-album(index); }
+                        home-open: root.home-open;
+                        home-title: root.home-title;
+                        home-rows: root.home-rows;
+                        show-home => { root.show-home(); }
+                        show-library => { root.show-library(); }
+                        pick-home(index) => { root.pick-home(index); }
                     }
                 }
 

@@ -81,6 +81,12 @@ impl Player {
     }
 
     pub fn load(&mut self, target: &str) -> Result<(), String> {
+        self.load_cookie(target, "")
+    }
+
+    /// `cookie` is the Hub session for `/api/listen/stream`. It is sent as a header
+    /// and never written into the URL or into an error.
+    pub fn load_cookie(&mut self, target: &str, cookie: &str) -> Result<(), String> {
         if self.mpv.is_none() {
             let err = self
                 .notice
@@ -92,13 +98,19 @@ impl Player {
         // Drop the previous file's end event before the new file starts.
         self.discard_events();
         self.user_stopped = false;
+        let hub_stream = !cookie.is_empty() || target.contains("/api/listen/");
         let loaded = {
             let mpv = self.mpv.as_ref().unwrap();
             let _ = mpv.set_property("pause", false);
+            apply_cookie(mpv, cookie);
             mpv.command("loadfile", &[target, "replace"])
         };
-        if let Err(err) = loaded {
-            let text = format!("Не удалось открыть файл ({err})");
+        if let Err(_err) = loaded {
+            let text = if hub_stream {
+                "Не удалось открыть файл".to_string()
+            } else {
+                format!("Не удалось открыть файл ({_err})")
+            };
             self.notice = Some(text.clone());
             return Err(text);
         }
@@ -329,6 +341,26 @@ fn open_error(err: &libmpv2::Error) -> String {
     }
 }
 
+/// Header value for one Hub session. `None` clears the header.
+/// A cookie with a quote or a line break is refused so it cannot break the command.
+pub fn cookie_header(cookie: &str) -> Option<String> {
+    if cookie.is_empty() {
+        return None;
+    }
+    if cookie.bytes().any(|byte| matches!(byte, b'"' | b'\n' | b'\r')) {
+        return None;
+    }
+    Some(format!("Cookie: hm_session={cookie}"))
+}
+
+fn apply_cookie(mpv: &Mpv, cookie: &str) {
+    let _ = mpv.command("change-list", &["http-header-fields", "clr"]);
+    let Some(header) = cookie_header(cookie) else {
+        return;
+    };
+    let _ = mpv.command("change-list", &["http-header-fields", "append", &header]);
+}
+
 fn flag(mpv: &Mpv, name: &str) -> Option<bool> {
     match mpv.get_property::<String>(name) {
         Ok(value) => Some(value == "yes" || value == "true"),
@@ -348,6 +380,16 @@ mod tests {
     use std::io::{Read, Write};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_session_cookie_stays_out_of_a_refused_header() {
+        assert_eq!(
+            cookie_header("abc.def"),
+            Some("Cookie: hm_session=abc.def".into())
+        );
+        assert!(cookie_header("bad\"cookie").is_none());
+        assert!(cookie_header("").is_none());
+    }
 
     fn wait_until(player: &Player, pred: impl Fn(&PlaybackState) -> bool) -> PlaybackState {
         let start = Instant::now();

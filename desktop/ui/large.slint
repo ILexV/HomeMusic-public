@@ -1,5 +1,5 @@
 import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, Heading, QueueRow, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
-import { AlbumItem, ArtistItem, CatalogHit, QueueItem } from "types.slint";
+import { AlbumItem, ArtistItem, CatalogHit, HomeRow, QueueItem } from "types.slint";
 
 export component Large inherits Rectangle {
     in property <string> track-title;
@@ -23,6 +23,9 @@ export component Large inherits Rectangle {
     in property <bool> catalog-open;
     in property <string> catalog-note;
     in property <[CatalogHit]> hits;
+    in property <bool> home-open;
+    in property <string> home-title;
+    in property <[HomeRow]> home-rows;
     in property <[QueueItem]> queue;
     in property <string> queue-title;
     in property <string> queue-total;
@@ -46,6 +49,9 @@ export component Large inherits Rectangle {
     callback search-edited(string);
     callback pick-artist(int);
     callback open-album(int);
+    callback show-home();
+    callback show-library();
+    callback pick-home(int);
 
     background: Theme.bg;
 
@@ -128,10 +134,27 @@ export component Large inherits Rectangle {
                 spacing: 8px;
 
                 Text {
-                    text: root.catalog-open ? "Поиск" : "Библиотека";
+                    text: root.catalog-open ? "Поиск" : (root.home-open ? root.home-title : "Библиотека");
                     color: Theme.text;
                     font-size: 14px;
                     font-weight: 600;
+                    overflow: elide;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    EqButton {
+                        label: "главная";
+                        tip: "Главная";
+                        active: root.home-open && !root.catalog-open;
+                        clicked => { root.show-home(); }
+                    }
+                    EqButton {
+                        label: "библиотека";
+                        tip: "Библиотека";
+                        active: !root.home-open && !root.catalog-open;
+                        clicked => { root.show-library(); }
+                    }
                 }
 
                 if root.catalog-open : Rectangle {
@@ -147,7 +170,44 @@ export component Large inherits Rectangle {
                     }
                 }
 
-                if !root.catalog-open : HorizontalLayout {
+                if !root.catalog-open && root.home-open : Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 40px;
+                    preferred-height: 40px;
+                    if root.home-rows.length == 0 : EmptyNote { message: "Главная загружается"; }
+                    if root.home-rows.length > 0 : ScrollPort {
+                        for row[index] in root.home-rows : Rectangle {
+                            height: row.kind == "section" ? 26px : (row.detail == "" ? 32px : 44px);
+                            background: home_touch.has-hover && row.kind != "section" && row.kind != "note" ? Theme.raised : transparent;
+                            VerticalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                alignment: center;
+                                Text {
+                                    text: row.title;
+                                    color: row.accent ? Theme.orange : (row.kind == "section" ? Theme.muted : Theme.text);
+                                    font-size: row.kind == "section" ? 12px : 13px;
+                                    font-weight: row.kind == "section" || row.kind == "shortcut" || row.kind == "wave" ? 600 : 400;
+                                    overflow: elide;
+                                }
+                                if row.detail != "" : Text {
+                                    text: row.detail;
+                                    color: Theme.muted;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                            }
+                            home_touch := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: pointer;
+                                clicked => { root.pick-home(index); }
+                            }
+                        }
+                    }
+                }
+
+                if !root.catalog-open && !root.home-open : HorizontalLayout {
                     spacing: 8px;
                     vertical-stretch: 1;
 
