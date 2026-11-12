@@ -1,4 +1,4 @@
-import { EmptyNote, Theme, TitleButton } from "theme.slint";
+import { EmptyNote, Theme, TitleButton, VerticalScrollBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
 export component QueueView inherits Rectangle {
@@ -154,11 +154,12 @@ export component QueueView inherits Rectangle {
                 border-width: 2px; border-color: Theme.orange;
                 background: #e8872a12;
             }
-            if flick.content-height > flick.height : Rectangle {
-                x: parent.width - 5px; width: 3px;
-                height: max(18px, flick.height * flick.height / max(flick.content-height, 1px));
-                y: (-flick.content-y) / max(flick.content-height - flick.height, 1px) * (flick.height - self.height);
-                border-radius: 2px; background: #ffffff28;
+            VerticalScrollBar {
+                x: parent.width - self.width;
+                y: 0px;
+                height: flick.height;
+                content-height: flick.content-height;
+                scroll-y <=> flick.content-y;
             }
         }
     }
