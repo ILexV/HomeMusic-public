@@ -1,4 +1,4 @@
-//! Where `config.toml` and `window-place.toml` live.
+//! Where configuration, window placement, and saved playback live.
 //!
 //! `cargo run` and `cargo test` put the binary under `target/`, so those
 //! still read the source folder. A copied exe reads the folder it sits in.

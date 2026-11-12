@@ -1,0 +1,165 @@
+import { EmptyNote, Theme, TitleButton } from "theme.slint";
+import { QueueItem } from "types.slint";
+
+export component QueueView inherits Rectangle {
+    in property <[QueueItem]> queue;
+    in property <bool> busy;
+    in property <string> error;
+    in property <bool> filtered;
+    callback play-row(int);
+    callback move-queue-row(int, int);
+    callback remove-queue-row(int);
+    callback queue-row-next(int);
+    private property <int> drag-source: -1;
+    private property <bool> dragging: false;
+    private property <int> target: -1;
+    private property <length> row-height: 40px;
+    vertical-stretch: 1;
+    min-height: 40px;
+    clip: true;
+
+    // Keep drag handles outside the Flickable: its gesture recognizer must
+    // remain free to scroll track rows, without stealing a handle drag.
+    pure function row-at(y: length) -> int {
+        floor((y - flick.content-y) / root.row-height)
+    }
+    function reset-drag() {
+        root.drag-source = -1;
+        root.dragging = false;
+        root.target = -1;
+    }
+    changed queue => { root.reset-drag(); }
+
+    VerticalLayout {
+        spacing: 2px;
+        Text {
+            height: 16px;
+            text: root.dragging ? "Отпустите на нужной строке" : "≡ перетащить · ↳ следующим · × убрать";
+            color: root.dragging ? Theme.orange : Theme.dim;
+            font-size: 10px;
+            overflow: elide;
+        }
+        if root.queue.length > 0 && (root.busy || root.error != "") : Text {
+            text: root.busy ? "Загрузка новой очереди…" : root.error;
+            color: root.busy ? Theme.muted : Theme.orange;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+        body := Rectangle {
+            vertical-stretch: 1;
+            min-height: 20px;
+            clip: true;
+            if root.busy && root.queue.length == 0 : EmptyNote { message: "Загрузка очереди…"; }
+            if !root.busy && root.error != "" && root.queue.length == 0 : EmptyNote { message: root.error; error: true; }
+            if !root.busy && root.error == "" && root.queue.length == 0 : EmptyNote {
+                message: root.filtered ? "В очереди ничего не найдено" : "Очередь пуста";
+            }
+            flick := Flickable {
+                x: 24px;
+                width: parent.width - 31px;
+                height: 100%;
+                visible: root.queue.length > 0;
+                interactive: !root.dragging;
+                content-width: self.width;
+                content-height: root.queue.length * root.row-height;
+                for item[index] in root.queue : Rectangle {
+                    y: index * root.row-height;
+                    height: root.row-height;
+                    width: flick.width;
+                    background: item.current ? #e8872a30 : (row-touch.has-hover ? Theme.raised : transparent);
+                    HorizontalLayout {
+                        padding-left: 3px;
+                        padding-right: 2px;
+                        spacing: 4px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 2px;
+                            Text { text: item.title; color: item.current ? Theme.orange : Theme.text; font-size: 12px; overflow: elide; }
+                            if item.meta != "" : Text { text: item.meta; color: Theme.dim; font-size: 10px; overflow: elide; }
+                        }
+                        Text { text: item.duration; color: Theme.muted; font-size: 10px; }
+                        Rectangle { width: 48px; }
+                    }
+                    row-touch := TouchArea {
+                        width: parent.width - 50px;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            // A scroll or a long pointer movement is never a play action.
+                            if abs(self.mouse-y - self.pressed-y) < 6px && abs(self.mouse-x - self.pressed-x) < 6px {
+                                root.play-row(item.source);
+                            }
+                        }
+                    }
+                    TitleButton {
+                        x: parent.width - 48px; y: 9px; width: 24px;
+                        glyph: "↳"; tip: "Следующим после текущего";
+                        clicked => { root.queue-row-next(item.source); }
+                    }
+                    TitleButton {
+                        x: parent.width - 24px; y: 9px; width: 24px;
+                        glyph: "×"; tip: "Убрать из очереди";
+                        clicked => { root.remove-queue-row(item.source); }
+                    }
+                }
+            }
+            if root.queue.length > 0 : Rectangle {
+                x: 0px; y: 0px;
+                width: 24px; height: 100%; clip: true;
+                for item[index] in root.queue : Text {
+                    y: index * root.row-height + flick.content-y;
+                    height: root.row-height; width: 24px;
+                    text: "≡"; color: root.drag-source == item.source ? Theme.orange : Theme.dim;
+                    font-size: 18px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                handle := TouchArea {
+                    mouse-cursor: grab;
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                            let row = root.row-at(self.mouse-y);
+                            if row >= 0 && row < root.queue.length {
+                                root.drag-source = root.queue[row].source;
+                                root.target = row;
+                            }
+                        } else if event.kind == PointerEventKind.move && root.drag-source >= 0 {
+                            if abs(self.mouse-y - self.pressed-y) >= 6px || abs(self.mouse-x - self.pressed-x) >= 6px {
+                                root.dragging = true;
+                            }
+                            if root.dragging {
+                                // Edge scrolling also permits dropping beyond the initial viewport.
+                                if self.mouse-y < 16px { flick.content-y = min(0px, flick.content-y + 10px); }
+                                if self.mouse-y > self.height - 16px { flick.content-y = max(min(0px, flick.height - flick.content-height), flick.content-y - 10px); }
+                                root.target = max(0, min(root.queue.length - 1, root.row-at(self.mouse-y)));
+                            }
+                        } else if event.kind == PointerEventKind.up {
+                            let source = root.drag-source;
+                            let target = root.target;
+                            let commit = root.dragging && source >= 0 && target >= 0 && target < root.queue.length && self.mouse-y >= 0px && self.mouse-y <= self.height && self.mouse-x >= 0px && self.mouse-x <= body.width;
+                            root.reset-drag();
+                            if commit { root.move-queue-row(source, root.queue[target].source); }
+                        } else if event.kind == PointerEventKind.cancel { root.reset-drag(); }
+                    }
+                    scroll-event(event) => {
+                        flick.content-y = max(min(0px, flick.height - flick.content-height), min(0px, flick.content-y + event.delta-y));
+                        root.reset-drag();
+                        accept
+                    }
+                }
+                Tooltip { text: @markdown("Перетащите за ≡, чтобы изменить порядок"); }
+            }
+            if root.dragging && root.target >= 0 : Rectangle {
+                x: 0px; y: root.target * root.row-height + flick.content-y;
+                width: parent.width - 7px; height: root.row-height;
+                border-width: 2px; border-color: Theme.orange;
+                background: #e8872a12;
+            }
+            if flick.content-height > flick.height : Rectangle {
+                x: parent.width - 5px; width: 3px;
+                height: max(18px, flick.height * flick.height / max(flick.content-height, 1px));
+                y: (-flick.content-y) / max(flick.content-height - flick.height, 1px) * (flick.height - self.height);
+                border-radius: 2px; background: #ffffff28;
+            }
+        }
+    }
+}

@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -49,7 +50,7 @@ pub struct CatalogHit {
 impl CatalogHit {
     pub fn action(&self) -> &'static str {
         match self.kind {
-            HitKind::Album if self.owned => "в библиотеке",
+            HitKind::Album if self.owned => "открыть",
             HitKind::Album if self.downloading => "качается",
             HitKind::Album => "скачать",
             HitKind::Track if self.owned => "играть",
@@ -64,6 +65,7 @@ pub struct Hub {
     user: String,
     password: String,
     cookie: Mutex<String>,
+    is_admin: AtomicBool,
 }
 
 impl Hub {
@@ -73,6 +75,7 @@ impl Hub {
             user: config.user.clone(),
             password: config.password.clone(),
             cookie: Mutex::new(String::new()),
+            is_admin: AtomicBool::new(false),
         }
     }
 
@@ -144,22 +147,25 @@ impl Hub {
     }
 
     pub fn mix_today(&self) -> Result<MixSnapshot, String> {
-        Ok(parse_mix_today(&self.send("GET", "/api/mixes/today", None)?))
+        let mut mix = parse_mix_today(&self.send("GET", "/api/mixes/today", None)?);
+        mix.can_rebuild = self.is_admin.load(Ordering::Relaxed);
+        Ok(mix)
     }
 
-    pub fn set_mix_mode(&self, mode: &str) -> Result<(), String> {
-        self.send(
+    pub fn set_mix_mode(&self, mode: &str) -> Result<MixSettings, String> {
+        let value = self.send(
             "PUT",
             "/api/mixes/settings",
             Some(serde_json::json!({ "mode": mode })),
         )?;
-        Ok(())
+        Ok(parse_mix_settings(&value))
     }
 
-    pub fn rebuild_mix(&self) -> Result<(), String> {
-        self.send("POST", "/api/mixes/rebuild", Some(serde_json::json!({})))?;
-        Ok(())
+    pub fn rebuild_mix(&self) -> Result<bool, String> {
+        let value = self.send("POST", "/api/mixes/rebuild", Some(serde_json::json!({})))?;
+        Ok(value.get("queued").and_then(Value::as_bool).unwrap_or(false))
     }
+
 
     pub fn playlists(&self) -> Result<Vec<PlaylistLine>, String> {
         Ok(parse_playlists(&self.send("GET", "/api/playlists", None)?))
@@ -169,17 +175,18 @@ impl Hub {
         Ok(parse_liked(&self.send("GET", "/api/nd/liked", None)?))
     }
 
-    pub fn taste(&self) -> Result<Vec<TasteArtist>, String> {
-        Ok(parse_taste(&self.send("GET", "/api/taste/onboarding", None)?))
+    pub fn taste(&self, query: &str) -> Result<TastePage, String> {
+        let path = format!("/api/taste/onboarding?q={}", encode(query.trim()));
+        Ok(parse_taste(&self.send("GET", &path, None)?))
     }
 
-    pub fn pick_taste(&self, refs: &[String]) -> Result<(), String> {
-        self.send(
+    pub fn pick_taste(&self, refs: &[String]) -> Result<MixSettings, String> {
+        let value = self.send(
             "POST",
             "/api/taste/artists",
             Some(serde_json::json!({ "artist_refs": refs })),
         )?;
-        Ok(())
+        Ok(parse_mix_settings(&value))
     }
 
     /// The user's own wave when `artist_id` is empty. `origin` is `home_card` or `radio`.
@@ -283,7 +290,8 @@ impl Hub {
             }))
             .map_err(http_err)?;
         let header = response.header("set-cookie").unwrap_or("").to_string();
-        let _ = response.into_string();
+        let body: Value = response.into_json().map_err(|_| "Хаб: ответ не json".to_string())?;
+        self.is_admin.store(body.get("is_admin").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
         let cookie = session_cookie(&header).ok_or_else(|| "Хаб: нет сессии".to_string())?;
         self.set_cookie(cookie);
         Ok(())
@@ -643,6 +651,10 @@ pub struct MixSnapshot {
     pub ready: u32,
     pub hour: u32,
     pub mode: String,
+    pub mix_mode: String,
+    pub building: bool,
+    pub can_rebuild: bool,
+    pub playlist_id: String,
     pub tracks: Vec<Playable>,
     pub poll: bool,
 }
@@ -658,6 +670,10 @@ impl Default for MixSnapshot {
             ready: 0,
             hour: 0,
             mode: "normal".into(),
+            mix_mode: "normal".into(),
+            building: false,
+            can_rebuild: false,
+            playlist_id: String::new(),
             tracks: Vec::new(),
             poll: false,
         }
@@ -682,6 +698,27 @@ pub struct TasteArtist {
     pub reference: String,
     pub name: String,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TastePage {
+    pub selected: Vec<TasteArtist>,
+    pub suggestions: Vec<TasteArtist>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MixSettings {
+    pub mode: String,
+    pub hour: u32,
+}
+
+fn parse_mix_settings(value: &Value) -> MixSettings {
+    let mode = text(value, "mode");
+    MixSettings {
+        mode: if mode.is_empty() { "normal".into() } else { mode },
+        hour: number(value, "mix_hour").clamp(0, 23) as u32,
+    }
+}
+
 
 #[derive(Clone, Debug, Default)]
 pub struct WaveLive {
@@ -725,9 +762,7 @@ pub fn parse_home(value: &Value) -> HomeFeed {
 }
 
 pub fn parse_mix_today(value: &Value) -> MixSnapshot {
-    let settings = value.get("settings").unwrap_or(value);
-    let hour = number(settings, "mix_hour") as u32;
-    let settings_mode = text(settings, "mode");
+    let settings = parse_mix_settings(value.get("settings").unwrap_or(value));
     let building = value
         .get("building")
         .and_then(Value::as_bool)
@@ -745,22 +780,16 @@ pub fn parse_mix_today(value: &Value) -> MixSnapshot {
             } else {
                 MixPhase::Waiting
             },
-            hour,
-            mode: if settings_mode.is_empty() {
-                "normal".into()
-            } else {
-                settings_mode
-            },
+            hour: settings.hour,
+            mode: settings.mode,
+            building,
             poll: building,
             ..MixSnapshot::default()
         };
     };
     let total = number(mix, "total") as u32;
     let ready = number(mix, "ready") as u32;
-    let mode = {
-        let mode = text(mix, "mode");
-        if mode.is_empty() { settings_mode } else { mode }
-    };
+    let mix_mode = text(mix, "mode");
     MixSnapshot {
         phase: MixPhase::Ready,
         id: number(mix, "id"),
@@ -768,8 +797,12 @@ pub fn parse_mix_today(value: &Value) -> MixSnapshot {
         description: text(mix, "description"),
         total,
         ready,
-        hour,
-        mode: if mode.is_empty() { "normal".into() } else { mode },
+        hour: settings.hour,
+        mode: settings.mode,
+        mix_mode: if mix_mode.is_empty() { "normal".into() } else { mix_mode },
+        building,
+        can_rebuild: false,
+        playlist_id: text(mix, "nd_playlist_id"),
         tracks: playables(mix.get("tracks")),
         poll: building || ready < total,
     }
@@ -815,9 +848,15 @@ pub fn parse_liked(value: &Value) -> LikedPage {
     }
 }
 
-pub fn parse_taste(value: &Value) -> Vec<TasteArtist> {
+pub fn parse_taste(value: &Value) -> TastePage {
+    TastePage {
+        selected: taste_artists(value.get("selected")),
+        suggestions: taste_artists(value.get("suggestions")),
+    }
+}
+
+fn taste_artists(value: Option<&Value>) -> Vec<TasteArtist> {
     value
-        .get("suggestions")
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
@@ -1222,6 +1261,61 @@ mod tests {
         assert_eq!(wave.tracks[0].nd_song_id, "s2");
         assert_eq!(wave.tracks[0].artist, "A, B");
         assert!(!format!("{wave:?}").contains("stream"));
+    }
+
+    #[test]
+    fn mix_settings_are_not_the_previous_mix_mode_and_rebuild_keeps_tracks() {
+        let mut payload = serde_json::json!({
+            "settings": {"mode": "favorites", "mix_hour": 8},
+            "building": true,
+            "onboarding": false,
+            "mix": {
+                "id": 70, "mode": "normal", "title": "Yesterday",
+                "nd_playlist_id": "daily-playlist", "ready": 2, "total": 3,
+                "tracks": [
+                    {"position": 0, "ref": "dz:55", "nd_song_id": "local-55",
+                     "title": "Owned catalog", "artist": "One", "duration_s": 101},
+                    {"position": 1, "ref": "dz:77", "nd_song_id": null,
+                     "title": "Downloading", "artist": "Two", "downloading": true},
+                    {"position": 2, "ref": "nd:local-only", "nd_song_id": null,
+                     "title": "Library only", "artist": "Three", "owned": true}
+                ]
+            }
+        });
+        let old = parse_mix_today(&payload);
+        assert_eq!(old.phase, MixPhase::Ready);
+        assert_eq!(old.mode, "favorites");
+        assert_eq!(old.mix_mode, "normal");
+        assert_eq!(old.playlist_id, "daily-playlist");
+        assert!(old.building && old.poll);
+        assert_eq!(old.tracks.len(), 3);
+        assert!(old.tracks.iter().all(Playable::can_play));
+        assert_eq!(old.tracks[0].nd_song_id, "local-55");
+        assert_eq!(old.tracks[0].reference, "dz:55");
+        assert!(old.tracks[1].nd_song_id.is_empty());
+        assert_eq!(old.tracks[1].reference, "dz:77");
+        assert_eq!(old.tracks[2].nd_song_id, "local-only");
+
+        payload["building"] = Value::Bool(false);
+        payload["mix"]["id"] = serde_json::json!(71);
+        payload["mix"]["mode"] = serde_json::json!("favorites");
+        payload["mix"]["ready"] = serde_json::json!(3);
+        let replacement = parse_mix_today(&payload);
+        assert_eq!(replacement.id, 71);
+        assert_eq!(replacement.mix_mode, replacement.mode);
+        assert!(!replacement.building && !replacement.poll);
+        assert_eq!(replacement.playlist_id, old.playlist_id);
+    }
+
+    #[test]
+    fn taste_returns_saved_selection_separately_from_search_results() {
+        let page = parse_taste(&serde_json::json!({
+            "selected": [{"ref": "dz:1", "name": "Saved"}, {"ref": "", "name": "Invalid"}],
+            "suggestions": [{"ref": "dz:2", "name": "Search result", "source": "dz", "id": "2"}]
+        }));
+        assert_eq!(page.selected, vec![TasteArtist { reference: "dz:1".into(), name: "Saved".into() }]);
+        assert_eq!(page.suggestions, vec![TasteArtist { reference: "dz:2".into(), name: "Search result".into() }]);
+        assert!(parse_taste(&serde_json::json!({})).selected.is_empty());
     }
 
     #[test]

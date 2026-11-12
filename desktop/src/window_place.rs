@@ -15,6 +15,7 @@ pub struct Place {
     pub eq_open: Option<bool>,
     pub preamp: Option<f32>,
     pub bands: Option<[f32; 10]>,
+    pub mini_position: Option<(f32, f32)>,
 }
 
 pub fn path() -> PathBuf {
@@ -28,6 +29,9 @@ pub fn load() -> Option<Place> {
 
 pub fn save(place: Place) {
     let mut body = format!("x = {}\ny = {}\n", place.x, place.y);
+    if let Some((x, y)) = place.mini_position {
+        body.push_str(&format!("mini-x = {x}\nmini-y = {y}\n"));
+    }
     if let Some(mode) = place.mode {
         body.push_str(&format!("mode = {mode}\n"));
     }
@@ -74,6 +78,8 @@ pub fn parse(text: &str) -> Option<Place> {
     let mut eq_open = None;
     let mut preamp = None;
     let mut bands = None;
+    let mut mini_x = None;
+    let mut mini_y = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -86,6 +92,8 @@ pub fn parse(text: &str) -> Option<Place> {
         match key.trim() {
             "x" => x = parse_f32(value),
             "y" => y = parse_f32(value),
+            "mini-x" => mini_x = parse_f32(value),
+            "mini-y" => mini_y = parse_f32(value),
             "mode" => {
                 if let Ok(parsed) = value.parse::<i32>() {
                     if (0..=2).contains(&parsed) {
@@ -120,6 +128,7 @@ pub fn parse(text: &str) -> Option<Place> {
         eq_open,
         preamp,
         bands,
+        mini_position: mini_x.zip(mini_y),
     })
 }
 
@@ -185,6 +194,7 @@ mod tests {
             eq_open: None,
             preamp: None,
             bands: None,
+            mini_position: None,
         }
     }
 
@@ -242,5 +252,15 @@ mod tests {
         let bands = place.bands.unwrap();
         assert_eq!(bands[5], 6.0);
         assert_eq!(bands[9], 12.0);
+    }
+
+    #[test]
+    fn mini_position_is_independent_and_accepts_a_left_hand_monitor() {
+        let place = parse("x=80\ny=60\nmode=2\nmini-x=-520\nmini-y=430\n").unwrap();
+        assert_eq!((place.x, place.y), (80.0, 60.0));
+        assert_eq!(place.mini_position, Some((-520.0, 430.0)));
+        let broken = parse("x=80\ny=60\nmini-x=NaN\nmini-y=430\n").unwrap();
+        assert_eq!(broken.mini_position, None);
+        assert_eq!((broken.x, broken.y), (80.0, 60.0));
     }
 }

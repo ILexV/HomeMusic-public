@@ -200,14 +200,43 @@ pub fn mix_rows(mix: &MixSnapshot) -> Vec<Row> {
                     accent: mix.mode == mode,
                 });
             }
-            rows.push(action("play", "Слушать"));
-            rows.push(action("rebuild", "Собрать заново"));
+            rows.push(note(&format!(
+                "{} · Новый микс — каждый день в {}:00",
+                songs_label(mix.total), mix.hour
+            )));
+            if mix.ready < mix.total {
+                rows.push(note(&format!("Скачано {} из {}, остальные качаются", mix.ready, mix.total)));
+            }
+            if !mix.tracks.is_empty() {
+                rows.push(action("play", "Слушать всё"));
+            } else {
+                rows.push(note("В миксе пока нет песен"));
+            }
+            if !mix.playlist_id.is_empty() {
+                rows.push(action("open-mix-playlist", "Открыть плейлист «Микс дня»"));
+            }
+            if mix.building {
+                rows.push(note("Собираем новый микс — пока можно слушать предыдущий"));
+            }
+            if mix.can_rebuild {
+                if mix.building {
+                    let mut row = action("rebuild", "Собирается…");
+                    row.kind = "disabled";
+                    row.accent = false;
+                    rows.push(row);
+                } else {
+                    rows.push(action("rebuild", "Собрать заново"));
+                }
+            }
             for (index, song) in mix.tracks.iter().enumerate() {
                 rows.push(track_row(index, song));
             }
         }
         MixPhase::Building => rows.push(note("Подбираем 50 песен по вашему вкусу — это займёт пару минут")),
-        MixPhase::Onboarding => rows.push(note("Выберите 3–5 исполнителей")),
+        MixPhase::Onboarding => {
+            rows.push(note("Выберите 3–5 исполнителей"));
+            rows.push(action("taste", "Что вы слушаете?"));
+        }
         MixPhase::Waiting => rows.push(note(&format!("«Микс дня» появится в {}:00", mix.hour))),
     }
     rows
@@ -217,9 +246,11 @@ pub fn taste_rows(artists: &[TasteArtist], picked: &HashSet<String>) -> Vec<Row>
     let mut rows = vec![note("Выберите 3–5 исполнителей")];
     if (3..=5).contains(&picked.len()) {
         rows.push(action("save", "Собрать микс"));
+    } else {
+        rows.push(note(&format!("Выберите ещё {}", 3usize.saturating_sub(picked.len()))));
     }
     if artists.is_empty() {
-        rows.push(note("Исполнители не пришли"));
+        rows.push(note("Никого не нашли — попробуйте другое написание"));
         return rows;
     }
     for artist in artists {
@@ -247,6 +278,9 @@ pub fn mix_card(mix: &MixSnapshot) -> (String, String) {
             }
             if mix.ready < mix.total {
                 detail = format!("{detail} · качается {}", mix.total - mix.ready);
+            }
+            if mix.building {
+                detail.push_str(" · собирается новый микс");
             }
             (mix.title.clone(), detail)
         }
@@ -423,9 +457,48 @@ mod tests {
         assert_eq!(detail, "Тихий · 50 песен · качается 10");
         let rows = mix_rows(&mix);
         assert!(rows.iter().any(|row| row.kind == "mode" && row.key == "discover" && row.accent));
+        assert!(!rows.iter().any(|row| row.key == "play"));
         assert_eq!(songs_label(1), "1 песня");
         assert_eq!(songs_label(2), "2 песни");
         assert_eq!(songs_label(5), "5 песен");
         assert_eq!(songs_label(11), "11 песен");
+    }
+
+    #[test]
+    fn rebuilding_keeps_previous_tracks_playable_and_disables_only_rebuild() {
+        let mix = MixSnapshot {
+            phase: MixPhase::Ready,
+            building: true,
+            can_rebuild: true,
+            mode: "favorites".into(),
+            mix_mode: "normal".into(),
+            playlist_id: "daily".into(),
+            tracks: vec![hub::Playable {
+                nd_song_id: String::new(), reference: "dz:44".into(),
+                title: "Pending download".into(), artist: "Artist".into(),
+                album: String::new(), duration_s: 120,
+            }],
+            ..MixSnapshot::default()
+        };
+        let rows = mix_rows(&mix);
+        assert!(rows.iter().any(|row| row.kind == "mode" && row.key == "favorites" && row.accent));
+        assert!(rows.iter().any(|row| row.kind == "action" && row.key == "play"));
+        assert!(rows.iter().any(|row| row.kind == "action" && row.key == "open-mix-playlist"));
+        assert!(rows.iter().any(|row| row.kind == "disabled" && row.key == "rebuild"));
+        assert!(rows.iter().any(|row| row.kind == "track" && row.key == "0"));
+        assert!(mix_card(&mix).1.contains("собирается новый"));
+        let ordinary = MixSnapshot { can_rebuild: false, building: false, ..mix };
+        assert!(!mix_rows(&ordinary).iter().any(|row| row.key == "rebuild"));
+    }
+
+    #[test]
+    fn onboarding_has_a_real_action_and_taste_keeps_selected_marks() {
+        let mix = MixSnapshot { phase: MixPhase::Onboarding, ..MixSnapshot::default() };
+        assert!(mix_rows(&mix).iter().any(|row| row.kind == "action" && row.key == "taste"));
+        let artists = vec![TasteArtist { reference: "dz:1".into(), name: "One".into() }];
+        let picked = HashSet::from(["dz:1".into(), "dz:2".into(), "dz:3".into()]);
+        let rows = taste_rows(&artists, &picked);
+        assert!(rows.iter().any(|row| row.key == "save" && row.kind == "action"));
+        assert!(rows.iter().any(|row| row.key == "dz:1" && row.accent));
     }
 }

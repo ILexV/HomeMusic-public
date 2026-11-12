@@ -1,4 +1,6 @@
-import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, Heading, QueueRow, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, Heading, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { AlbumDetail } from "album.slint";
+import { QueueView } from "queue.slint";
 import { CatalogHit, QueueItem } from "types.slint";
 
 export component Medium inherits Rectangle {
@@ -27,6 +29,32 @@ export component Medium inherits Rectangle {
     in property <string> queue-title;
     in property <string> queue-total;
     in-out property <string> search;
+    in-out property <string> queue-search;
+    in property <bool> queue-busy;
+    in property <string> queue-error;
+    in property <bool> catalog-busy;
+    in property <string> playback-message;
+    in property <bool> playback-busy;
+    in property <bool> playback-error;
+    in property <bool> seek-enabled;
+    in property <bool> album-open;
+    in property <string> album-title;
+    in property <string> album-artist;
+    in property <image> album-cover;
+    in property <bool> album-has-cover;
+    in property <[QueueItem]> album-tracks;
+    in property <string> album-total;
+    in property <bool> album-busy;
+    in property <string> album-error;
+    in property <string> album-note;
+    callback queue-search-edited(string);
+    callback move-queue-row(int, int);
+    callback remove-queue-row(int);
+    callback queue-row-next(int);
+    callback close-album();
+    callback album-play();
+    callback album-enqueue();
+    callback album-play-row(int);
     callback play-pause();
     callback stop();
     callback prev();
@@ -85,6 +113,7 @@ export component Medium inherits Rectangle {
                         Text { text: root.track-artist; color: Theme.muted; font-size: 13px; overflow: elide; }
                         Text { text: root.track-album; color: Theme.dim; font-size: 12px; overflow: elide; }
                         Text { text: root.track-meta; color: Theme.dim; font-size: 11px; overflow: elide; }
+                        PlaybackStatus { message: root.playback-message; busy: root.playback-busy; error: root.playback-error; }
                     }
                 }
 
@@ -124,6 +153,7 @@ export component Medium inherits Rectangle {
                     position: root.position;
                     duration: root.duration;
                     wave: root.wave;
+                    seek-enabled: root.seek-enabled;
                     seek(ratio) => { root.seek(ratio); }
                 }
 
@@ -156,7 +186,7 @@ export component Medium inherits Rectangle {
             padding-top: 6px;
             vertical-stretch: 1;
 
-            Heading {
+            if !root.album-open : Heading {
                 height: 36px;
                 vertical-stretch: 0;
                 title: root.catalog-open ? root.catalog-note : root.queue-title;
@@ -167,29 +197,50 @@ export component Medium inherits Rectangle {
                 }
             }
 
-            Rectangle {
+            if !root.album-open : Rectangle {
                 vertical-stretch: 1;
                 min-height: 48px;
                 preferred-height: 48px;
 
-                if !root.catalog-open && root.queue.length == 0 : EmptyNote { message: "Очередь пуста"; }
-                if root.catalog-open && root.hits.length == 0 : EmptyNote { message: "Ничего не найдено"; }
-                if !root.catalog-open && root.queue.length > 0 : ScrollPort {
-                    for item in root.queue : QueueRow {
-                        item: item;
-                        clicked => { root.play-row(item.source); }
-                    }
+                if !root.catalog-open : QueueView {
+                    width: 100%; height: 100%;
+                    queue: root.queue;
+                    busy: root.queue-busy;
+                    error: root.queue-error;
+                    filtered: root.queue-search != "";
+                    play-row(index) => { root.play-row(index); }
+                    move-queue-row(from, to) => { root.move-queue-row(from, to); }
+                    remove-queue-row(index) => { root.remove-queue-row(index); }
+                    queue-row-next(index) => { root.queue-row-next(index); }
                 }
-                if root.catalog-open && root.hits.length > 0 : ScrollPort {
+                if root.catalog-open && root.catalog-busy : EmptyNote { message: "Поиск в сети…"; }
+                if root.catalog-open && !root.catalog-busy && root.hits.length == 0 : EmptyNote { message: root.catalog-note; }
+                if root.catalog-open && !root.catalog-busy && root.hits.length > 0 : ScrollPort {
                     for hit[index] in root.hits : CatalogRow {
                         hit: hit;
                         clicked => { root.pick-hit(index); }
                     }
                 }
             }
+            if root.album-open : AlbumDetail {
+                compact: true;
+                album-title: root.album-title;
+                album-artist: root.album-artist;
+                album-cover: root.album-cover;
+                album-has-cover: root.album-has-cover;
+                album-tracks: root.album-tracks;
+                album-total: root.album-total;
+                album-busy: root.album-busy;
+                album-error: root.album-error;
+                album-note: root.album-note;
+                close-album => { root.close-album(); }
+                album-play => { root.album-play(); }
+                album-enqueue => { root.album-enqueue(); }
+                album-play-row(index) => { root.album-play-row(index); }
+            }
         }
 
-        if !root.catalog-open : HorizontalLayout {
+        if !root.catalog-open && !root.album-open : HorizontalLayout {
             height: 28px;
             vertical-stretch: 0;
             padding-left: 14px;
@@ -219,10 +270,15 @@ export component Medium inherits Rectangle {
                     active: root.catalog-open;
                     clicked => { root.toggle-catalog(); }
                 }
-                SearchField {
-                    hint: root.catalog-open ? "Поиск в сети" : "Поиск";
+                if root.catalog-open : SearchField {
+                    hint: "Поиск в сети";
                     text <=> root.search;
                     edited(text) => { root.search-edited(text); }
+                }
+                if !root.catalog-open : SearchField {
+                    hint: "Фильтр очереди";
+                    text <=> root.queue-search;
+                    edited(text) => { root.queue-search-edited(text); }
                 }
             }
         }

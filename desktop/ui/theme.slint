@@ -11,45 +11,6 @@ export global Theme {
     out property <color> dim: #8a8a8a;
 }
 
-export component SearchField inherits Rectangle {
-    in-out property <string> text;
-    in property <string> hint: "Поиск";
-    callback edited(string);
-    min-width: 80px;
-    min-height: 30px;
-    preferred-height: 30px;
-    horizontal-stretch: 1;
-    vertical-stretch: 0;
-    background: #161616;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: input.has-focus ? Theme.orange : #3c3c3c;
-    clip: true;
-
-    if root.text == "" : Text {
-        x: 10px;
-        width: parent.width - 20px;
-        height: 100%;
-        text: root.hint;
-        color: Theme.dim;
-        font-size: 13px;
-        vertical-alignment: center;
-    }
-
-    input := TextInput {
-        x: 10px;
-        width: parent.width - 20px;
-        height: 100%;
-        text <=> root.text;
-        color: Theme.text;
-        font-size: 13px;
-        vertical-alignment: center;
-        single-line: true;
-        selection-background-color: Theme.orange;
-        selection-foreground-color: #1b1b1b;
-        edited => { root.edited(input.text); }
-    }
-}
 
 export component Glyph inherits Rectangle {
     in property <string> kind;
@@ -216,11 +177,58 @@ export component TitleButton inherits Rectangle {
 
     Tooltip { text: @markdown("\{root.tip}"); }
 }
+export component SearchField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> hint: "Поиск";
+    callback edited(string);
+    min-width: 80px;
+    min-height: 30px;
+    preferred-height: 30px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    background: #161616;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.orange : #3c3c3c;
+    clip: true;
+
+    if root.text == "" : Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: 100%;
+        text: root.hint;
+        color: Theme.dim;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    input := TextInput {
+        x: 10px;
+        width: parent.width - (root.text == "" ? 20px : 42px);
+        height: 100%;
+        text <=> root.text;
+        color: Theme.text;
+        font-size: 13px;
+        vertical-alignment: center;
+        single-line: true;
+        selection-background-color: Theme.orange;
+        selection-foreground-color: #1b1b1b;
+        edited => { root.edited(input.text); }
+    }
+    if root.text != "" : TitleButton {
+        x: parent.width - self.width - 3px;
+        y: (parent.height - self.height) / 2;
+        glyph: "×";
+        tip: "Очистить поиск";
+        clicked => { root.text = ""; root.edited(""); }
+    }
+}
 
 export component SeekBar inherits Rectangle {
     in property <float> position;
     in property <float> duration;
     in property <[float]> wave;
+    in property <bool> seek-enabled: false;
     in property <bool> inverted: false;
     in property <length> bar-height: 28px;
     callback seek(float);
@@ -228,7 +236,7 @@ export component SeekBar inherits Rectangle {
     horizontal-stretch: 1;
     min-width: 48px;
     property <bool> dragging: false;
-    property <float> progress: min(1, root.position / max(root.duration, 0.001));
+    property <float> progress: root.duration > 0 ? max(0, min(1, root.position / root.duration)) : 0;
     property <length> track-height: root.wave.length > 0 ? root.bar-height - 2px : 6px;
     property <color> played: root.inverted ? #ffffff : Theme.orange;
     property <color> idle: root.inverted ? #ffffff99 : #7a7a7a;
@@ -269,8 +277,9 @@ export component SeekBar inherits Rectangle {
     area := TouchArea {
         width: 100%;
         height: 100%;
+        enabled: root.seek-enabled;
         pointer-event(event) => {
-            if (event.kind == PointerEventKind.down || (event.kind == PointerEventKind.move && root.dragging)) {
+            if (root.seek-enabled && (event.kind == PointerEventKind.down || (event.kind == PointerEventKind.move && root.dragging))) {
                 root.dragging = true;
                 root.seek(max(0, min(1, area.mouse-x / area.width)));
             }
@@ -370,12 +379,14 @@ export component EqButton inherits Rectangle {
     in property <string> tip;
     in property <bool> active;
     in property <bool> inverted: false;
+    in property <bool> enabled: true;
     callback clicked();
     height: 28px;
     min-width: 28px;
     horizontal-stretch: 0;
     vertical-stretch: 0;
     border-radius: 3px;
+    opacity: root.enabled ? 1 : 0.4;
     background: root.active
         ? (touch.has-hover ? #333333 : #1b1b1b)
         : (touch.has-hover
@@ -425,6 +436,7 @@ export component EqButton inherits Rectangle {
     touch := TouchArea {
         width: 100%;
         height: 100%;
+        enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
@@ -723,16 +735,18 @@ export component Heading inherits HorizontalLayout {
 
 export component EmptyNote inherits Rectangle {
     in property <string> message;
+    in property <bool> error: false;
     width: 100%;
     height: 100%;
     Text {
         width: 100%;
         height: 100%;
         text: root.message;
-        color: Theme.dim;
+        color: root.error ? Theme.orange : Theme.dim;
         font-size: 12px;
         horizontal-alignment: center;
         vertical-alignment: center;
+        wrap: word-wrap;
     }
 }
 
@@ -782,4 +796,24 @@ export component ModeSwitch inherits HorizontalLayout {
     ModeChip { glyph: "–"; tip: "Компактный вид"; active: root.mode == 0; clicked => { root.set-mode(0); } }
     ModeChip { glyph: "☰"; tip: "Средний вид"; active: root.mode == 1; clicked => { root.set-mode(1); } }
     ModeChip { glyph: "▦"; tip: "Большой вид"; active: root.mode == 2; clicked => { root.set-mode(2); } }
+}
+
+export component PlaybackStatus inherits Rectangle {
+    in property <string> message;
+    in property <bool> busy;
+    in property <bool> error;
+    in property <bool> inverted: false;
+    height: 16px;
+    min-width: 32px;
+    horizontal-stretch: 1;
+    Text {
+        width: 100%;
+        height: 100%;
+        text: (root.busy ? "… " : "") + root.message;
+        color: root.error ? (root.inverted ? #691800 : Theme.orange) : (root.inverted ? #342315 : Theme.muted);
+        font-size: 11px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Tooltip { text: @markdown("\{root.message}"); }
 }

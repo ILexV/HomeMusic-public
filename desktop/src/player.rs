@@ -6,8 +6,23 @@ use libmpv2::Mpv;
 
 use crate::eq::{self, Settings};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackPhase {
+    Idle,
+    Loading,
+    Buffering,
+    Playing,
+    Paused,
+    Stopped,
+    Ended,
+    Error,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlaybackState {
+    pub phase: PlaybackPhase,
+    pub seekable: bool,
+    /// Active, unpaused playback intent, including loading and cache waits.
     pub playing: bool,
     pub position_s: f32,
     pub duration_s: f32,
@@ -27,6 +42,9 @@ pub struct Player {
     /// True after a filter graph was installed, so a later flat curve can clear it.
     filter_active: bool,
     notice: Option<String>,
+    phase: PlaybackPhase,
+    /// Ignore the replaced file's trailing events until the next StartFile.
+    awaiting_start: bool,
     /// Set by stop and by a natural end that was already handled.
     /// A following end-of-file event must not advance the queue.
     user_stopped: bool,
@@ -41,7 +59,7 @@ impl Player {
             init.set_option("audio-display", "no")?;
             init.set_option("ytdl", "no")?;
             // Keep the stream URL, which carries the Subsonic token, out of the log.
-            init.set_option("msg-level", "all=error")?;
+            init.set_option("msg-level", "all=no")?;
             if options.null_audio {
                 init.set_option("ao", "null")?;
             }
@@ -55,6 +73,8 @@ impl Player {
                     eq: Settings::default(),
                     filter_active: false,
                     notice: None,
+                    phase: PlaybackPhase::Idle,
+                    awaiting_start: false,
                     user_stopped: false,
                 };
                 player.apply_volume();
@@ -66,6 +86,8 @@ impl Player {
                 eq: Settings::default(),
                 filter_active: false,
                 notice: Some(open_error(&err)),
+                phase: PlaybackPhase::Error,
+                awaiting_start: false,
                 user_stopped: false,
             },
         }
@@ -87,63 +109,94 @@ impl Player {
     /// `cookie` is the Hub session for `/api/listen/stream`. It is sent as a header
     /// and never written into the URL or into an error.
     pub fn load_cookie(&mut self, target: &str, cookie: &str) -> Result<(), String> {
+        self.load_cookie_at(target, cookie, 0.0, false)
+    }
+
+    /// Set pause before opening the file: a restored session must never emit audio.
+    /// `start` is explicitly reset on every normal load as well.
+    pub fn load_cookie_at(
+        &mut self,
+        target: &str,
+        cookie: &str,
+        position_s: f32,
+        paused: bool,
+    ) -> Result<(), String> {
         if self.mpv.is_none() {
             let err = self
                 .notice
                 .clone()
                 .unwrap_or_else(|| "Звук: libmpv недоступен".into());
             self.notice = Some(err.clone());
+            self.phase = PlaybackPhase::Error;
             return Err(err);
         }
         // Drop the previous file's end event before the new file starts.
         self.discard_events();
         self.user_stopped = false;
-        let hub_stream = !cookie.is_empty() || target.contains("/api/listen/");
+        self.awaiting_start = true;
+        self.phase = PlaybackPhase::Loading;
+        self.notice = None;
         let loaded = {
             let mpv = self.mpv.as_ref().unwrap();
-            let _ = mpv.set_property("pause", false);
-            apply_cookie(mpv, cookie);
-            mpv.command("loadfile", &[target, "replace"])
-        };
-        if let Err(_err) = loaded {
-            let text = if hub_stream {
-                "Не удалось открыть файл".to_string()
+            let start = if position_s.is_finite() {
+                position_s.max(0.0)
             } else {
-                format!("Не удалось открыть файл ({_err})")
+                0.0
             };
+            let start = format!("{start:.3}");
+            apply_cookie(mpv, cookie);
+            mpv.set_property("pause", paused)
+                .and_then(|_| mpv.set_property("start", start.as_str()))
+                .and_then(|_| mpv.command("loadfile", &[target, "replace"]))
+        };
+        if loaded.is_err() {
+            let text = "Не удалось открыть файл".to_string();
             self.notice = Some(text.clone());
+            self.phase = PlaybackPhase::Error;
+            self.awaiting_start = false;
+            self.user_stopped = true;
             return Err(text);
         }
-        if let Some(mpv) = self.mpv.as_ref() {
-            let _ = mpv.set_property("pause", false);
-        }
-        self.notice = None;
+        // loadfile only accepted the request. FileLoaded/EndFile tell us whether
+        // the asynchronous open actually succeeded.
         self.apply_eq();
         Ok(())
     }
 
     pub fn is_idle(&self) -> bool {
-        let Some(mpv) = self.mpv.as_ref() else {
-            return true;
-        };
-        flag(mpv, "idle-active").unwrap_or(true)
+        matches!(
+            self.phase,
+            PlaybackPhase::Idle
+                | PlaybackPhase::Stopped
+                | PlaybackPhase::Ended
+                | PlaybackPhase::Error
+        )
     }
 
     pub fn toggle(&mut self) {
         let Some(mpv) = self.mpv.as_ref() else {
             return;
         };
-        // Nothing loaded, or the file already ended: play does not invent a track.
-        if flag(mpv, "idle-active").unwrap_or(true) {
+        let paused = flag(mpv, "pause").unwrap_or(true);
+        self.set_paused(!paused);
+    }
+
+    /// Also works before FileLoaded, so loading does not swallow pause requests.
+    pub fn set_paused(&mut self, paused: bool) {
+        if self.is_idle() {
             return;
         }
-        let paused = flag(mpv, "pause").unwrap_or(true);
-        let _ = mpv.set_property("pause", !paused);
+        if let Some(mpv) = self.mpv.as_ref() {
+            let _ = mpv.set_property("pause", paused);
+        }
     }
 
     pub fn stop(&mut self) {
         // Mark this before the command, so an end event already in the queue is not a new track.
         self.user_stopped = true;
+        self.awaiting_start = false;
+        self.phase = PlaybackPhase::Stopped;
+        self.notice = None;
         let Some(mpv) = self.mpv.as_ref() else {
             return;
         };
@@ -151,46 +204,75 @@ impl Player {
         let _ = mpv.set_property("pause", true);
     }
 
-    /// Drain the event queue. True once when the file played through to the end.
-    /// Stop, quit, and an end that arrives together with them do not count.
+    /// Drain asynchronous load and playback events before taking a snapshot.
+    /// Return true exactly once for EOF, never for stop, replacement or errors.
     pub fn take_natural_end(&mut self) -> bool {
-        let mut eof = false;
-        let mut user_stopped = self.user_stopped;
-        if let Some(mpv) = self.mpv.as_ref() {
-            for _ in 0..64 {
-                match mpv.wait_event(0.0) {
-                    None => break,
-                    Some(Ok(event)) => match event {
-                        libmpv2::events::Event::StartFile | libmpv2::events::Event::FileLoaded => {
-                            user_stopped = false;
-                            eof = false;
-                        }
-                        libmpv2::events::Event::EndFile(reason) => {
-                            let stopped = reason == libmpv2::mpv_end_file_reason::Stop
-                                || reason == libmpv2::mpv_end_file_reason::Quit;
-                            if stopped {
-                                user_stopped = true;
-                                eof = false;
-                            } else if reason == libmpv2::mpv_end_file_reason::Eof && !user_stopped {
-                                eof = true;
-                            }
-                        }
-                        _ => {}
-                    },
-                    Some(Err(_)) => {}
-                }
-            }
-        } else {
+        use libmpv2::events::Event;
+        use libmpv2::mpv_end_file_reason as reason;
+
+        let Some(mpv) = self.mpv.as_ref() else {
             return false;
+        };
+        let mut eof = false;
+        while let Some(event) = mpv.wait_event(0.0) {
+            // Stop is authoritative even when StartFile/FileLoaded were queued.
+            if self.user_stopped {
+                continue;
+            }
+            match event {
+                Ok(Event::StartFile) => {
+                    self.awaiting_start = false;
+                    self.phase = PlaybackPhase::Loading;
+                    eof = false;
+                }
+                _ if self.awaiting_start => {}
+                Ok(Event::FileLoaded) => {
+                    self.phase = PlaybackPhase::Playing;
+                    self.notice = None;
+                    eof = false;
+                }
+                Ok(Event::EndFile(reason::Eof)) => {
+                    self.phase = PlaybackPhase::Ended;
+                    // Restoring an old position beyond a shortened file must not
+                    // advance into an audible next track while pause is requested.
+                    eof = !flag(mpv, "pause").unwrap_or(true);
+                }
+                Ok(Event::EndFile(reason::Stop | reason::Quit)) => {
+                    self.phase = PlaybackPhase::Stopped;
+                    eof = false;
+                }
+                Ok(Event::EndFile(reason::Redirect)) => {
+                    self.phase = PlaybackPhase::Loading;
+                    self.awaiting_start = true;
+                    eof = false;
+                }
+                // libmpv2 converts EndFile.error into Err, not EndFile(Error).
+                // Neither errors nor endpoint log messages are safe UI text.
+                Err(_) | Ok(Event::EndFile(reason::Error) | Event::QueueOverflow) => {
+                    self.phase = PlaybackPhase::Error;
+                    self.notice = Some("Не удалось воспроизвести файл".into());
+                    eof = false;
+                }
+                Ok(Event::Shutdown) => {
+                    self.phase = PlaybackPhase::Stopped;
+                    eof = false;
+                }
+                _ => {}
+            }
         }
-        if eof {
-            user_stopped = true;
+        if matches!(
+            self.phase,
+            PlaybackPhase::Ended | PlaybackPhase::Stopped | PlaybackPhase::Error
+        ) {
+            self.user_stopped = true;
         }
-        self.user_stopped = user_stopped;
         eof
     }
 
     pub fn seek_ratio(&mut self, ratio: f32) {
+        if !self.snapshot().seekable || !ratio.is_finite() {
+            return;
+        }
         let Some(mpv) = self.mpv.as_ref() else {
             return;
         };
@@ -245,43 +327,39 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlaybackState {
+        let mut state = PlaybackState {
+            phase: self.phase,
+            seekable: false,
+            playing: false,
+            position_s: 0.0,
+            duration_s: 0.0,
+            volume: self.volume,
+        };
         let Some(mpv) = self.mpv.as_ref() else {
-            return PlaybackState {
-                playing: false,
-                position_s: 0.0,
-                duration_s: 0.0,
-                volume: self.volume,
-            };
+            return state;
         };
-        let idle = flag(mpv, "idle-active").unwrap_or(true);
-        let paused = flag(mpv, "pause").unwrap_or(true);
-        let duration_s = if idle {
-            0.0
-        } else {
-            prop_f64(mpv, "duration").unwrap_or(0.0) as f32
-        };
-        let position_s = if idle || duration_s <= 0.0 {
-            0.0
-        } else {
-            prop_f64(mpv, "time-pos").unwrap_or(0.0) as f32
-        };
-        PlaybackState {
-            playing: !idle && !paused && duration_s > 0.0,
-            position_s,
-            duration_s,
-            volume: self.volume_now(mpv),
+        state.volume = self.volume_now(mpv);
+        if self.is_idle() {
+            return state;
         }
+        let paused = flag(mpv, "pause").unwrap_or(true);
+        state.playing = !paused;
+        if self.phase == PlaybackPhase::Loading {
+            return state;
+        }
+        state.phase = active_phase(paused, flag(mpv, "paused-for-cache").unwrap_or(false));
+        state.duration_s = prop_f64(mpv, "duration").unwrap_or(0.0) as f32;
+        // A live stream can have a real position without a known duration.
+        state.position_s = prop_f64(mpv, "time-pos").unwrap_or(0.0) as f32;
+        state.seekable = state.duration_s > 0.0 && flag(mpv, "seekable").unwrap_or(false);
+        state
     }
 
     fn discard_events(&self) {
         let Some(mpv) = self.mpv.as_ref() else {
             return;
         };
-        for _ in 0..64 {
-            if mpv.wait_event(0.0).is_none() {
-                break;
-            }
-        }
+        while mpv.wait_event(0.0).is_some() {}
     }
 
     fn apply_volume(&self) {
@@ -324,6 +402,17 @@ impl Player {
             .as_ref()
             .and_then(|mpv| mpv.get_property::<String>("af").ok())
             .unwrap_or_default()
+    }
+}
+
+fn active_phase(paused: bool, paused_for_cache: bool) -> PlaybackPhase {
+    if paused {
+        PlaybackPhase::Paused
+    } else if paused_for_cache {
+        PlaybackPhase::Buffering
+    } else {
+        // Duration is deliberately irrelevant: live streams are still playing.
+        PlaybackPhase::Playing
     }
 }
 
@@ -391,9 +480,10 @@ mod tests {
         assert!(cookie_header("").is_none());
     }
 
-    fn wait_until(player: &Player, pred: impl Fn(&PlaybackState) -> bool) -> PlaybackState {
+    fn wait_until(player: &mut Player, pred: impl Fn(&PlaybackState) -> bool) -> PlaybackState {
         let start = Instant::now();
         loop {
+            assert!(!player.take_natural_end(), "unexpected queue advance while waiting");
             let state = player.snapshot();
             if pred(&state) {
                 return state;
@@ -470,7 +560,7 @@ mod tests {
         std::fs::write(&path, tone_wav(2.0)).unwrap();
         let mut player = open_null();
         player.load(&path.to_string_lossy()).unwrap();
-        let _ = wait_until(&player, |state| state.playing && state.duration_s > 0.4);
+        let _ = wait_until(&mut player, |state| state.playing && state.duration_s > 0.4);
         player.set_eq_enabled(true);
         player.set_band(5, 6.0);
         let filtered = player.audio_filter();
@@ -510,7 +600,7 @@ mod tests {
             player
                 .load(&path.to_string_lossy())
                 .unwrap_or_else(|err| panic!("{name}: {err}"));
-            let state = wait_until(&player, |state| state.duration_s > 1.0 && state.playing);
+            let state = wait_until(&mut player, |state| state.duration_s > 1.0 && state.playing);
             assert!(
                 state.duration_s < 2.2,
                 "{name} duration {}",
@@ -518,7 +608,7 @@ mod tests {
             );
             player.seek_ratio(0.5);
             let half = state.duration_s * 0.5;
-            wait_until(&player, |state| (state.position_s - half).abs() < 0.4);
+            wait_until(&mut player, |state| (state.position_s - half).abs() < 0.4);
         }
     }
 
@@ -536,7 +626,7 @@ mod tests {
         player
             .load(&track.stream_url)
             .unwrap_or_else(|err| panic!("{err}"));
-        let state = wait_until(&player, |state| {
+        let state = wait_until(&mut player, |state| {
             state.duration_s > 1.0 && state.position_s > 0.1 && state.playing
         });
         assert!(state.position_s < state.duration_s);
@@ -587,7 +677,7 @@ mod tests {
             };
             panic!("{safe}");
         });
-        let state = wait_until(&player, |state| {
+        let state = wait_until(&mut player, |state| {
             state.duration_s > 1.0 && state.position_s > 0.1 && state.playing
         });
         assert!(state.position_s < state.duration_s);
@@ -620,7 +710,7 @@ mod tests {
         std::fs::write(&path, tone_wav(2.0)).unwrap();
         let mut player = open_null();
         player.load(&path.to_string_lossy()).unwrap();
-        wait_until(&player, |state| state.playing && state.position_s > 0.05);
+        wait_until(&mut player, |state| state.playing && state.position_s > 0.05);
         player.stop();
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(800) {
@@ -639,6 +729,183 @@ mod tests {
         let state = player.snapshot();
         assert!(!state.playing);
         assert_eq!(state.position_s, 0.0);
+    }
+
+    #[test]
+    fn missing_media_reports_error_without_advancing_and_recovers() {
+        let root = std::env::temp_dir();
+        let missing = root.join(format!(
+            "home-music-missing-{}-private-token.wav",
+            std::process::id()
+        ));
+        let mut player = open_null();
+        player.load(&missing.to_string_lossy()).unwrap();
+        assert_eq!(player.snapshot().phase, PlaybackPhase::Loading);
+        let failed = wait_until(&mut player, |state| state.phase == PlaybackPhase::Error);
+        assert!(!failed.playing);
+        assert!(!failed.seekable);
+        assert_eq!(failed.duration_s, 0.0);
+        assert!(!player.take_natural_end());
+        assert_eq!(player.notice(), Some("Не удалось воспроизвести файл"));
+
+        let path = root.join(format!("home-music-recovery-{}.wav", std::process::id()));
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        player.load(&path.to_string_lossy()).unwrap();
+        let recovered = wait_until(&mut player, |state| state.phase == PlaybackPhase::Playing);
+        assert!(recovered.seekable);
+        assert!(recovered.duration_s > 1.0);
+        assert!(player.notice().is_none());
+        player.stop();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_http_media_does_not_expose_url_or_cookie() {
+        let url = format!("{}?token=private-token", serve_wav(b"not audio".to_vec()));
+        let mut player = open_null();
+        player.load_cookie(&url, "private-session").unwrap();
+        wait_until(&mut player, |state| state.phase == PlaybackPhase::Error);
+        assert_eq!(player.notice(), Some("Не удалось воспроизвести файл"));
+        assert!(!player.take_natural_end());
+    }
+
+    #[test]
+    fn replacing_playback_clears_old_timing_and_honors_pause_during_load() {
+        let path = std::env::temp_dir().join(format!(
+            "home-music-replacement-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&mut player, |state| state.position_s > 0.05);
+        player.load(&path.to_string_lossy()).unwrap();
+        let loading = player.snapshot();
+        assert_eq!(loading.phase, PlaybackPhase::Loading);
+        assert_eq!(loading.position_s, 0.0);
+        assert_eq!(loading.duration_s, 0.0);
+        assert!(!loading.seekable);
+        assert!(!player.is_idle());
+        player.toggle();
+        let paused = wait_until(&mut player, |state| state.phase == PlaybackPhase::Paused);
+        assert!(!paused.playing);
+        assert!(paused.duration_s > 1.0);
+        assert!(!player.take_natural_end());
+        player.set_paused(false);
+        wait_until(&mut player, |state| state.phase == PlaybackPhase::Playing);
+        player.stop();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stop_before_draining_a_finished_load_never_advances() {
+        let path = std::env::temp_dir().join(format!(
+            "home-music-stop-pending-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, tone_wav(0.1)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        player.stop();
+        assert!(!player.take_natural_end());
+        let stopped = player.snapshot();
+        assert_eq!(stopped.phase, PlaybackPhase::Stopped);
+        assert!(!stopped.seekable);
+        assert!(!stopped.playing);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn active_playback_does_not_require_a_duration_and_pause_beats_cache_wait() {
+        assert_eq!(active_phase(false, false), PlaybackPhase::Playing);
+        assert_eq!(active_phase(false, true), PlaybackPhase::Buffering);
+        assert_eq!(active_phase(true, true), PlaybackPhase::Paused);
+        assert_eq!(active_phase(true, false), PlaybackPhase::Paused);
+    }
+
+    #[test]
+    fn replacing_a_finished_file_discards_its_pending_natural_end() {
+        let path = std::env::temp_dir().join(format!(
+            "home-music-replace-ended-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, tone_wav(0.5)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&mut player, |state| state.phase == PlaybackPhase::Playing);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !flag(player.mpv.as_ref().unwrap(), "idle-active").unwrap_or(false) {
+            assert!(Instant::now() < deadline, "file did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // EOF is now pending, but an explicit replacement must win over it.
+        player.load(&path.to_string_lossy()).unwrap();
+        player.set_paused(true);
+        wait_until(&mut player, |state| state.phase == PlaybackPhase::Paused);
+        assert!(!player.take_natural_end());
+        player.stop();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn paused_restore_beyond_end_never_advances_the_queue() {
+        let path = std::env::temp_dir().join(format!(
+            "home-music-resume-ended-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, tone_wav(0.25)).unwrap();
+        let mut player = open_null();
+        player.load_cookie_at(&path.to_string_lossy(), "", 10.0, true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(!player.take_natural_end(), "paused restore advanced queue");
+            let state = player.snapshot();
+            assert!(!state.playing, "{state:?}");
+            if state.phase != PlaybackPhase::Loading {
+                break;
+            }
+            assert!(Instant::now() < deadline, "restore never completed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        player.stop();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restoring_at_position_is_paused_before_open_and_normal_load_resets_start() {
+        let path = std::env::temp_dir().join(format!(
+            "home-music-resume-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, tone_wav(4.0)).unwrap();
+        let mut player = open_null();
+        player.load_cookie_at(&path.to_string_lossy(), "", 1.5, true).unwrap();
+        let loading = player.snapshot();
+        assert_eq!(loading.phase, PlaybackPhase::Loading);
+        assert!(!loading.playing);
+        assert_eq!(flag(player.mpv.as_ref().unwrap(), "pause"), Some(true));
+        assert_eq!(loading.duration_s, 0.0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let restored = loop {
+            assert!(!player.take_natural_end());
+            let state = player.snapshot();
+            assert!(!state.playing, "restore briefly played: {state:?}");
+            if state.phase == PlaybackPhase::Paused && state.position_s > 1.0 {
+                break state;
+            }
+            assert!(Instant::now() < deadline, "restore did not open: {state:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!((restored.position_s - 1.5).abs() < 0.15, "{restored:?}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!((player.snapshot().position_s - restored.position_s).abs() < 0.01);
+        player.load(&path.to_string_lossy()).unwrap();
+        let started = wait_until(&mut player, |state| state.phase == PlaybackPhase::Playing);
+        assert!(started.position_s < 0.5, "{started:?}");
+        assert_eq!(flag(player.mpv.as_ref().unwrap(), "pause"), Some(false));
+        player.stop();
+        std::fs::remove_file(path).unwrap();
     }
 
     fn serve_wav(body: Vec<u8>) -> String {

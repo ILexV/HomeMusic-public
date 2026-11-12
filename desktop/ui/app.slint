@@ -33,6 +33,11 @@ export component AppWindow inherits Window {
     in-out property <bool> has-cover: false;
     in-out property <float> position;
     in-out property <float> duration;
+    in-out property <float> track-duration;
+    in-out property <string> playback-message;
+    in-out property <bool> playback-busy;
+    in-out property <bool> playback-error;
+    in-out property <bool> seek-enabled;
     in-out property <float> volume;
     in-out property <[float]> wave;
     in-out property <bool> eq-on;
@@ -46,6 +51,22 @@ export component AppWindow inherits Window {
     in-out property <[ArtistItem]> artists;
     in-out property <[AlbumItem]> albums;
     in-out property <string> search;
+    in-out property <string> queue-search;
+    in-out property <bool> queue-busy;
+    in-out property <string> queue-error;
+    in-out property <bool> library-busy;
+    in-out property <string> library-error;
+    in-out property <bool> catalog-busy;
+    in-out property <bool> album-open;
+    in-out property <string> album-title;
+    in-out property <string> album-artist;
+    in-out property <image> album-cover;
+    in-out property <bool> album-has-cover;
+    in-out property <[QueueItem]> album-tracks;
+    in-out property <string> album-total;
+    in-out property <bool> album-busy;
+    in-out property <string> album-error;
+    in-out property <string> album-note;
     in-out property <bool> liked;
     in-out property <bool> disliked;
     in-out property <bool> album-known;
@@ -75,6 +96,14 @@ export component AppWindow inherits Window {
     callback set-band(int, float);
     callback reset-eq();
     callback search-edited(string);
+    callback queue-search-edited(string);
+    callback move-queue-row(int, int);
+    callback remove-queue-row(int);
+    callback queue-row-next(int);
+    callback close-album();
+    callback album-play();
+    callback album-enqueue();
+    callback album-play-row(int);
     callback pick-artist(int);
     callback open-album(int);
     callback toggle-like();
@@ -172,6 +201,10 @@ export component AppWindow inherits Window {
                         volume: root.volume;
                         wave: root.wave;
                         playing: root.playing;
+                        playback-message: root.playback-message;
+                        playback-busy: root.playback-busy;
+                        playback-error: root.playback-error;
+                        seek-enabled: root.seek-enabled;
                         play-pause => { root.play-pause(); }
                         stop => { root.stop(); }
                         prev => { root.prev(); }
@@ -201,6 +234,32 @@ export component AppWindow inherits Window {
                         volume: root.volume;
                         wave: root.wave;
                         playing: root.playing;
+                        playback-message: root.playback-message;
+                        playback-busy: root.playback-busy;
+                        playback-error: root.playback-error;
+                        seek-enabled: root.seek-enabled;
+                        queue-search <=> root.queue-search;
+                        queue-busy: root.queue-busy;
+                        queue-error: root.queue-error;
+                        catalog-busy: root.catalog-busy;
+                        album-open: root.album-open;
+                        album-title: root.album-title;
+                        album-artist: root.album-artist;
+                        album-cover: root.album-cover;
+                        album-has-cover: root.album-has-cover;
+                        album-tracks: root.album-tracks;
+                        album-total: root.album-total;
+                        album-busy: root.album-busy;
+                        album-error: root.album-error;
+                        album-note: root.album-note;
+                        queue-search-edited(text) => { root.queue-search-edited(text); }
+                        move-queue-row(from, to) => { root.move-queue-row(from, to); }
+                        remove-queue-row(index) => { root.remove-queue-row(index); }
+                        queue-row-next(index) => { root.queue-row-next(index); }
+                        close-album => { root.close-album(); }
+                        album-play => { root.album-play(); }
+                        album-enqueue => { root.album-enqueue(); }
+                        album-play-row(index) => { root.album-play-row(index); }
                         queue: root.queue;
                         queue-title: root.queue-title;
                         queue-total: root.queue-total;
@@ -242,6 +301,34 @@ export component AppWindow inherits Window {
                         volume: root.volume;
                         wave: root.wave;
                         playing: root.playing;
+                        playback-message: root.playback-message;
+                        playback-busy: root.playback-busy;
+                        playback-error: root.playback-error;
+                        seek-enabled: root.seek-enabled;
+                        queue-search <=> root.queue-search;
+                        queue-busy: root.queue-busy;
+                        queue-error: root.queue-error;
+                        library-busy: root.library-busy;
+                        library-error: root.library-error;
+                        catalog-busy: root.catalog-busy;
+                        album-open: root.album-open;
+                        album-title: root.album-title;
+                        album-artist: root.album-artist;
+                        album-cover: root.album-cover;
+                        album-has-cover: root.album-has-cover;
+                        album-tracks: root.album-tracks;
+                        album-total: root.album-total;
+                        album-busy: root.album-busy;
+                        album-error: root.album-error;
+                        album-note: root.album-note;
+                        queue-search-edited(text) => { root.queue-search-edited(text); }
+                        move-queue-row(from, to) => { root.move-queue-row(from, to); }
+                        remove-queue-row(index) => { root.remove-queue-row(index); }
+                        queue-row-next(index) => { root.queue-row-next(index); }
+                        close-album => { root.close-album(); }
+                        album-play => { root.album-play(); }
+                        album-enqueue => { root.album-enqueue(); }
+                        album-play-row(index) => { root.album-play-row(index); }
                         queue: root.queue;
                         queue-title: root.queue-title;
                         queue-total: root.queue-total;

@@ -1,0 +1,66 @@
+import { CoverArt, EmptyNote, EqButton, QueueRow, ScrollPort, Theme } from "theme.slint";
+import { QueueItem } from "types.slint";
+
+export component AlbumDetail inherits Rectangle {
+    in property <string> album-title;
+    in property <string> album-artist;
+    in property <image> album-cover;
+    in property <bool> album-has-cover;
+    in property <[QueueItem]> album-tracks;
+    in property <string> album-total;
+    in property <bool> album-busy;
+    in property <string> album-error;
+    in property <string> album-note;
+    in property <bool> compact;
+    callback close-album();
+    callback album-play();
+    callback album-enqueue();
+    callback album-play-row(int);
+    private property <bool> can-play: !root.album-busy && root.album-error == "" && root.album-tracks.length > 0;
+    vertical-stretch: 1;
+    min-height: root.compact ? 160px : 240px;
+
+    VerticalLayout {
+        spacing: root.compact ? 5px : 10px;
+        HorizontalLayout {
+            height: 28px;
+            EqButton { label: "← Назад"; clicked => { root.close-album(); } }
+            Text { text: "АЛЬБОМ"; color: Theme.dim; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; horizontal-stretch: 1; }
+        }
+        HorizontalLayout {
+            height: root.compact ? 56px : 104px;
+            spacing: root.compact ? 10px : 16px;
+            CoverArt { width: root.compact ? 56px : 104px; height: self.width; cover: root.album-cover; has-cover: root.album-has-cover; mark: root.compact ? 28px : 48px; }
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                Text { text: root.album-title; color: Theme.text; font-size: root.compact ? 16px : 22px; font-weight: 600; overflow: elide; }
+                Text { text: root.album-artist; color: Theme.muted; font-size: 12px; overflow: elide; }
+                Text { text: root.album-total; color: Theme.dim; font-size: 11px; overflow: elide; }
+            }
+        }
+        HorizontalLayout {
+            height: 28px;
+            spacing: 8px;
+            alignment: start;
+            EqButton { label: "Играть"; active: true; enabled: root.can-play; tip: "Заменить очередь и играть альбом"; clicked => { root.album-play(); } }
+            EqButton { label: "+ В очередь"; enabled: root.can-play; tip: "Добавить альбом в конец очереди"; clicked => { root.album-enqueue(); } }
+        }
+        if root.album-note != "" && !root.album-busy && root.album-error == "" : Text {
+            text: root.album-note; color: Theme.orange; font-size: 11px; wrap: word-wrap;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 28px;
+            if root.album-busy : EmptyNote { message: "Загрузка альбома…"; }
+            if !root.album-busy && root.album-error != "" : EmptyNote { message: root.album-error; error: true; }
+            if !root.album-busy && root.album-error == "" && root.album-tracks.length == 0 : EmptyNote { message: "В альбоме нет треков"; }
+            if root.can-play : ScrollPort {
+                for item[index] in root.album-tracks : QueueRow {
+                    item: item;
+                    clicked => { root.album-play-row(index); }
+                }
+            }
+        }
+    }
+}

@@ -1,4 +1,4 @@
-import { EqButton, Glyph, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { EqButton, Glyph, PlaybackStatus, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
@@ -10,6 +10,10 @@ export component Mini inherits Rectangle {
     in property <float> volume;
     in property <[float]> wave;
     in property <bool> playing;
+    in property <string> playback-message;
+    in property <bool> playback-busy;
+    in property <bool> playback-error;
+    in property <bool> seek-enabled;
     in property <bool> eq-on;
     in property <bool> liked;
     in property <bool> disliked;
@@ -28,9 +32,9 @@ export component Mini inherits Rectangle {
     VerticalLayout {
         padding-left: 14px;
         padding-right: 14px;
-        padding-top: 7px;
-        padding-bottom: 7px;
-        spacing: 6px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 2px;
         alignment: center;
 
         HorizontalLayout {
@@ -65,13 +69,19 @@ export component Mini inherits Rectangle {
                 horizontal-stretch: 0;
             }
         }
+        PlaybackStatus {
+            message: root.playback-message;
+            busy: root.playback-busy;
+            error: root.playback-error;
+        }
 
         SeekBar {
-            bar-height: 32px;
+            bar-height: 24px;
             vertical-stretch: 0;
             position: root.position;
             duration: root.duration;
             wave: root.wave;
+            seek-enabled: root.seek-enabled;
             seek(ratio) => { root.seek(ratio); }
         }
 

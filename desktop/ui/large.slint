@@ -1,4 +1,6 @@
-import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, QueueRow, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { AlbumDetail } from "album.slint";
+import { QueueView } from "queue.slint";
 import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
 
 component NavigationItem inherits Rectangle {
@@ -162,6 +164,34 @@ export component Large inherits Rectangle {
     in property <[ArtistItem]> artists;
     in property <[AlbumItem]> albums;
     in-out property <string> search;
+    in-out property <string> queue-search;
+    in property <bool> queue-busy;
+    in property <string> queue-error;
+    in property <bool> library-busy;
+    in property <string> library-error;
+    in property <bool> catalog-busy;
+    in property <string> playback-message;
+    in property <bool> playback-busy;
+    in property <bool> playback-error;
+    in property <bool> seek-enabled;
+    in property <bool> album-open;
+    in property <string> album-title;
+    in property <string> album-artist;
+    in property <image> album-cover;
+    in property <bool> album-has-cover;
+    in property <[QueueItem]> album-tracks;
+    in property <string> album-total;
+    in property <bool> album-busy;
+    in property <string> album-error;
+    in property <string> album-note;
+    callback queue-search-edited(string);
+    callback move-queue-row(int, int);
+    callback remove-queue-row(int);
+    callback queue-row-next(int);
+    callback close-album();
+    callback album-play();
+    callback album-enqueue();
+    callback album-play-row(int);
     callback play-pause();
     callback stop();
     callback prev();
@@ -222,13 +252,13 @@ export component Large inherits Rectangle {
                     spacing: 8px;
                     cross-axis-alignment: center;
                     SearchField {
-                        hint: root.catalog-open ? "Найти музыку в сети" : "Поиск по библиотеке";
+                        hint: root.catalog-open ? "Найти музыку в сети" : (root.home-page == "taste" ? "Найти исполнителя" : "Поиск по библиотеке");
                         text <=> root.search;
                         edited(text) => { root.search-edited(text); }
                     }
                     EqButton { label: "В сети"; tip: "Переключить поиск в сети"; active: root.catalog-open; clicked => { root.toggle-catalog(); } }
                 }
-                Text {
+                if !root.album-open : Text {
                     height: 26px;
                     text: root.catalog-open ? "Поиск в сети" : (root.home-open ? root.home-title : "Исполнители и альбомы");
                     color: Theme.text;
@@ -237,20 +267,40 @@ export component Large inherits Rectangle {
                     overflow: elide;
                     vertical-alignment: center;
                 }
-                if root.catalog-open : VerticalLayout {
+                if root.album-open : AlbumDetail {
+                    album-title: root.album-title;
+                    album-artist: root.album-artist;
+                    album-cover: root.album-cover;
+                    album-has-cover: root.album-has-cover;
+                    album-tracks: root.album-tracks;
+                    album-total: root.album-total;
+                    album-busy: root.album-busy;
+                    album-error: root.album-error;
+                    album-note: root.album-note;
+                    close-album => { root.close-album(); }
+                    album-play => { root.album-play(); }
+                    album-enqueue => { root.album-enqueue(); }
+                    album-play-row(index) => { root.album-play-row(index); }
+                }
+                if !root.album-open && !root.catalog-open && (root.library-busy || root.library-error != "") : Rectangle {
+                    vertical-stretch: 1;
+                    EmptyNote { message: root.library-busy ? "Загрузка библиотеки…" : root.library-error; error: !root.library-busy; }
+                }
+                if !root.album-open && root.catalog-open : VerticalLayout {
                     vertical-stretch: 1;
                     spacing: 8px;
                     Text { text: root.catalog-note; color: Theme.muted; font-size: 12px; overflow: elide; }
                     Rectangle {
                         vertical-stretch: 1;
                         min-height: 40px;
-                        if root.hits.length == 0 : EmptyNote { message: "Ничего не найдено"; }
-                        if root.hits.length > 0 : ScrollPort {
+                        if root.catalog-busy : EmptyNote { message: "Поиск в сети…"; }
+                        if !root.catalog-busy && root.hits.length == 0 : EmptyNote { message: root.catalog-note; }
+                        if !root.catalog-busy && root.hits.length > 0 : ScrollPort {
                             for hit[index] in root.hits : CatalogRow { hit: hit; clicked => { root.pick-hit(index); } }
                         }
                     }
                 }
-                if !root.catalog-open && root.home-open && root.home-page == "home" : Rectangle {
+                if !root.album-open && !root.library-busy && root.library-error == "" && !root.catalog-open && root.home-open && root.home-page == "home" : Rectangle {
                     vertical-stretch: 1;
                     min-height: 40px;
                     ScrollPort {
@@ -285,26 +335,30 @@ export component Large inherits Rectangle {
                         }
                     }
                 }
-                if !root.catalog-open && root.home-open && root.home-page != "home" : Rectangle {
+                if !root.album-open && !root.library-busy && root.library-error == "" && !root.catalog-open && root.home-open && root.home-page != "home" : Rectangle {
                     vertical-stretch: 1;
                     min-height: 40px;
-                    if root.home-rows.length == 0 : EmptyNote { message: "Загрузка…"; }
+                    if root.home-rows.length == 0 : EmptyNote { message: "Здесь пока пусто"; }
                     ScrollPort {
+                        if root.home-notice != "" : Text { text: root.home-notice; color: Theme.orange; font-size: 12px; wrap: word-wrap; }
                         for row in root.home-rows : Rectangle {
-                            height: row.kind == "section" ? 36px : (row.kind == "note" ? max(52px, detail-text.preferred-height + 20px) : 56px);
-                            background: row.accent ? #e8872a18 : (home-touch.has-hover && row.kind != "section" && row.kind != "note" ? Theme.raised : transparent);
+                            height: row.kind == "section" ? 36px : (row.kind == "note" ? max(32px, detail-text.preferred-height + 16px) : (row.kind == "mode" || row.kind == "taste" || row.detail != "" ? 48px : 36px));
+                            background: row.accent ? #e8872a18 : (home-touch.has-hover && home-touch.enabled ? Theme.raised : transparent);
                             border-radius: 4px;
                             HorizontalLayout {
                                 padding: 10px;
                                 spacing: 10px;
                                 cross-axis-alignment: center;
                                 if row.kind == "album" : CoverArt { width: 36px; height: 36px; cover: row.cover; has-cover: row.has-cover; mark: 20px; }
+                                if row.kind == "track" : Glyph { kind: "play"; tint: Theme.orange; }
+                                if row.kind == "taste" || row.kind == "mode" : Text { width: 18px; horizontal-stretch: 0; text: row.accent ? "✓" : "○"; color: row.accent ? Theme.orange : Theme.dim; font-size: 16px; }
                                 VerticalLayout {
+                                    horizontal-stretch: 1;
                                     alignment: center;
                                     spacing: 4px;
                                     detail-text := Text {
                                         text: row.title;
-                                        color: row.accent ? Theme.orange : (row.kind == "note" ? Theme.muted : Theme.text);
+                                        color: row.accent ? Theme.orange : (row.kind == "note" || row.kind == "disabled" ? Theme.muted : Theme.text);
                                         font-size: row.kind == "section" ? 14px : 13px;
                                         font-weight: row.kind == "section" ? 600 : 400;
                                         wrap: row.kind == "note" ? word-wrap : no-wrap;
@@ -314,14 +368,14 @@ export component Large inherits Rectangle {
                                 }
                             }
                             home-touch := TouchArea {
-                                enabled: row.kind != "section" && row.kind != "note";
+                                enabled: row.kind != "section" && row.kind != "note" && row.kind != "disabled";
                                 mouse-cursor: pointer;
                                 clicked => { root.pick-home(row.source); }
                             }
                         }
                     }
                 }
-                if !root.catalog-open && !root.home-open : HorizontalLayout {
+                if !root.album-open && !root.library-busy && root.library-error == "" && !root.catalog-open && !root.home-open : HorizontalLayout {
                     vertical-stretch: 1;
                     spacing: 12px;
                     Rectangle {
@@ -359,13 +413,20 @@ export component Large inherits Rectangle {
                 spacing: 8px;
                 Text { height: 24px; text: "Очередь"; color: Theme.text; font-size: 15px; font-weight: 600; vertical-alignment: center; }
                 Text { height: 20px; text: root.queue-title; color: Theme.orange; font-size: 12px; overflow: elide; }
-                Rectangle {
-                    vertical-stretch: 1;
-                    min-height: 40px;
-                    if root.queue.length == 0 : EmptyNote { message: "Очередь пуста"; }
-                    if root.queue.length > 0 : ScrollPort {
-                        for item in root.queue : QueueRow { item: item; clicked => { root.play-row(item.source); } }
-                    }
+                SearchField {
+                    hint: "Фильтр очереди";
+                    text <=> root.queue-search;
+                    edited(text) => { root.queue-search-edited(text); }
+                }
+                QueueView {
+                    queue: root.queue;
+                    busy: root.queue-busy;
+                    error: root.queue-error;
+                    filtered: root.queue-search != "";
+                    play-row(index) => { root.play-row(index); }
+                    move-queue-row(from, to) => { root.move-queue-row(from, to); }
+                    remove-queue-row(index) => { root.remove-queue-row(index); }
+                    queue-row-next(index) => { root.queue-row-next(index); }
                 }
                 Rectangle { height: 1px; background: Theme.line; }
                 Text { height: 20px; text: root.queue-total; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
@@ -391,10 +452,11 @@ export component Large inherits Rectangle {
                 VerticalLayout {
                     horizontal-stretch: 1;
                     spacing: 4px;
-                    SeekBar { inverted: true; bar-height: 32px; position: root.position; duration: root.duration; wave: root.wave; seek(ratio) => { root.seek(ratio); } }
+                    SeekBar { inverted: true; bar-height: 32px; position: root.position; duration: root.duration; wave: root.wave; seek-enabled: root.seek-enabled; seek(ratio) => { root.seek(ratio); } }
                     HorizontalLayout {
+                        spacing: 8px;
                         Text { text: root.time-label; color: #1b1b1b; font-size: 11px; }
-                        Rectangle { horizontal-stretch: 1; }
+                        PlaybackStatus { message: root.playback-message; busy: root.playback-busy; error: root.playback-error; inverted: true; }
                         Text { text: root.duration-label; color: #1b1b1b; font-size: 11px; }
                     }
                 }

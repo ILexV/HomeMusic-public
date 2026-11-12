@@ -52,16 +52,6 @@ impl ServerConfig {
         }
     }
 
-    /// Short status for the window. Never includes the password.
-    pub fn status_line(&self) -> String {
-        if !self.loaded {
-            return "Navidrome: нет config.toml".into();
-        }
-        if self.user.is_empty() || self.password.is_empty() {
-            return format!("Navidrome: в config.toml нет логина ({})", self.server);
-        }
-        format!("Navidrome: ждёт подключения к {}", self.server)
-    }
 }
 
 /// One library track ready for mpv. `stream_url` carries the Subsonic token.
@@ -770,7 +760,6 @@ mod tests {
         assert_eq!(cfg.server, "http://192.168.1.51:4533");
         assert_eq!(cfg.user, "lex");
         assert_eq!(cfg.password, "secret");
-        assert!(!cfg.status_line().contains("secret"));
         assert!(!format!("{cfg:?}").contains("secret"));
     }
 

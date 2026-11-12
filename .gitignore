@@ -53,3 +53,5 @@ desktop/dist/
 desktop/windows/
 desktop/config.toml
 desktop/window-place.toml
+desktop/playback-state.json
+desktop/playback-state.json.tmp
