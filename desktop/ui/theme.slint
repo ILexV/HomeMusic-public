@@ -103,6 +103,14 @@ export component Glyph inherits Rectangle {
         commands: "M 1 2 L 3 2 L 3 9 L 1 9 Z M 5 2 L 12 2 C 13 2 14 3 14 4 L 13 8 C 13 9 12 10 11 10 L 9 10 L 9 14 L 7 14 L 5 9 Z";
         fill: root.tint;
     }
+    if root.kind == "settings" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 6.622 3.194 L 6.784 1.106 L 9.216 1.106 L 9.378 3.194 L 10.424 3.627 L 12.015 2.266 L 13.734 3.985 L 12.373 5.576 L 12.806 6.622 L 14.894 6.784 L 14.894 9.216 L 12.806 9.378 L 12.373 10.424 L 13.734 12.015 L 12.015 13.734 L 10.424 12.373 L 9.378 12.806 L 9.216 14.894 L 6.784 14.894 L 6.622 12.806 L 5.576 12.373 L 3.985 13.734 L 2.266 12.015 L 3.627 10.424 L 3.194 9.378 L 1.106 9.216 L 1.106 6.784 L 3.194 6.622 L 3.627 5.576 L 2.266 3.985 L 3.985 2.266 L 5.576 3.627 Z M 8 5.5 C 6.619 5.5 5.5 6.619 5.5 8 C 5.5 9.381 6.619 10.5 8 10.5 C 9.381 10.5 10.5 9.381 10.5 8 C 10.5 6.619 9.381 5.5 8 5.5 Z";
+        fill: root.tint;
+    }
 }
 
 export component TransportButton inherits Rectangle {
@@ -151,6 +159,7 @@ export component TransportButton inherits Rectangle {
 
 export component TitleButton inherits Rectangle {
     in property <string> glyph;
+    in property <string> icon;
     in property <string> tip;
     callback clicked();
     width: 26px;
@@ -158,7 +167,7 @@ export component TitleButton inherits Rectangle {
     border-radius: 3px;
     background: touch.pressed ? Theme.raised : touch.has-hover ? #353535 : transparent;
 
-    Text {
+    if root.icon == "" : Text {
         width: 100%;
         height: 100%;
         text: root.glyph;
@@ -166,6 +175,12 @@ export component TitleButton inherits Rectangle {
         font-size: 12px;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+    if root.icon != "" : Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        kind: root.icon;
+        tint: touch.has-hover ? Theme.orange : Theme.text;
     }
 
     touch := TouchArea {

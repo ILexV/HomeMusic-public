@@ -181,7 +181,7 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
-                            TitleButton { glyph: "⋯"; tip: "Звук, очередь, офлайн, тексты и устройства"; clicked => { root.open-tools(); } }
+                            TitleButton { icon: "settings"; tip: "Настройки плеера и подключение"; clicked => { root.open-tools(); } }
                             ModeSwitch {
                                 mode: root.mode-index;
                                 set-mode(mode) => { root.set-mode(mode); }

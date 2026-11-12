@@ -1,4 +1,4 @@
-//! Account-scoped Hub session. Only explicit commands touch the existing player.
+//! Account-scoped Hub session. Observing another owner never fences local playback.
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -45,6 +45,7 @@ pub(crate) struct State {
     attach_pending: Cell<bool>,
     generation: Cell<u64>,
     claim_attempt: Cell<Option<u64>>,
+    participating: Cell<bool>,
 }
 
 pub(crate) fn bind(ctx: &Context, tools: &crate::ToolsWindow) -> Rc<State> {
@@ -61,6 +62,7 @@ pub(crate) fn bind(ctx: &Context, tools: &crate::ToolsWindow) -> Rc<State> {
         last_success: Cell::new(None), error: RefCell::new(String::new()),
         detached: Cell::new(false), attach_pending: Cell::new(false), generation: Cell::new(0),
         claim_attempt: Cell::new(None),
+        participating: Cell::new(false),
     });
     let weak = Rc::downgrade(&state);
     tools.on_devices_transfer(move |target| {
@@ -84,6 +86,7 @@ pub(crate) fn bind(ctx: &Context, tools: &crate::ToolsWindow) -> Rc<State> {
         if let Some(state) = weak.upgrade() {
             state.detached.set(true);
             state.attach_pending.set(false);
+            state.participating.set(false);
             state.generation.set(state.generation.get().wrapping_add(1));
             state.requests.borrow_mut().clear();
             state.commands.borrow_mut().clear();
@@ -199,7 +202,7 @@ impl State {
             let active = matches!(text(handoff, "phase"), "preparing" | "stopping" | "starting");
             (!owner.is_empty(), owner == self.device,
                 active && text(handoff, "target") == self.device,
-                handoff["recovery"].as_bool().unwrap_or(false) && text(handoff, "phase") != "done"
+                active && handoff["recovery"].as_bool().unwrap_or(false)
                     && text(handoff, "source") == self.device)
         };
         let lease_lost = self.last_success.get().is_some_and(|at| at.elapsed() > Duration::from_secs(12));
@@ -210,7 +213,8 @@ impl State {
             if let Some(pending) = pending { self.ack(&pending.command, Err("Связь потеряна во время команды".into())); }
             self.commands.borrow_mut().clear();
         }
-        if recovery_source || (has_owner && !is_owner && !handoff_target) {
+        let relinquished = relinquished_session(&self.participating, is_owner, handoff_target);
+        if recovery_source || relinquished {
             self.ctx.player.borrow_mut().set_paused(true);
             self.prepared.borrow_mut().take();
         }
@@ -309,7 +313,7 @@ impl State {
             "failed" => "Передача не выполнена. Повторите её или выберите отдельное локальное воспроизведение.",
             _ if owner.is_empty() => "Общая сессия ещё не создана",
             _ if owner == self.device => "Общая очередь играет на этом компьютере",
-            _ => "Управление другим устройством; нажмите «Здесь», чтобы продолжить на компьютере",
+            _ => "Общий сеанс на другом устройстве. Обычное воспроизведение здесь независимо; «Здесь» перенесёт общую очередь.",
         }).into());
         let snapshot = &view["state"];
         let index = snapshot["index"].as_u64().unwrap_or(0) as usize;
@@ -491,3 +495,44 @@ impl State {
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str { value[key].as_str().unwrap_or("") }
 fn epoch() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() }
+
+// A new process merely observes the previous owner's session. Fence only an
+// actual participant losing ownership/preparation, once; never every local Play.
+fn relinquished_session(participating: &Cell<bool>, owner: bool, target: bool) -> bool {
+    let active = owner || target;
+    participating.replace(active) && !active
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restarted_observer_does_not_pause_local_playback() {
+        let participating = Cell::new(false);
+        // Repeated heartbeats naming the old process (online or stale) cannot
+        // turn the new process's Play action back into Pause.
+        for _ in 0..20 {
+            assert!(!relinquished_session(&participating, false, false));
+        }
+    }
+
+    #[test]
+    fn completed_handoff_pauses_old_owner_only_once() {
+        let participating = Cell::new(false);
+        assert!(!relinquished_session(&participating, true, false));
+        assert!(relinquished_session(&participating, false, false));
+        // A subsequent explicit local Play is independent, not fenced again.
+        assert!(!relinquished_session(&participating, false, false));
+    }
+
+    #[test]
+    fn prepared_target_is_stopped_on_abort_but_not_on_ownership_commit() {
+        let participating = Cell::new(false);
+        assert!(!relinquished_session(&participating, false, true));
+        assert!(relinquished_session(&participating, false, false));
+        assert!(!relinquished_session(&participating, false, true));
+        assert!(!relinquished_session(&participating, true, false));
+        assert!(relinquished_session(&participating, false, false));
+    }
+}

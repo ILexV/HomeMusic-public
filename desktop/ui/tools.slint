@@ -136,7 +136,7 @@ export component ToolsWindow inherits Window {
                     height: 42px;
                     border-radius: 4px;
                     background: root.active-panel == index ? Theme.raised : (tab.has-hover ? #ffffff08 : transparent);
-                    if root.active-panel == index : Rectangle { width: 3px; height: 24px; y: 9px; background: Theme.orange; }
+                    if root.active-panel == index : Rectangle { x: 0px; width: 3px; height: 24px; y: 9px; background: Theme.orange; }
                     Text { x: 12px; width: parent.width - 20px; text: label; color: root.active-panel == index ? Theme.text : Theme.muted; vertical-alignment: center; font-size: 13px; }
                     tab := TouchArea { mouse-cursor: pointer; clicked => { root.active-panel = index; } }
                 }

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { errorMessage } from '../api/client';
 import { playbackRequest, type PlaybackAck, type PlaybackCommand, type PlaybackControl, type PlaybackSnapshot, type PlaybackView } from '../api/playback';
+import { newEventId } from './plays';
 
 export interface PlaybackAdapter {
   snapshot(): PlaybackSnapshot | null;
@@ -27,7 +28,7 @@ const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listen
 export function useSharedPlayback() {
   return useSyncExternalStore(subscribe, () => state);
 }
-const tabDeviceId = crypto.randomUUID();
+const tabDeviceId = newEventId();
 
 let runtime: Runtime | null = null;
 let activeAdapter: PlaybackAdapter | null = null;
