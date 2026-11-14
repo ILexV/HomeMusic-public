@@ -3,6 +3,7 @@ import { useRoute } from '../lib/router';
 import { canWave, startWave, useWave } from '../lib/wave';
 import { Icon } from './Icon';
 import { Spinner } from './ui';
+import { WavePreferenceControls } from './WavePreferences';
 
 /** «Моя волна» in the catalog, next to «Микс дня»: a tap starts the user's own endless stream. */
 export function WaveCard() {
@@ -14,6 +15,7 @@ export function WaveCard() {
   const on = playing && title === 'Моя волна';
 
   return (
+    <>
     <button
       type="button"
       onClick={() => void startWave(null, path.startsWith('/home') ? 'home_card' : 'catalog_card')}
@@ -32,5 +34,7 @@ export function WaveCard() {
       </span>
       {!busy && <Icon name={on ? 'refresh' : 'play'} size={22} className="shrink-0 text-accent" />}
     </button>
+    <WavePreferenceControls />
+    </>
   );
 }

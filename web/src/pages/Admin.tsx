@@ -48,6 +48,7 @@ export function AdminPage() {
       <ul className="mx-4 mb-3 overflow-hidden rounded-xl bg-surface">
         <InsightLink to="/admin/insights" icon="history" title="Аналитика пользователей" sub="прослушивания, миксы, волна по пользователям" />
         <InsightLink to="/admin/taste" icon="heart" title="Веса песен у всех" sub="песни × пользователи по профилю вкуса" />
+        <InsightLink to="/admin/system" icon="history" title="Состояние сервиса" sub="очередь, свободное место, резервные копии и фоновые задачи" />
       </ul>
 
       {d && (

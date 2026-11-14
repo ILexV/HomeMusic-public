@@ -93,7 +93,7 @@ impl State {
             prepared.revision != queue.revision() || prepared.current != current || prepared.next != next);
         if changed {
             let Some(item) = queue.peek_next() else { return; };
-            let full_only = ctx.hub.wave.borrow().on() || queue.row_index(next).and_then(|index| queue.recommendation(index)).is_some();
+            let full_only = ctx.hub.wave.borrow().on() || queue.context().starts_with("mix:") || queue.row_index(next).and_then(|index| queue.recommendation(index)).is_some();
             let Some((target, cookie)) = crate::item_target(item, &ctx.config, &ctx.hub, full_only) else { return; };
             let same_album = queue.current().is_some_and(|current| !current.album.is_empty()
                 && current.album == item.album && !current.artist.is_empty() && current.artist == item.artist);

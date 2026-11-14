@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel
@@ -67,6 +68,20 @@ class ProviderError(Exception):
 
 class ProviderUnavailable(ProviderError):
     """No healthy domain / service unreachable."""
+
+
+def staging_path(dest_dir: Path, suffix: str = "") -> Path:
+    """A server-generated file name, independent of any provider identifiers or titles."""
+    root = Path(dest_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return contained_path(root, root / f"audio_{uuid4().hex}{suffix}")
+
+
+def contained_path(dest_dir: Path, path: Path) -> Path:
+    root, path = Path(dest_dir).resolve(), Path(path).resolve()
+    if not path.is_relative_to(root) or path == root:
+        raise ProviderError("Provider output escaped its staging directory")
+    return path
 
 
 @runtime_checkable

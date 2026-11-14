@@ -34,7 +34,7 @@ export component QueueView inherits Rectangle {
         spacing: 2px;
         Text {
             height: 16px;
-            text: root.dragging ? "Отпустите на нужной строке" : "≡ перетащить · ↳ следующим · × убрать";
+            text: root.dragging ? "Отпустите на нужной строке" : "≡ перетащить · следующим · × убрать";
             color: root.dragging ? Theme.orange : Theme.dim;
             font-size: 10px;
             overflow: elide;
@@ -94,7 +94,7 @@ export component QueueView inherits Rectangle {
                     }
                     TitleButton {
                         x: parent.width - 48px; y: 9px; width: 24px;
-                        glyph: "↳"; tip: "Следующим после текущего";
+                        icon: "play-next"; tip: "Следующим после текущего";
                         clicked => { root.queue-row-next(item.source); }
                     }
                     TitleButton {

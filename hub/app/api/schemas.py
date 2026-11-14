@@ -344,7 +344,9 @@ class ProviderSearchOut(BaseModel):
 
 
 class DownloadTrackIn(BaseModel):
-    """A track to download. Either catalog data (artist/title + refs) or a concrete provider candidate."""
+    """Catalog metadata or a server-remembered provider file; never a client-supplied URL."""
+
+    model_config = {"extra": "forbid"}
 
     artist: str
     title: str
@@ -354,7 +356,7 @@ class DownloadTrackIn(BaseModel):
     explicit: bool | None = None
     version: str | None = None
     catalog_ref: str | None = None  # "dz:123" track ref (gives album/tags)
-    candidate: Candidate | None = None  # user picked this exact file (provider search)
+    file_ref: str | None = None  # file:<provider>:<id>, issued by provider search
 
 
 class DownloadIn(BaseModel):
@@ -393,6 +395,7 @@ class ListenOut(BaseModel):
     page_url: str | None = None
     nd_song_id: str | None = None  # "library": the Navidrome song (♥, the app's player)
     stream_url: str  # audio with Range support, same session cookie
+    recording_binding: str | None = None
 
 
 class ListenPrefetchIn(BaseModel):
@@ -573,10 +576,12 @@ class PlaylistAddIn(BaseModel):
 
 
 class AssistantChoice(BaseModel):
+    model_config = {"extra": "forbid"}
+
     kind: Literal["catalog", "library", "candidate", "manual", "skip"]
     ref: str | None = None  # catalog ref
     track_id: int | None = None  # library track
-    candidate: Candidate | None = None
+    file_ref: str | None = None
     artist: str | None = None  # manual
     title: str | None = None
 
@@ -746,14 +751,15 @@ class ImportPickOut(BaseModel):
 
 class HealthOut(BaseModel):
     ok: bool
-    navidrome: bool
+    navidrome: bool | None = None
     providers: dict[str, Any] = Field(default_factory=dict)
     version: str = "0.1.0"
     today: date | None = None
     # id of the PWA build the Hub serves (index.html <meta name="hm-build">); pages compare it with their own
     web_build: str | None = None
     capabilities: list[str] = ["typed_favorites_v1", "favorite_compensation_chains_v1", "catalog_favorite_download_v1",
-                               "listening_checkpoints_v1", "launch_events_v1", "wave_origin_v1", "smart_shuffle_v1"]
+                               "listening_checkpoints_v1", "launch_events_v1", "wave_origin_v1", "smart_shuffle_v1",
+                               "server_file_downloads_v1"]
 
 
 # --- listening data (MIXES.md 3.2) -------------------------------------------------------------------------------
@@ -888,6 +894,7 @@ class MixTrackOut(TrackOut):
     familiar: bool  # familiar to the user (their history or a well-known artist) or new
     score: float
     sim: float | None = None  # closeness to the taste by sound (the embedder), None — not known
+    explanation: list[str] = Field(default_factory=list)
 
 
 class MixOut(BaseModel):
@@ -898,6 +905,8 @@ class MixOut(BaseModel):
     mode_title: str
     created_at: datetime
     nd_playlist_id: str | None = None  # the Navidrome playlist «Микс дня» (the same id every day)
+    playlist_status: Literal["pending", "error", "published"] = "pending"
+    playlist_error: str | None = None
     ready: int  # songs in the library already (in the playlist)
     total: int
     tracks: list[MixTrackOut] = []
@@ -959,9 +968,22 @@ class WaveSeedIn(BaseModel):
         return self
 
 
+class WavePreferences(BaseModel):
+    energy: Literal["any", "calm", "energetic"] = "any"
+    vocals: Literal["any", "vocal", "instrumental"] = "any"
+    discovery: Literal["balanced", "familiar", "new"] = "balanced"
+
+
+class WavePreparation(BaseModel):
+    ready: int = Field(default=0, ge=0)
+    pending: int = Field(default=0, ge=0)
+    unavailable: int = Field(default=0, ge=0)
+
+
 class WaveStartIn(BaseModel):
     seed: WaveSeedIn | None = None  # none: the user's own wave, from the taste profile
     mode: MixMode | None = None  # the familiar share, as a mix's; none — the user's mix mode
+    preferences: WavePreferences | None = None
     # analytics only (INSIGHTS.md 6.3): where it was started (`home_card`, `track_menu`... `restart`), the client
     # ("pwa", "pwa-app", "app/<version>"), the session the app makes again after a 404
     origin: str | None = Field(default=None, max_length=32, pattern=ORIGIN_PATTERN)
@@ -974,6 +996,7 @@ class WaveNextIn(BaseModel):
     played: list[Any] = Field(default_factory=list, max_length=500)
     # refs (as `tracks[].ref`) of the wave's tracks the client still has ahead, not started: the answer replaces them
     queued: list[str] = Field(default_factory=list, max_length=50)
+    preferences: WavePreferences | None = None
 
 
 class WaveTrackOut(TrackOut):
@@ -985,6 +1008,7 @@ class WaveTrackOut(TrackOut):
     generator_title: str
     familiar: bool
     sim: float | None = None
+    explanation: list[str] = Field(default_factory=list)
 
 
 class WaveOut(BaseModel):
@@ -995,6 +1019,9 @@ class WaveOut(BaseModel):
     tracks: list[WaveTrackOut] = []  # the next ones (up to 5): they replace the client's `queued`
     pending: bool = False  # sources still answer: the pool grows (an empty `tracks` — ask again in a few seconds)
     recorded: PlayEventsOut | None = None  # what became of `played` (next only)
+    preferences: WavePreferences = Field(default_factory=WavePreferences)
+    preferences_status: str | None = None
+    preparation: WavePreparation = Field(default_factory=WavePreparation)
 
 
 # --- smart shuffle (MIXES.md 8) ------------------------------------------------------------------------------------

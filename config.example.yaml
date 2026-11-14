@@ -64,6 +64,8 @@ jobs:
 
 uploads:
   max_file_mb: 500
+  max_total_mb: 500  # aggregate file bytes per request; gateway allows 1 MiB extra for multipart framing
+  max_files: 100
   extensions: [mp3, m4a, aac, flac, ogg, opus, wav]
 
 library:

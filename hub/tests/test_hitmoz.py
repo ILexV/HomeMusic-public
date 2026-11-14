@@ -241,7 +241,7 @@ async def test_fetch_follows_redirect_to_cdn(provider, tmp_path):
     c = await provider.enrich(res[0])
     progress: list[float] = []
     path = await provider.fetch(c, tmp_path, on_progress=progress.append)
-    assert path == tmp_path / "hitmoz_79436285.mp3"
+    assert path.parent == tmp_path and path.name.startswith("audio_") and path.suffix == ".mp3"
     assert path.read_bytes()[:3] == b"ID3" and path.stat().st_size == len(MP3)
     assert not list(tmp_path.glob("*.part"))
     assert file.called and progress[-1] == 1.0
@@ -275,3 +275,20 @@ async def test_fetch_never_uses_cuts(provider, tmp_path):
         respx.get(f"{BASE}/song/1").mock(return_value=httpx.Response(200, text="<h1 class='p-track-title'>a - b</h1>"))
         with pytest.raises(ProviderError):
             await provider.fetch(c, tmp_path)
+
+
+@respx.mock
+async def test_provider_id_cannot_choose_download_path(provider, tmp_path):
+    url = f"{BASE}/get/music/20250814/x_1.mp3"
+    respx.get(url).mock(return_value=httpx.Response(200, content=MP3, headers={"Content-Type": "audio/mpeg"}))
+    candidate = Candidate(provider="hitmoz", provider_id="../../outside", artist="a", title="b",
+                          page_url="x", download_url=url)
+    path = await provider.fetch(candidate, tmp_path)
+    assert path.parent == tmp_path and path.name.startswith("audio_")
+    assert path.read_bytes() == MP3
+
+
+async def test_enrich_rejects_path_as_provider_id(provider):
+    candidate = Candidate(provider="hitmoz", provider_id="../admin", artist="a", title="b", page_url="x")
+    with pytest.raises(ProviderError, match="идентификатор"):
+        await provider.enrich(candidate)

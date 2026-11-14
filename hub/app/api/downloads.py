@@ -121,7 +121,7 @@ async def create_batch(
         if c is None:
             raise HTTPException(404, "Файл не найден: повторите поиск")
         items.append(DownloadTrackIn(artist=c.artist, title=c.title, duration_s=c.duration_s, explicit=c.explicit,
-                                     candidate=c))
+                                     file_ref=ref))
     track_refs = [r for r in track_refs if not listen.is_file_ref(r)]
     batch = DownloadBatch(user_id=user.id, origin=origin, title=title or body.new_playlist_name,
                           target_playlist_id=playlist_id)
@@ -131,6 +131,13 @@ async def create_batch(
     entries = []
     owned = 0
     for it in items:
+        candidate = None
+        if it.file_ref:
+            if not listen.is_file_ref(it.file_ref):
+                raise HTTPException(400, "Нужна ссылка file:<provider>:<id>")
+            candidate = await listen.file_candidate(it.file_ref)
+            if candidate is None:
+                raise HTTPException(404, "Файл не найден: повторите поиск")
         q = TrackQuery(artist=it.artist, title=it.title, album=it.album, duration_s=it.duration_s, isrc=it.isrc,
                        explicit=it.explicit, version=it.version)
         meta: dict = {}
@@ -143,9 +150,9 @@ async def create_batch(
             s, artist=q.artist, title=q.title, duration_s=q.duration_s, isrc=q.isrc,
             deezer_track_id=meta.get("deezer_track_id"))
         # a picked file the library has not got is downloaded next to the song's older version (`jobs.downloads`)
-        if have and (it.candidate is None or have.source_url == it.candidate.page_url):
+        if have and (candidate is None or have.source_url == candidate.page_url):
             owned += 1
-        entries.append((q, meta, it.candidate))
+        entries.append((q, meta, candidate))
     queued = await create_items(s, batch, entries, force=body.force, star=body.star, favorite_events=favorite_events)
 
     expanding = bool(track_refs or body.album_ref or body.artist_ref)
@@ -177,7 +184,8 @@ async def create_batch(
 async def create(body: DownloadIn, user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
     if not (body.items or body.track_refs or body.album_ref or body.artist_ref):
         raise HTTPException(400, "Нечего скачивать")
-    origin = "search" if body.items and all(i.candidate for i in body.items) else "catalog"
+    origin = "search" if (body.items and all(i.file_ref for i in body.items)) or (
+        body.track_refs and all(listen.is_file_ref(ref) for ref in body.track_refs)) else "catalog"
     out = await create_batch(s, user, body, origin=origin)
     await s.commit()
     notify()

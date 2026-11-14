@@ -162,3 +162,23 @@ async def test_online_v2_adapter_loads_batches_without_network_or_writes(db_file
         assert p.tracks["nd:album-song"].album_liked and p.tracks["nd:album-song"].score == 0
     finally:
         await dispose()
+
+
+def test_observed_replay_keeps_unknown_policy_audio_and_adjacent_sample_sizes(db_file):
+    from app.matching.replay_quality import observed_quality
+    seed_db(db_file, [
+        ev("complete", context="wave:missing", at=NOW - timedelta(days=1)),
+        ev("previous", "skip", context="wave:missing", at=NOW - timedelta(days=35), position_s=4),
+        ev("not-yet-received", context="wave:missing", at=NOW - timedelta(days=2),
+           received_at=NOW + timedelta(days=1)),
+        replace(ev("other-account", context="wave:missing"), user_id=2),
+    ])
+    with readonly_db(db_file) as connection:
+        report = observed_quality(connection, user_id=1, until=NOW)
+    assert report["eligible_plays"] == 1 and report["completion_rate"] == 1
+    assert report["comparison"]["previous"]["eligible_plays"] == 1
+    assert report["comparison"]["previous"]["early_skip_rate"] == 1
+    assert report["policy_cohorts"][0]["policy_version"] == "unknown"
+    assert report["recordings"]["observations"] == 0 and report["recordings"]["rate"] is None
+    assert report["unavailable_events"] == 1
+    assert report["comparison"]["current"]["since"] == report["comparison"]["previous"]["until"]

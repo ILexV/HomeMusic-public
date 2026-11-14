@@ -890,6 +890,8 @@ function mixOut(mix = curMix) {
     mode_title: MIX_MODES[mode],
     created_at: mix.created_at,
     nd_playlist_id: 'pl-mix',
+    playlist_status: 'published',
+    playlist_error: null,
     ready: tracks.filter((t) => t.owned).length,
     total: tracks.length,
     tracks,
@@ -953,6 +955,35 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
     return send(res, 200, { id: 5, username: String(b.username), is_admin: false, public_music_url: 'https://203.0.113.10:8444' }), true;
   }
   if (!authed) return send(res, 401, { detail: 'Требуется вход' }), true;
+
+  if (p === '/api/system/health' && m === 'GET') {
+    return send(res, 200, {
+      ok: true, status: 'ok', navidrome: true,
+      components: { database: 'ok', navidrome: 'ok', workers: 'ok', embedder: 'disabled' },
+      queue: { status: 'ok', counts: { queued: 2 }, oldest_age_seconds: { queued: 30 } },
+      disk: { music: { status: 'ok', free_bytes: 10 * 1024 ** 3, total_bytes: 100 * 1024 ** 3 } },
+      backups: { external_enabled: false }, background: { status: 'ok', tasks: {} },
+    }), true;
+  }
+  if (p === '/api/recommendations/quality' && m === 'GET') {
+    const days = Number(url.searchParams.get('days')) || 30;
+    const until = now();
+    const since = new Date(Date.parse(until) - days * 86400_000).toISOString();
+    const empty = { attempts: 0, eligible_plays: 0, completed: 0, early_skips: 0,
+      completion_rate: null, early_skip_rate: null, policy_cohorts: [] };
+    return send(res, 200, {
+      ...empty, days, since, until, metric_version: 'mock-empty', provenance: 'dev mock without listening history',
+      starts: 0, playback_errors: 0, interrupted: 0, new_track_plays: 0, new_track_likes: 0, repeats: 0,
+      new_track_like_rate: null, repeat_rate: null, sources: [], limitations: ['Демонстрационный режим: истории прослушиваний нет.'],
+      comparison: {
+        current: { ...empty, since, until },
+        previous: { ...empty, since: new Date(Date.parse(since) - days * 86400_000).toISOString(), until: since },
+        limitations: ['Нет данных для сравнения.'],
+      },
+      recordings: { metric_version: 'mock-empty', observations: 0, known: 0, full: 0, not_full: 0, unknown: 0,
+        rate: null, provenance: [], limitations: ['Проверки полных записей не выполнялись.'] },
+    }), true;
+  }
 
   // Deterministic QA controls; these routes exist only in the dev mock.
   if (p === '/api/mock/favorites') {
@@ -1199,6 +1230,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
     return send(res, 200, { ...r, playlist_id }), true;
   }
   if (p === '/api/downloads' && m === 'GET') return send(res, 200, downloads.map(dlOut)), true;
+  if (p === '/api/downloads/page' && m === 'GET') {
+    const visible = downloads.map(dlOut).filter((d) => !d.star).sort((a, b) => b.id - a.id);
+    const active: Record<string, true> = { queued: true, searching: true, downloading: true, tagging: true, importing: true };
+    const counts = {
+      all: visible.length,
+      active: visible.filter((d) => active[d.status]).length,
+      problems: visible.filter((d) => d.status === 'failed' || d.status === 'needs_review').length,
+      finished: visible.filter((d) => d.status === 'done' || d.status === 'cancelled').length,
+    };
+    const filter = url.searchParams.get('filter') || 'all';
+    const before = Number(url.searchParams.get('before_id')) || Infinity;
+    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
+    const rows = visible.filter((d) => d.id < before && (filter === 'active' ? active[d.status] : filter === 'problems' ? d.status === 'failed' || d.status === 'needs_review' : true));
+    const items = rows.slice(0, limit);
+    return send(res, 200, { items, next_cursor: rows.length > limit ? items.at(-1)!.id : null, counts }), true;
+  }
   if (p === '/api/downloads/clear') {
     const before = downloads.length;
     downloads = downloads.filter((d) => d.status !== 'done' && d.status !== 'cancelled');

@@ -295,7 +295,7 @@ impl Queue {
     /// Only the actual launch source may provide this, never a display title.
     pub fn set_context(&mut self, context: impl Into<String>) {
         let context = context.into();
-        self.context = if context == "liked" || context.strip_prefix("playlist:").is_some_and(|id| !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_whitespace)) { context } else { String::new() };
+        self.context = if context == "liked" || ["playlist:", "mix:", "wave:"].iter().any(|prefix| context.strip_prefix(*prefix).is_some_and(|id| !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_whitespace))) { context } else { String::new() };
         self.revision = next_revision();
     }
 

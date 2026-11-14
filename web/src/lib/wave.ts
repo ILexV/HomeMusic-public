@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { ApiError, api, errorMessage } from '../api/client';
-import type { PlayEventIn, WaveOrigin, WaveOut, WaveSeedIn, WaveTrackOut } from '../api/types';
+import type { PlayEventIn, WaveOrigin, WaveOut, WavePreferences, WaveSeedIn, WaveTrackOut } from '../api/types';
 import { EMBEDDED } from './embedded';
 import { getListenState, listenAll, replaceUpcoming, type ListenTrack } from './listen';
 import { canPlayAll, canPlayWave, playWave } from './player';
@@ -30,6 +30,11 @@ const RETRY_MS = 4000;
 
 interface Session {
   id: string;
+  preferences: WavePreferences;
+  requestedPreferences?: WavePreferences;
+  preferencesStatus: string | null;
+  preparation: WaveOut['preparation'] | null;
+  error: string | null;
   title: string;
   context: string;
   refs: Set<string>;
@@ -44,13 +49,47 @@ interface Session {
 let session: Session | null = null;
 let sessionAccount: number | null = null;
 const SESSION_KEY = 'hm-wave-session:';
+export const DEFAULT_WAVE_PREFERENCES: WavePreferences = { energy: 'any', vocals: 'any', discovery: 'balanced' };
+let startPreferences = { ...DEFAULT_WAVE_PREFERENCES };
+let generation = 0;
+let startStatus: string | null = null;
+let startPreparation: WaveOut['preparation'] | null = null;
+let pendingStart: { id: string; seed: string; track: ListenTrack | null; context: string } | null = null;
 let starting: string | null = null; // the seed being started ('' — the user's own wave)
 const subscribers = new Set<() => void>();
-let snapshot: { title: string | null; starting: string | null } = { title: null, starting: null };
+let snapshot = waveSnapshot();
+
+function waveSnapshot() {
+  return { id: session?.id ?? null, title: session?.title ?? null, starting,
+    preferences: session?.preferences ?? startPreferences,
+    startPreferences,
+    preferencesStatus: session?.preferencesStatus ?? startStatus,
+    preparation: session?.preparation ?? startPreparation,
+    updating: !!session?.requestedPreferences, error: session?.error ?? null };
+}
+
+export function setStartPreferences(preferences: WavePreferences) {
+  startPreferences = preferences;
+  emit();
+}
+
+/** Only the server's upcoming choices change; the current audio element is untouched. */
+export function updateWavePreferences(preferences: WavePreferences) {
+  const s = session;
+  if (!s || getListenState().context !== s.context) return;
+  s.requestedPreferences = preferences;
+  s.error = null;
+  emit();
+  void ask();
+}
+
+export function refreshWaveRecommendations() {
+  if (session && getListenState().context === session.context) void ask();
+}
 
 function emit() {
   persistWave();
-  snapshot = { title: session?.title ?? null, starting };
+  snapshot = waveSnapshot();
   for (const fn of subscribers) fn();
 }
 
@@ -60,22 +99,33 @@ function persistWave() {
     const key = SESSION_KEY + sessionAccount;
     if (!session) localStorage.removeItem(key);
     else localStorage.setItem(key, JSON.stringify({ id: session.id, title: session.title,
-      refs: [...session.refs], songs: [...session.songs], pending: [...session.inFlight, ...session.pending] }));
+      preferences: session.preferences, preferencesStatus: session.preferencesStatus,
+      preparation: session.preparation, refs: [...session.refs], songs: [...session.songs],
+      pending: [...session.inFlight, ...session.pending] }));
   } catch { /* The current wave can still play without storage. */ }
 }
 
 /** Continue the same server session, including events that were still awaiting acknowledgement. */
 export function restoreWave(account: number | null) {
   if (sessionAccount === account) return;
+  generation++;
+  starting = null;
+  startPreferences = { ...DEFAULT_WAVE_PREFERENCES };
+  startStatus = null;
+  startPreparation = null;
+  pendingStart = null;
   session = null;
   sessionAccount = account;
   const st = getListenState();
   if (account !== null && !canPlayAll() && st.track && st.context.startsWith('wave:')) {
     const id = st.context.slice('wave:'.length);
-    let saved: { id?: string; title?: string; refs?: string[]; songs?: string[]; pending?: PlayEventIn[] } | null = null;
+    let saved: { id?: string; title?: string; refs?: string[]; songs?: string[]; pending?: PlayEventIn[];
+      preferences?: WavePreferences; preferencesStatus?: string | null; preparation?: WaveOut['preparation'] | null } | null = null;
     try { saved = JSON.parse(localStorage.getItem(SESSION_KEY + account) ?? 'null'); } catch { /* rebuild from the queue */ }
     if (saved?.id !== id) saved = null;
     session = { id, title: typeof saved?.title === 'string' ? saved.title : 'Моя волна', context: st.context,
+      preferences: saved?.preferences ?? { ...DEFAULT_WAVE_PREFERENCES },
+      preferencesStatus: saved?.preferencesStatus ?? null, preparation: saved?.preparation ?? null, error: null,
       refs: new Set([...(Array.isArray(saved?.refs) ? saved.refs.filter((r) => typeof r === 'string') : []), ...st.queue.map((t) => t.ref)]),
       songs: new Set(Array.isArray(saved?.songs) ? saved.songs.filter((r) => typeof r === 'string') : []),
       pending: Array.isArray(saved?.pending) ? saved.pending.filter((e) => e && typeof e.event_id === 'string') : [],
@@ -117,6 +167,8 @@ export function artistSeed(t: SeedTrack): WaveSeedIn | null {
 
 const listenTrack = (t: WaveTrackOut): ListenTrack => ({
   ref: t.ref,
+  nd_song_id: t.nd_song_id,
+  explanation: t.explanation,
   title: t.title,
   artist: t.artists?.length ? t.artists.join(', ') : t.artist,
   cover_url: t.cover_url,
@@ -131,6 +183,10 @@ const listenTrack = (t: WaveTrackOut): ListenTrack => ({
 });
 
 function remember(s: Session, w: WaveOut) {
+  s.preferences = w.preferences ?? { ...DEFAULT_WAVE_PREFERENCES };
+  s.preferencesStatus = w.preferences_status;
+  s.preparation = w.preparation;
+  s.error = null;
   for (const t of w.tracks) {
     s.refs.add(t.ref);
     if (t.nd_song_id) s.songs.add(t.nd_song_id);
@@ -141,39 +197,61 @@ function remember(s: Session, w: WaveOut) {
  * (INSIGHTS.md 6.3: analytics only, the Hub keeps it with the session). */
 export async function startWave(seed: WaveSeedIn | null | undefined, origin: WaveOrigin): Promise<boolean> {
   if (starting !== null) return false;
+  const epoch = ++generation;
+  const account = sessionAccount;
+  const before = getListenState();
   starting = seedKey(seed);
+  startStatus = null;
+  startPreparation = null;
   emit();
   try {
-    const w = await api.waveStart({ seed: seed ?? null, origin, client: EMBEDDED ? 'pwa-app' : 'pwa' });
+    const pending = pendingStart;
+    const w = pending && pending.seed === seedKey(seed) && pending.track === before.track && pending.context === before.context
+      ? await api.waveNext(pending.id, { played: [], queued: [], preferences: startPreferences })
+      : await api.waveStart({ seed: seed ?? null, origin, client: EMBEDDED ? 'pwa-app' : 'pwa', preferences: startPreferences });
+    if (generation !== epoch || sessionAccount !== account || getListenState().track !== before.track || getListenState().context !== before.context) return false;
+    startPreparation = w.preparation;
+    startStatus = w.preferences_status;
     if (!w.tracks.length) {
-      toastError('Волна пока пустая: попробуйте чуть позже');
+      pendingStart = w.pending ? { id: w.session_id, seed: seedKey(seed), track: before.track, context: before.context } : null;
+      startStatus = w.pending ? 'Полные записи ещё готовятся. Попробуйте запустить волну позже.' : 'Нет доступных полных записей для этой волны.';
+      toastError(startStatus);
       return false;
     }
+    pendingStart = null;
     if (canPlayWave()) {
       end(); // a wave the page's own player had is over: the app's player plays now
       playWave(w);
       return true;
     }
-    const s: Session = { id: w.session_id, title: w.title, context: `wave:${w.session_id}`, refs: new Set(), songs: new Set(), pending: [], inFlight: [], busy: false, again: false };
+    const s: Session = { id: w.session_id, title: w.title, context: `wave:${w.session_id}`, refs: new Set(), songs: new Set(), pending: [], inFlight: [], busy: false, again: false,
+      preferences: w.preferences, preferencesStatus: w.preferences_status, preparation: w.preparation, error: null };
     remember(s, w);
     const tracks = w.tracks.map(listenTrack);
     // A wave is a new list even when its seed is already playing; listen() would only toggle pause.
     listenAll(tracks, { shuffle: false, context: s.context });
     session = s;
+    startPreferences = { ...DEFAULT_WAVE_PREFERENCES };
     return true;
   } catch (e) {
-    toastError(errorMessage(e));
+    if (generation === epoch && sessionAccount === account) {
+      if (e instanceof ApiError && e.status === 404) pendingStart = null;
+      startStatus = errorMessage(e);
+      toastError(startStatus);
+    }
     return false;
   } finally {
-    starting = null;
-    emit();
+    if (generation === epoch) {
+      starting = null;
+      emit();
+    }
   }
 }
 
 /** The events since the last call and the refs still ahead go to the Hub; its picks replace them. */
 async function ask() {
   const s = session;
-  if (!s) return;
+  if (!s || getListenState().context !== s.context) return;
   if (s.busy) {
     s.again = true;
     return;
@@ -181,23 +259,32 @@ async function ask() {
   s.busy = true;
   const played = s.pending.splice(0);
   s.inFlight = played;
+  const preferences = s.requestedPreferences;
   persistWave();
   const st = getListenState();
   const queued = st.queue.slice(st.index + 1).map((t) => t.ref);
   try {
-    const w = await api.waveNext(s.id, { played, queued });
+    const w = await api.waveNext(s.id, { played, queued, preferences });
     if (session !== s || getListenState().context !== s.context) return;
     remember(s, w);
-    if (w.tracks.length) replaceUpcoming(w.tracks.map(listenTrack));
-    else if (w.pending) setTimeout(() => void ask(), RETRY_MS);
+    if (s.requestedPreferences === preferences) s.requestedPreferences = undefined;
+    // Empty means there is no verified reserve, not permission to keep stale choices.
+    if (getListenState().track !== st.track) s.again = true;
+    else replaceUpcoming(w.tracks.map(listenTrack));
+    if (w.pending) setTimeout(() => { if (session === s) void ask(); }, RETRY_MS);
   } catch (e) {
+    if (session !== s || getListenState().context !== s.context) return;
+    s.error = errorMessage(e);
+    if (s.requestedPreferences === preferences) s.requestedPreferences = undefined;
     if (e instanceof ApiError && e.status === 404) {
+      toastError('Сессия волны завершена. Запустите новую волну.');
       end(); // the session is over (a day without it): the queue plays out
     } else s.pending.unshift(...played); // offline: with the next call
   } finally {
     s.inFlight = [];
     persistWave();
     s.busy = false;
+    if (session === s) emit();
     if (s.again && session === s) {
       s.again = false;
       void ask();
@@ -211,7 +298,7 @@ function end() {
 }
 
 onPlayEvent((e) => {
-  if (e.kind === 'progress' || e.kind === 'interrupted' || e.kind === 'error') return;
+  if (e.kind === 'progress' || e.kind === 'interrupted') return;
   if ((e.target_type && e.target_type !== 'track') || e.reverts_event_id) return;
   const s = session;
   if (!s) return;
@@ -219,5 +306,5 @@ onPlayEvent((e) => {
   if (!(e.ref && s.refs.has(e.ref)) && !(e.nd_song_id && s.songs.has(e.nd_song_id))) return;
   s.pending.push(e);
   persistWave();
-  if (e.kind === 'start' || e.kind === 'like' || e.kind === 'dislike') void ask();
+  if (e.kind === 'start' || e.kind === 'like' || e.kind === 'dislike' || e.kind === 'error') void ask();
 });

@@ -74,6 +74,7 @@ class Cand:
     # analytics of a mix's song (INSIGHTS.md 6.6), set by `build`: the parts of its score, what the profile knew of it
     parts: dict[str, Any] | None = None
     known: dict[str, Any] | None = None
+    explanation: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -86,12 +87,16 @@ class Cand:
 
     @property
     def generator(self) -> str:
+        contributions = (self.parts or {}).get("generator_contributions")
+        if contributions:
+            return max(contributions, key=contributions.get)
         w = get_settings().cfg.mixes.weights
-        return max(self.gens, key=lambda g: w.get(g, 0.5) / math.log2(self.gens[g] + 2))
+        return max(self.gens, key=lambda g: w.get(g, 0.5) / math.log2(self.gens[g] + 2)) if self.gens else "seed"
 
     def features(self) -> dict[str, Any]:
         return {"track": self.track.model_dump(mode="json"), "generators": self.gens, "sim": self.sim,
-                "rank": self.track.rank, "familiar": self.familiar, "score_parts": self.parts, "profile": self.known}
+                "rank": self.track.rank, "familiar": self.familiar, "score_parts": self.parts, "profile": self.known,
+                "explanation": list(self.explanation)}
 
 
 @dataclass
@@ -425,7 +430,8 @@ def score_parts(c: Cand, weights: dict[str, float], profile: Profile | None = No
     """The score and what it is made of: the generators' Σ weight / log2(position + 2), the closeness by sound
     (1.5·m·sim for v2, 1.5·sim for v1), the popularity, v2's penalties of a negative track and artist; `maturity` —
     the v2 profile's m (none for v1). `total` is added up in the order `score` always did."""
-    gens = sum(weights.get(g, 0.5) / math.log2(pos + 2) for g, pos in c.gens.items())
+    contributions = {g: weights.get(g, 0.5) / math.log2(pos + 2) for g, pos in c.gens.items()}
+    gens = sum(contributions.values())
     pop = POP_WEIGHT * popularity(c.track.rank)
     if isinstance(profile, V2Profile):
         t = profile.find(ref=c.track.ref, nd_song_id=c.nd_song_id, fp=fingerprint(c.track.artist, c.track.title))
@@ -441,11 +447,21 @@ def score_parts(c: Cand, weights: dict[str, float], profile: Profile | None = No
         total = gens + sound + pop
         maturity = None
     return {"generators": gens, "sound": sound, "popularity": pop, "track_penalty": track_penalty,
-            "artist_penalty": artist_penalty, "maturity": maturity, "total": total}
+            "artist_penalty": artist_penalty, "maturity": maturity, "total": total,
+            "generator_weights": {g: weights.get(g, 0.5) for g in c.gens},
+            "generator_contributions": contributions}
 
 
 def score(c: Cand, weights: dict[str, float], profile: Profile | None = None) -> float:
     return score_parts(c, weights, profile)["total"]
+
+
+def apply_score(c: Cand, weights: dict[str, float], profile: Profile | None, multiplier: float = 1.0) -> None:
+    """Store the exact ranked inputs; reducing priority must also demote negative scores."""
+    c.parts = score_parts(c, weights, profile)
+    raw = c.parts["total"]
+    c.score = raw * multiplier if raw >= 0 else raw / multiplier
+    c.parts.update(temporary_multiplier=multiplier, total=c.score)
 
 
 def known_of(c: Cand, p: Profile) -> dict[str, Any] | None:
@@ -712,8 +728,14 @@ def local_now(now: datetime | None = None) -> datetime:
 async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
                 shadow_pool: list[Cand] | None = None) -> Built:
     cfg = get_settings().cfg.mixes
+    from app.recommendation_policy import load_policy
+    from app.recommendations import adapted_weights, explain_candidate
+
+    weights = await adapted_weights(p.user_id, cfg.weights)
+    policy = await load_policy(p.user_id)
     t0 = time.monotonic()
     stats: dict[str, Any] = {"mode": mode, "taste_model": "v2" if isinstance(p, V2Profile) else "v1"}
+    stats["source_weights"] = weights
     if isinstance(p, V2Profile):
         from app.mixes.taste_select import prepare
         from app.mixes.taste_select import seeds as select_seeds
@@ -735,21 +757,23 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
     rejected = dict.fromkeys(REJECT_REASONS, 0)
     kept = []
     for c in cands.values():
-        if (reason := keep_reason(c, p, cfg)) is None:
+        reason = "temporary_pause" if policy.blocked(c) else keep_reason(c, p, cfg)
+        if reason is None:
             kept.append(c)
         else:
             rejected[reason] = rejected.get(reason, 0) + 1
     stats["rejected"] = rejected
     for c in kept:
-        c.score = score(c, cfg.weights, p)
+        apply_score(c, weights, p, policy.multiplier(c))
     kept.sort(key=lambda c: -c.score)
     vectors = await sound(p, kept[:EMBED_CANDIDATES], stats)
     for c in kept:
-        c.score = score(c, cfg.weights, p)
+        apply_score(c, weights, p, policy.multiplier(c))
     active, reserve = select_songs(kept, mode, cfg.size, cfg.reserve, cfg.max_per_artist)
     active = order(active, vectors)
     for c in active + reserve:
-        c.parts, c.known = score_parts(c, cfg.weights, p), known_of(c, p)
+        c.known = known_of(c, p)
+        c.explanation = explain_candidate(c)
     used: dict[str, int] = {}
     for c in active:
         used[c.generator] = used.get(c.generator, 0) + 1

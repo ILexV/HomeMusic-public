@@ -265,7 +265,7 @@ export const api = {
     cachedGet<AlbumOut>(`/api/catalog/album/${enc(ref)}`, signal, fresh),
 
   // listening before download: picks the file (may take seconds), `stream_url` plays it
-  listen: (ref: string, signal?: AbortSignal) => request<ListenOut>('GET', withQuery('/api/listen', { ref }), { signal }),
+  listen: (ref: string, signal?: AbortSignal, full = false) => request<ListenOut>('GET', withQuery('/api/listen', { ref, full: full ? 1 : undefined }), { signal }),
   // the catalog tracks on screen, top first: the Hub picks their files in the background (replaces the last list)
   listenPrefetch: (refs: string[]) => request<{ queued: number }>('POST', '/api/listen/prefetch', { json: { refs } }),
 
@@ -402,6 +402,6 @@ export const libraryCoverUrl = (albumId: number, size = 300, bust?: string | num
   withQuery(`/api/library/albums/${albumId}/cover`, { size, v: bust });
 
 /** Audio of a catalog track for `<audio src>`; the Hub picks the file on the first request if needed. */
-export const listenStreamUrl = (ref: string) => withQuery('/api/listen/stream', { ref });
+export const listenStreamUrl = (ref: string, full = false) => withQuery('/api/listen/stream', { ref, full: full ? 1 : undefined });
 
 export const uploadCoverUrl = (uploadId: number) => `/api/uploads/${uploadId}/cover`;

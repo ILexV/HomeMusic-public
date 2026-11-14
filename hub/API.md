@@ -1,7 +1,7 @@
 # Hub HTTP API
 
 All JSON. Most models are in `app/api/schemas.py`; player features also define schemas in their route modules and `app/playback_schema.py`. Field names below match those models.
-Auth: cookie `hm_session` (HttpOnly, set by login). Any endpoint except login/healthz returns `401` without it.
+Auth: cookie `hm_session` (HttpOnly, set by login). Protected endpoints return `401` without it; public auth/bootstrap routes, `/healthz` and `/readyz` are marked below.
 Errors: `{"detail": "<Russian message>"}` with 4xx/5xx.
 
 ## Auth
@@ -122,8 +122,9 @@ is under way: show the ♥ filled.
 ## Downloads
 | Method | Path | Body → Response |
 |---|---|---|
-| POST | `/api/downloads` | `DownloadIn` → `DownloadBatchOut`. One of: `items[]` (artist/title or a picked `candidate`), `track_refs[]`, `album_ref`, `artist_ref` (+`record_types`). Optional `playlist_id` or `new_playlist_name`: tracks are added to that Navidrome playlist once imported. `star=true` (♥ on a track that isn't downloaded): the songs are starred in Navidrome for this user once imported (event `library` `{kind:"starred", song_ids}`); an owned track is starred at once; a ♥ request ignores `playlist_id`/`new_playlist_name` (the song is in «Понравившиеся» anyway). A file ref (`file:<provider>:<provider_id>`, a file the provider search showed) downloads that very file, as if picked in `items[].candidate`; `404` if the Hub doesn't know it. A picked file (or a file ref) of a song the library has from another file (an uncensored re-upload of a censored copy) is not «already owned»: it is downloaded next to the old version (`… [v2]`), with `star` the ♥ moves from the old version to it (event `library` `{kind:"unstarred", song_ids}`), and from then on the catalog track (`nd_song_id`, listening) is the newest version. A track ref this user is downloading already (an active item with the same `track_ref`) gets no second download unless `force`: ♥ makes that download star the song, a plain request makes a download queued only for ♥ a visible one (`star` → false; event `download`); such refs count in `queued`. Refs are expanded by a background job: then `expanding=true` and `queued` counts only `items[]` |
+| POST | `/api/downloads` | `DownloadIn` → `DownloadBatchOut`. One of: `items[]` (artist/title or a server-known `file_ref`), `track_refs[]`, `album_ref`, `artist_ref` (+`record_types`). Optional `playlist_id` or `new_playlist_name`: tracks are added to that Navidrome playlist once imported. `star=true` (♥ on a track that isn't downloaded): the songs are starred in Navidrome for this user once imported (event `library` `{kind:"starred", song_ids}`); an owned track is starred at once; a ♥ request ignores `playlist_id`/`new_playlist_name` (the song is in «Понравившиеся» anyway). A file ref (`file:<provider>:<provider_id>`, a file the provider search showed) downloads that very file; `404` if the Hub doesn't know it. A picked file of a song the library has from another file (an uncensored re-upload of a censored copy) is not «already owned»: it is downloaded next to the old version (`… [v2]`), with `star` the ♥ moves from the old version to it (event `library` `{kind:"unstarred", song_ids}`), and from then on the catalog track (`nd_song_id`, listening) is the newest version. A track ref this user is downloading already (an active item with the same `track_ref`) gets no second download unless `force`: ♥ makes that download star the song, a plain request makes a download queued only for ♥ a visible one (`star` → false; event `download`); such refs count in `queued`. Refs are expanded by a background job: then `expanding=true` and `queued` counts only `items[]` |
 | GET | `/api/downloads?status=&limit=100` | `DownloadItemOut[]` (newest first; `status` may be a comma list; `nd_song_id` once scanned, `playlist_id` = the batch's target playlist, `track_ref` = the catalog track it came from, or the file ref of a picked file, `star` = queued only for ♥, by an import (`import_id`) or for a «Микс дня» and not asked for explicitly: the Hub's own business — clients don't show it as a download, don't notify about it, the app doesn't download it to the phone; it turns false if the track is then downloaded explicitly (an import's download then also goes first in the queue), the song is still starred, and when a download queued only for ♥ fails (`failed`/`needs_review`): from then on it is the user's download (listed, notified) that still stars the song once a file is picked; `liked` = queued with ♥, the song is starred once imported) |
+| GET | `/api/downloads/page?filter=all&limit=50&before_id=` | `{items: DownloadItemOut[], next_cursor: number \| null, counts: {all, active, problems, finished}}`. `filter`: `all`, `active`, `problems`; `limit` 1–200. Only the current user's visible (`star=false`) history, filter applied before limit; descending ID, exclusive `before_id`. Counts cover the whole visible history independently of filter/cursor. `next_cursor=null` ends pagination |
 | GET | `/api/downloads/{id}` | `DownloadItemOut` with `candidates` |
 | POST | `/api/downloads/items/{id}/retry` | `RetryIn` (`candidate_index` from `candidates`, or a page `url`) → `DownloadItemOut` |
 
@@ -137,6 +138,14 @@ without queuing a second download. A later unlike or causal rollback cancels the
 independently requested download remains queued. These fields are optional for existing clients.
 
 `GET /api/downloads` also accepts `ref=…`: exact catalog/file reference, filtered within the current account **before** applying `limit` (1–500). This lets the player find the latest download for one track without scanning unrelated jobs.
+
+Capability `server_file_downloads_v1` advertises the safe candidate contract. Clients must use
+`track_refs: ["file:<provider>:<id>"]` or `items[].file_ref` after a provider search.
+Client-supplied `items[].candidate` is rejected with `422`, not silently trusted or ignored.
+Assistant choices of kind `candidate` likewise send `file_ref`, never a Candidate object.
+Unknown/expired refs require a fresh search. Older clients sending Candidate JSON must be updated.
+External media requests validate public destinations before connecting, pin DNS results and revalidate redirects.
+Download filenames are generated by the server, independently of provider IDs.
 
 Playlist additions keep the request order, including songs already in the library. Active downloads wait for earlier
 ones, but `needs_review` does not block later ready songs. The pending row and subsequent applied-song anchors are
@@ -152,7 +161,7 @@ An explicit Russian catalog track takes only a copy known to be uncensored first
 that isn't a clean version (not an official YouTube Music copy: labels replace their audio in place), then a
 re-upload titled "(без цензуры)" or uploaded before that date (`sources.reuploads`, its last few go to `candidates`).
 A possibly censored copy is the last resort and gets the warning «Возможна цензура: копий без цензуры не нашлось».
-A picked re-upload (`items[].candidate` with `extra.reupload`) is looked up in Deezer for its tags.
+A picked re-upload (a server-known file ref whose remembered metadata has `extra.reupload`) is looked up in Deezer for its tags.
 
 ## Listening before download
 | Method | Path | Response |
@@ -167,7 +176,13 @@ Deezer's 30 s preview, show «превью 30 сек»), `library` (already owne
 the regular sources are followed by `sources.download_fallback`, and a preview-only result returns `503`
 with a Russian explanation instead of preview audio. Without `full`, browser preview behavior is preserved.
 Successful stream responses include `X-HomeMusic-Listen-Kind: full|library|preview`, independently of `q`.
+After any body bytes have been sent, upstream continuation requires an exact `206` range and unchanged
+candidate, source URL and strong ETag. Ignored ranges, missing/changed validators and alternate files terminate
+the response instead of splicing incompatible bytes; the player must explicitly restart playback.
 `GET /api/listen?ref=…&full=1` applies the same full-recording policy to source metadata; it cannot describe a cached preview as the full-only player's selected source.
+`ListenOut.recording_binding` is an opaque, account-owned observation ID; use the returned `stream_url`
+unchanged. Metadata/prefetch alone never authorizes a wrong-recording report. If source fallback changes the file,
+`GET /api/recording-feedback/current?ref=…` returns the binding of the actually served choice.
 Owned-file lookup precedes optional album/name enrichment. Playback bounds optional album lookup to 1.5 s,
 original-name lookup to 3 s, each regular search to 6 s, fallback search to 8 s, and file probing to 25 s
 (a YouTube file: ~8 s extraction, then its URL answers only after the ad before the video could be skipped —
@@ -302,7 +317,7 @@ must publish the exact schema together with server support. This extension does 
 | GET | `/api/taste/onboarding?q=` | `TasteOnboardingOut` `{needed, selected: [{ref, name}], suggestions: CatalogArtist[]}` — artists to pick: the library's most present ones and Deezer's chart, or found by `q` |
 | POST | `/api/taste/artists` | `{artist_refs: ["dz:…"]}` (1…20) → `MixSettingsOut`; not a Deezer artist → `400`, unknown → `404`. The user's first pick queues the first build at once |
 
-`MixOut`: `{id, title, description, mode, mode_title, created_at, nd_playlist_id, ready, total, tracks, generators}`.
+`MixOut`: `{id, title, description, mode, mode_title, created_at, nd_playlist_id, playlist_status, playlist_error, ready, total, tracks, generators}`.
 `tracks` — the 50 songs in order, `MixTrackOut` = `TrackOut` (`ref` `dz:…`; a song only the library has: `source`
 `nd`, `ref` `nd:<song>`; `owned`/`nd_song_id` — in the library already, play it by `nd_song_id`; `downloading`) +
 `{position, generator, generator_title, generators, familiar, score, sim}`: `generator` — the strongest source of the
@@ -312,6 +327,9 @@ the taste by sound (`null` without the embedder). `ready` — songs in the libra
 `/api/downloads` lists as visible, `star: true`). `generators` — per generator `{tracks, used, seconds, error?, off?}`.
 `nd_playlist_id` — the user's Navidrome playlist «Микс дня» (the same id every day; its songs are replaced).
 Events of songs played from a mix: `context` `mix:<id>`.
+`playlist_status`: `pending`, `error`, or `published`; `playlist_error` is nullable. The local mix survives a
+Navidrome outage; publication retries through `mix_sync` without holding the local database write transaction.
+An ambiguous playlist creation is reconciled against its temporary remote name, never blindly duplicated.
 
 ## «Моя волна» (MIXES.md 7)
 An endless stream for the user's taste: the Hub hands out 5 tracks at a time and picks again after every action.
@@ -347,14 +365,29 @@ when returning search results; arbitrary URLs or unknown/expired file refs are r
 its original ref, artist and title; radios use that metadata even when no catalog record exists. The file is not
 substituted with a library or catalog version. `by_artist` is supported for `dz:` and `nd:` tracks as before.
 
-`WaveOut`: `{session_id, title, mode, seed, tracks, pending, recorded}`. `title` — «Моя волна», «Волна по треку
-«<название>»», «Волна: <исполнитель>»; `seed` — `{ref, artist, title}` or `{artist_ref?, artist, nd_artist_id?}`, `null` for the
-user's own. `tracks` — up to 5 `WaveTrackOut` = `TrackOut` + `{generator, generator_title, familiar, sim}`: play a track
-by `nd_song_id` when `owned` (a library song), else stream its `ref` (`GET /api/listen/stream?ref=`; the Hub has started
-picking these files already, `/api/listen/prefetch`). `generator` — as a mix's, plus `seed` (the wave's own track) and
-`session_radio` (the radio of a track liked or played to its end in this session). `pending` — sources still answer
-in the background: the pool grows; an empty `tracks` with `pending` — ask `next` again in a few seconds; empty without
-`pending` — the wave ran out.
+`WaveOut`: `{session_id, title, mode, seed, tracks, pending, recorded, preferences, preferences_status, preparation}`.
+`title` — «Моя волна», «Волна по треку «<название>»», «Волна: <исполнитель>»; `seed` —
+`{ref, artist, title}` or `{artist_ref?, artist, nd_artist_id?}`, `null` for the user's own.
+`tracks` — up to 5 `WaveTrackOut` = `TrackOut` + `{generator, generator_title, familiar, sim, explanation: string[]}`.
+Owned songs play by `nd_song_id`; other tracks use `/api/listen/stream?ref=…&full=1` (including resolve/preload).
+`generator` — as a mix's, plus `seed` and `session_radio`. `pending` includes unfinished source/file preparation;
+empty `tracks` with `pending` means continue the **same** session through `next`, not a new `start`.
+Empty without `pending` means exhausted. A pending explicit seed is retained across restart, never replaced
+with another song; an unavailable full seed returns `409`.
+
+Both start and next accept optional `preferences: {energy: any|calm|energetic, vocals: any|vocal|instrumental,
+discovery: balanced|familiar|new}`. Defaults: `any/any/balanced`. Omitted next preferences preserve the session's
+values. Applying them replaces upcoming tracks only; clients retain the current occurrence and position.
+Energy/vocals contrast actual audio vectors with text prompts; missing model/vectors are neutral and reported
+in nullable `preferences_status`. Discovery changes the familiar share; permanent taste settings are untouched.
+The lazy text model has a bounded 20-second preparation window. On CPU, background audio inference releases
+the model between songs, so interactive text controls do not queue behind a multi-minute audio batch;
+GPU audio batching is unchanged.
+
+`preparation: {ready, pending, unavailable}` counts the bounded reserve (up to 10 candidates). Ready means the
+complete file exists, has a valid probed duration and matches the expected duration tolerance, not merely that
+a provider returned a URL. Preview/truncated files are excluded; transient failures remain pending. Existing
+bounded prefetch workers and stream copies are reused. Preparing/rejecting audio does not emit a taste event.
 
 **How a player keeps a wave going** (the PWA's mini player; the app's player, T7):
 - Play `tracks` in order with `context` `wave:<session_id>` in their events (the usual `/api/plays/events` events, sent
@@ -375,6 +408,56 @@ down in this session and so does what sounds like the track (the embedder's vect
 YouTube Music radio joins the pool (`session_radio`), what sounds like it goes up; `finish` of a track the library
 lacks — a quiet download (`query_json.wave`: not shown in «Загрузки», as a mix's). «Не нравится» set anywhere
 (`/api/dislikes`) counts at the next call. A ♥ downloads the track the usual way (the client's ♥ download).
+
+## Recommendation quality, controls and releases
+
+All routes require authentication and operate on the current account. Cross-account contexts/IDs return `404`.
+
+| Method | Path | Body → Response |
+|---|---|---|
+| GET | `/api/recommendations/quality?days=30` | `days`: 7, 30 or 90. `{days,since,until,attempts,starts,eligible_plays,completed,early_skips,playback_errors,interrupted,new_track_plays,new_track_likes,repeats,completion_rate,early_skip_rate,new_track_like_rate,repeat_rate,sources,limitations,metric_version,provenance,policy_cohorts,comparison,recordings}` |
+| GET | `/api/recommendations/explain?context=wave:…&ref=…&nd_song_id=…` | `{reasons: string[]}` from the owned recorded mix/wave/smart decision. Supply ref and/or song ID; both must identify that item. Missing historical snapshot returns an empty list. |
+| GET | `/api/recommendations/pauses` | `{items:[{id,action,label,expires_at,ref,nd_song_id,artist}]}`; integer IDs, UTC expiry, active entries only. |
+| POST | `/api/recommendations/pauses` | `{action:today|week|less_artist,ref?,nd_song_id?}` → `201`, one item. Identity/artist are resolved server-side; repeated equivalent active action returns the existing item. |
+| DELETE | `/api/recommendations/pauses/{id}` | `204`; immediate reversal. |
+| GET | `/api/releases?period=week&unseen=false` | `period`: week/month (7/30 calendar days). `{period,generated_at,partial,errors,items:[{ref,title,artist,artist_ref,cover_url,release_date,track_count,seen}]}`. Track count may be null. |
+| PUT | `/api/releases/seen` | `{ref,seen}` → same shape. Marking validates the catalog album; unmarking remains available during catalog outages. |
+| GET | `/api/recording-feedback/current?ref=…` | `{ref,binding}` for this account's latest actually served full-source recording, within 24 hours. `404` if absent; library files need recoverable provider provenance |
+| POST | `/api/recording-feedback` | `{ref,binding}` → `{id,ref,message}`. Excludes that provider file for this user and track, not the musical taste. `404` for another account/ref or unknown binding; `409` for stale, unserved, changed or unidentifiable recordings. Repeating the same report is idempotent |
+| DELETE | `/api/recording-feedback/{id}` | `204`, revoke an owned report; `404` otherwise. Does not delete any audio or alter other users' choices |
+
+Rates are fractions, null without a denominator. Only attributable mix/wave/smart playback attempts count,
+not recommendations offered. Errors, interruptions and unfinished attempts are excluded from taste outcomes.
+Legacy events without `playback_id` use bounded grouping and are explicitly disclosed in `limitations`.
+`sources` items: `{id,title,attempts,completed,early_skips,playback_errors,new_track_likes,multiplier,learning_samples}`.
+Learning always uses 90 days, at least 20 eligible outcomes per source, shrinkage and multipliers in `[0.75,1.25]`;
+insufficient evidence keeps 1.0. Cached per account for at most 60 seconds; applies to new mix/wave/smart choices.
+`explanation: string[]` is also included in mix/wave/smart tracks; it reflects saved score components and session
+preferences, never a fresh catalog/profile guess.
+
+`comparison.current` and `.previous` are adjacent, non-overlapping windows of the same duration, each with
+`since`, `until`, `attempts`, `eligible_plays`, `completed`, `early_skips`, both rates and `policy_cohorts`.
+Cohorts use only the policy version saved with the recommendation decision (`unknown` stays unknown).
+`comparison.limitations` explicitly warns that this is observational, not a randomized A/B result.
+Shadow/replay do not fabricate listening outcomes for an alternative policy.
+
+`recordings` includes `metric_version`, `since`, `until`, `observations`, `known`, `full`, `not_full`, `unknown`,
+`rate`, `provenance[]`, `limitations[]`. The rate denominator is only verified full files or confirmed previews;
+an HTTP success, metadata or a playback start is not proof of completeness. Repeated binding requests within
+five minutes coalesce. These observations cover this account's playback sources, not only recommendations;
+old events without observations are not reconstructed. Duration/decoding checks do not prove recording identity.
+
+Wrong-recording feedback is separate from dislike/skip. Clients stop the current attempt as `interrupted`,
+offer another recording and expose undo; catalog/library aliases of the rejected source are also excluded.
+
+`today` expires at the next midnight in server `TIMEZONE`, `week` after 7 days, `less_artist` after 30 days.
+Track pauses exclude future recommendation selection; artist pauses demote it to 0.25, including negative scores.
+Neither changes likes/dislikes or prevents explicit playback.
+
+Release targets come from onboarding and the current favorite ledger. Catalog work is bounded (20 artists,
+4 concurrent requests, 15-second overall deadline); caps/outages set `partial` and return available results.
+Future/invalid dates are excluded; album versions retain distinct identities. Opening a release, or marking it
+seen, never likes/downloads it. Use the existing catalog album, queue and download APIs explicitly.
 
 ## «Умное перемешивание» (MIXES.md 8)
 A playlist or «Понравившиеся» in the shuffle with recommendations "in the mood of the list" between its songs (Spotify's
@@ -455,6 +538,13 @@ quarantined from bootstrap until verified or explicitly acted upon. A stale ND s
 | GET | `/api/uploads/{id}/cover` | embedded cover image (404 if none) |
 | DELETE | `/api/uploads/{id}` | → `{ok}` |
 | POST | `/api/uploads/commit` | multipart: field `payload` = JSON `UploadCommitIn`, optional file `cover` → `UploadCommitOut` |
+
+Authentication precedes multipart parsing. `/api/uploads` accepts at most `uploads.max_files` (default 100),
+with per-file `max_file_mb` and aggregate `max_total_mb` limits (both default 500 MiB; configurable downward).
+The body may add up to 1 MiB for multipart framing. Caddy caps ingress at 501 MiB; the application also counts
+actual streamed bytes, including chunked requests. Oversize returns 413, invalid multipart 400; temporary files
+are closed on rejection, disconnect or cancellation. Assistant image ingress permits up to 15 images of 15 MiB
+each; upload commit permits one 15 MiB cover and a payload field of at most 1 MiB.
 
 ## Playlists
 | Method | Path | Body → Response |
@@ -569,7 +659,11 @@ over, liked albums and artists the library has get ★. The sign-in token is kep
 |---|---|---|
 | POST | `/share-target` | Fallback for Web Share Target if the service worker didn't handle it: images → new assistant task, audio → uploads; redirects to `/#/assistant/{id}` or `/#/upload` (the service worker's path, `/#/share`, opens a new assistant chat with the shared screenshots or text instead) |
 | GET | `/healthz` | `HealthOut` (no auth). `capabilities` includes `typed_favorites_v1`: new clients may send typed events/targets and causal rollback only when present. `launch_events_v1` — the Hub stores `launch_id`/`launch_origin` of `PlayEventIn`; `wave_origin_v1` — it keeps `origin`/`client`/`restart_of` of `WaveStartIn` (an older Hub ignores them silently, clients gate on these anyway). `smart_shuffle_v1` — the smart shuffle's endpoints exist (`/api/smart-shuffle/*`). `favorite_compensation_chains_v1` additionally permits retraction of compensations (late accept); clients retain chain events until this separate capability is present. `web_build` — id of the PWA build the Hub serves (`<meta name="hm-build">` of `index.html`, `null` without a build): an open page with another id reloads itself (`web/src/lib/update.ts`) |
-| GET | `/api/system/health` | `HealthOut` with provider health (admin) |
+| GET | `/readyz` | No auth; `{ok,status,components}`. HTTP503 if Hub DB, Navidrome or required background workers are unavailable. Optional embedder failure yields `status=degraded` with HTTP200. No paths, credentials or internal error text |
+| GET | `/api/system/health` | Admin-only `HealthOut` extended with `status`, component states, queue counts/oldest ages, free disk bytes, local/external backup status and last success, background task states. Provider search smoke tests remain daily maintenance rather than a side effect of opening diagnostics |
+
+`/healthz` is liveness only: no upstream requests. `navidrome` is the cached readiness result or `null` before
+the first probe, not a fresh availability guarantee. `web_build` and capabilities retain their existing meaning.
 
 ### Free chat (stage 3.8)
 | Method | Path | Body → Response |

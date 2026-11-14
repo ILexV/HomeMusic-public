@@ -8,6 +8,8 @@ import { LyricsPanel, LyricLine } from "lyrics.slint";
 import { SmartPlaylistsPanel, SmartPlaylistRow, SmartRuleRow } from "smart_playlists.slint";
 import { DevicesPanel, DeviceRow } from "devices.slint";
 import { ConnectionPanel } from "connection.slint";
+import { RecommendationsPanel, RecommendationRow } from "recommendations.slint";
+export { RecommendationRow }
 export { ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow }
 
 export component ToolsWindow inherits Window {
@@ -122,6 +124,37 @@ export component ToolsWindow inherits Window {
     callback connection-changed();
     callback connection-test();
     callback connection-save();
+    in-out property <int> recommendations-page;
+    in-out property <int> recommendations-energy;
+    in-out property <int> recommendations-vocals;
+    in-out property <int> recommendations-discovery;
+    in-out property <int> recommendations-days: 1;
+    in-out property <int> recommendations-period;
+    in-out property <bool> recommendations-unseen;
+    in-out property <int> recommendations-target;
+    in property <[string]> recommendations-targets;
+    in property <string> recommendations-status;
+    in property <string> recommendations-wave-status;
+    in property <string> recommendations-quality;
+    in property <string> recommendations-explanation;
+    in property <[RecommendationRow]> recommendations-pauses;
+    in property <[RecommendationRow]> recommendations-releases;
+    in property <bool> recommendations-busy;
+    in property <bool> recommendations-wave-active;
+    in property <bool> recommendations-recording-reported;
+    callback recommendations-wrong-recording();
+    callback recommendations-undo-recording();
+    callback recommendations-retry-recording();
+    callback recommendations-refresh();
+    callback recommendations-start-wave();
+    callback recommendations-apply-wave();
+    callback recommendations-load-wave();
+    callback recommendations-target-changed();
+    callback recommendations-pause-track(string);
+    callback recommendations-undo-pause(string);
+    callback recommendations-explain();
+    callback recommendations-open-release(string);
+    callback recommendations-seen-release(string, bool);
 
     HorizontalLayout {
         spacing: 1px;
@@ -132,7 +165,7 @@ export component ToolsWindow inherits Window {
                 padding: 12px;
                 spacing: 6px;
                 Text { text: "ПЛЕЕР"; color: Theme.dim; font-size: 11px; height: 32px; }
-                for label[index] in ["Звук и переходы", "Режим очереди", "Источник трека", "Офлайн-музыка", "Текст песни", "Умные плейлисты", "Устройства", "Подключение"] : Rectangle {
+                for label[index] in ["Звук и переходы", "Режим очереди", "Источник трека", "Офлайн-музыка", "Текст песни", "Умные плейлисты", "Устройства", "Подключение", "Рекомендации"] : Rectangle {
                     height: 42px;
                     border-radius: 4px;
                     background: root.active-panel == index ? Theme.raised : (tab.has-hover ? #ffffff08 : transparent);
@@ -234,6 +267,39 @@ export component ToolsWindow inherits Window {
                 changed => { root.connection-changed(); }
                 test => { root.connection-test(); }
                 save => { root.connection-save(); }
+            }
+            if root.active-panel == 8 : RecommendationsPanel {
+                page <=> root.recommendations-page;
+                energy <=> root.recommendations-energy;
+                vocals <=> root.recommendations-vocals;
+                discovery <=> root.recommendations-discovery;
+                days <=> root.recommendations-days;
+                period <=> root.recommendations-period;
+                unseen <=> root.recommendations-unseen;
+                target <=> root.recommendations-target;
+                targets: root.recommendations-targets;
+                status: root.recommendations-status;
+                wave-status: root.recommendations-wave-status;
+                quality: root.recommendations-quality;
+                explanation: root.recommendations-explanation;
+                pauses: root.recommendations-pauses;
+                releases: root.recommendations-releases;
+                busy: root.recommendations-busy;
+                wave-active: root.recommendations-wave-active;
+                recording-reported: root.recommendations-recording-reported;
+                wrong-recording => { root.recommendations-wrong-recording(); }
+                undo-recording => { root.recommendations-undo-recording(); }
+                retry-recording => { root.recommendations-retry-recording(); }
+                refresh => { root.recommendations-refresh(); }
+                start-wave => { root.recommendations-start-wave(); }
+                apply-wave => { root.recommendations-apply-wave(); }
+                load-wave => { root.recommendations-load-wave(); }
+                target-changed => { root.recommendations-target-changed(); }
+                pause-track(action) => { root.recommendations-pause-track(action); }
+                undo-pause(id) => { root.recommendations-undo-pause(id); }
+                explain => { root.recommendations-explain(); }
+                open-release(id) => { root.recommendations-open-release(id); }
+                seen-release(id, seen) => { root.recommendations-seen-release(id, seen); }
             }
         }
     }

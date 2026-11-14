@@ -320,6 +320,11 @@ async def _fill(rt: SmartRuntime, slots: list[int]) -> list[tuple[int, build.Can
     if not slots or rt.profile is None:
         return []
     p = rt.profile
+    from app.recommendation_policy import load_policy
+    from app.recommendations import adapted_weights, explain_candidate
+
+    policy = await load_policy(rt.user_id)
+    weights = await adapted_weights(rt.user_id, wave.weights())
     if isinstance(p, V2Profile):
         cfg = get_settings().cfg.mixes
         for pool in (st.pool, st.out):
@@ -337,8 +342,20 @@ async def _fill(rt: SmartRuntime, slots: list[int]) -> list[tuple[int, build.Can
     pos = wave._weighted_center(st.positive_weights, vectors) if st.taste_model == "v2" else wave._center(st.pos, vectors)
     neg = None if st.taste_model == "v2" else wave._center(st.neg, vectors)
     neutral = _neutral(rt)
-    pool = [c for c in st.pool.values() if not wave._disliked(c, p) and not _blocked(rt)(c)]
-    vals = {c.track.ref: rec_value(rt, c, vectors, pos, neg, neutral) for c in pool}
+    pool = [c for c in st.pool.values() if not wave._disliked(c, p) and not _blocked(rt)(c)
+            and not policy.blocked(c)]
+    vals = {}
+    for c in pool:
+        build.apply_score(c, weights, p)
+        c.known = build.known_of(c, p)
+        raw = rec_value(rt, c, vectors, pos, neg, neutral)
+        multiplier = policy.multiplier(c)
+        value = raw * multiplier if raw >= 0 else raw / multiplier
+        vals[c.track.ref] = value
+        c.parts.update(temporary_multiplier=multiplier, selection_value=value,
+                       playlist_similarity=rt.psim.get(c.key),
+                       playlist_sound=PLAYLIST_SOUND * rt.psim.get(c.key, neutral))
+        c.explanation = explain_candidate(c)
     ranked = sorted(pool, key=lambda c: -vals[c.track.ref])
     n = len(rt.own)
     out: list[tuple[int, build.Cand, float]] = []
@@ -395,8 +412,8 @@ async def _save_items(rt: SmartRuntime, picked: list[tuple[int, build.Cand, floa
             rows = [dict(session_id=rt.sid, user_id=rt.user_id, handed_at=utcnow(), position=nxt + i, slot=k,
                          ref=c.track.ref, nd_song_id=c.nd_song_id, fingerprint=wave.fp_of(c)[:1024],
                          artist=(c.track.artist or "")[:256], title=(c.track.title or "")[:256],
-                         generator=wave.top_generator(c)[:32], gens=dict(c.gens), familiar=c.familiar, score=c.score,
-                         sim=rt.psim.get(c.key), value=v, state="handed")
+                         generator=c.generator[:32], gens=dict(c.gens), familiar=c.familiar, score=c.score,
+                         sim=rt.psim.get(c.key), value=v, state="handed", decision_json=c.features())
                     for i, (k, c, v) in enumerate(picked)]
             await s.execute(sqlite_insert(SmartItem).values(rows).on_conflict_do_nothing(
                 index_elements=["session_id", "ref"]))

@@ -422,7 +422,7 @@ function FileResults({ res, skeleton, empty }: { res: AsyncState<ProviderSearchO
   const download = async (c: Candidate) => {
     const key = `${c.provider}:${c.provider_id}`;
     setQueued((m) => ({ ...m, [key]: 'busy' }));
-    const r = await startDownload({ items: [{ artist: c.artist, title: c.title, explicit: c.explicit ?? null, duration_s: c.duration_s ?? null, candidate: c }] });
+    const r = await startDownload({ track_refs: [fileRef(c)] });
     if (r) markQueued(fileRef(c)); // the player shows it too
     setQueued((m) => {
       const next = { ...m };

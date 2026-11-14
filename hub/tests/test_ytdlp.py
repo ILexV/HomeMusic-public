@@ -474,12 +474,13 @@ async def test_enrich(monkeypatch: pytest.MonkeyPatch) -> None:
     assert c.extra["source"] == "ytsearch"
 
 
-class FakeYDL:
+class FakeYDL(ytdlp_mod.yt_dlp.YoutubeDL):
     """Minimal stand-in for yt_dlp.YoutubeDL used by fetch()."""
 
     last_opts: dict = {}
 
     def __init__(self, opts: dict) -> None:
+        super().__init__(opts)
         self.opts = opts
         FakeYDL.last_opts = opts
 
@@ -487,7 +488,7 @@ class FakeYDL:
         return self
 
     def __exit__(self, *a: object) -> None:
-        return None
+        return super().__exit__(*a)
 
     formats: list[dict] = []  # what the extraction finds
     processed: dict = {}  # the extraction handed to `process_ie_result`
@@ -500,7 +501,7 @@ class FakeYDL:
         assert download
         FakeYDL.processed = info
         vid = info["id"]
-        out = Path(self.opts["outtmpl"].replace("%(ext)s", "opus"))
+        out = Path(self.prepare_filename({**info, "ext": "opus"}))
         for hook in self.opts["progress_hooks"]:
             hook({"status": "downloading", "downloaded_bytes": 0, "total_bytes": 100})
             hook({"status": "downloading", "downloaded_bytes": 50, "total_bytes": 100})
@@ -527,11 +528,13 @@ async def test_fetch_with_fake_ydl(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
     path = await p.fetch(c, tmp_path / "staging", on_progress=cb)
     await asyncio.sleep(0.05)  # let call_soon_threadsafe / coroutine callbacks run
-    assert path == tmp_path / "staging" / "ytdlp_abc123def45.opus"
+    assert path.parent == tmp_path / "staging" and path.name.startswith("audio_") and path.suffix == ".opus"
     assert path.read_bytes() == b"OggS fake"
     assert progress == [0.0, 0.5, 1.0]
     opts = FakeYDL.last_opts
-    assert opts["format"] == "bestaudio/best"
+    assert opts["format"] == "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio[protocol=m3u8_native]"
+    assert opts["external_downloader"] == "native"
+    assert opts["external_downloader_args"]["ffmpeg_i"] == ["-protocol_whitelist", "file,crypto,data"]
     assert opts["postprocessors"] == [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}]
 
 
@@ -627,3 +630,25 @@ async def test_network_ytsearch_fallback_only() -> None:
     p = YtdlpProvider(YtdlpCfg(), use_music_search=False)
     res = await p.search(TrackQuery(artist="Кино", title="Группа крови"), limit=3)
     assert res and all(isinstance(c, Candidate) for c in res)
+
+
+async def test_provider_id_cannot_choose_download_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(ytdlp_mod.yt_dlp, "YoutubeDL", FakeYDL)
+    provider = YtdlpProvider(YtdlpCfg())
+    candidate = Candidate(provider="ytdlp", provider_id="../../outside", artist="A", title="T",
+                          page_url="https://www.youtube.com/watch?v=abc123def45")
+    path = await provider.fetch(candidate, tmp_path)
+    assert path.parent == tmp_path and path.name.startswith("audio_")
+    await provider.aclose()
+
+
+async def test_downloader_cannot_return_file_outside_staging(monkeypatch, tmp_path):
+    outside = tmp_path / "outside.opus"
+    outside.write_bytes(b"OggS")
+    monkeypatch.setattr(ytdlp_mod.yt_dlp, "YoutubeDL", FakeYDL)
+    monkeypatch.setattr(FakeYDL, "process_ie_result", lambda *a, **kw:
+                        {"requested_downloads": [{"filepath": str(outside)}]})
+    provider = YtdlpProvider(YtdlpCfg())
+    with pytest.raises(ProviderError, match="staging"):
+        await provider.fetch(YT_FILE, tmp_path / "staging")
+    await provider.aclose()

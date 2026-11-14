@@ -11,10 +11,12 @@ export component AlbumDetail inherits Rectangle {
     in property <bool> album-busy;
     in property <string> album-error;
     in property <string> album-note;
+    in property <bool> album-can-download;
     in property <bool> compact;
     callback close-album();
     callback album-play();
     callback album-enqueue();
+    callback album-download();
     callback album-play-row(int);
     private property <bool> can-play: !root.album-busy && root.album-error == "" && root.album-tracks.length > 0;
     vertical-stretch: 1;
@@ -45,6 +47,7 @@ export component AlbumDetail inherits Rectangle {
             alignment: start;
             EqButton { label: "Играть"; active: true; enabled: root.can-play; tip: "Заменить очередь и играть альбом"; clicked => { root.album-play(); } }
             EqButton { label: "+ В очередь"; enabled: root.can-play; tip: "Добавить альбом в конец очереди"; clicked => { root.album-enqueue(); } }
+            if root.album-can-download : EqButton { label: "Скачать"; enabled: root.can-play; clicked => { root.album-download(); } }
         }
         if root.album-note != "" && !root.album-busy && root.album-error == "" : Text {
             text: root.album-note; color: Theme.orange; font-size: 11px; wrap: word-wrap;

@@ -32,6 +32,7 @@ export interface ListenTrack {
   /** a recommendation of the smart shuffle (`lib/smartShuffle.ts`): ✨ in the player and the queue; `label` — «Рекомендация
    * на основе …», `session` — the Hub's session (its events carry the context `smart:<session>`) */
   rec?: { label: string; session: string } | null;
+  explanation?: string[];
   title: string;
   artist: string;
   cover_url?: string | null;
@@ -295,7 +296,7 @@ function reportEnd(ended = false, failed = false, interrupted = false) {
   const p = played;
   if (p?.started) accrue(p);
   played = null;
-  if (!p?.started || state.track?.ref !== p.ref) return;
+  if (!p || (!p.started && !failed) || state.track?.ref !== p.ref || state.info?.kind === 'preview') return;
   const duration = state.duration || state.track.duration_s || 0;
   const position = ended ? duration : state.position;
   const kind = interrupted ? 'interrupted' : failed ? 'error' : ended || (duration > 0 && position >= duration * FINISH_SHARE) ? 'finish' : 'skip';
@@ -359,8 +360,15 @@ function el(): HTMLAudioElement {
 
 function play(a: HTMLAudioElement) {
   // NotAllowedError (no user gesture): wait for the play button; AbortError: a newer track or a pause won.
+  const attempt = played;
   a.play().catch((e: unknown) => {
-    if ((e as Error)?.name === 'NotAllowedError') set({ phase: 'paused' });
+    if (played !== attempt) return;
+    const name = (e as Error)?.name;
+    if (name === 'NotAllowedError') set({ phase: 'paused' });
+    else if (name !== 'AbortError') {
+      reportEnd(false, true);
+      set({ phase: 'error', error: errorMessage(e) });
+    }
   });
 }
 
@@ -379,19 +387,20 @@ function start(queue: readonly ListenTrack[], index: number, auto = false, posit
   const resolveTimeout = setTimeout(() => {
     if (resolving !== ctl) return;
     ctl.abort();
+    reportEnd(false, true);
     a.pause();
     set({ phase: 'error', error: 'Истекло время загрузки аудио' });
   }, 20_000);
   pendingSeek = position;
   set({ track, queue, index, context: listContext, phase: autoplay ? 'resolving' : 'paused', info: null, error: null, position, duration: track.duration_s ?? 0 });
-  a.src = listenStreamUrl(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref);
+  a.src = listenStreamUrl(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref, onWave());
   if (autoplay) play(a);
   else a.load();
   mediaSession(track);
   // the prefetch of this very track (it was next) is the request to wait for: don't abort it
   if (prefetching?.ref !== track.ref) prefetching?.ctl.abort();
   prefetching = null;
-  api.listen(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref, ctl.signal).then(
+  api.listen(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref, ctl.signal, onWave()).then(
     (info) => {
       if (resolving !== ctl) return;
       set({ info, duration: info.kind === 'preview' ? (info.duration_s ?? 30) : state.duration });
@@ -400,6 +409,7 @@ function start(queue: readonly ListenTrack[], index: number, auto = false, posit
     },
     (e: unknown) => {
       if (isAbort(e) || resolving !== ctl) return;
+      reportEnd(false, true);
       if (auto && hasNext(state)) return void start(state.queue, state.index + 1, true);
       set({ phase: 'error', error: errorMessage(e) });
       a.pause();
@@ -416,7 +426,7 @@ function refreshInfo() {
   refreshed = ref;
   const ctl = new AbortController();
   const timeout = setTimeout(() => ctl.abort(), 8000);
-  api.listen(ref, ctl.signal).then(
+  api.listen(ref, ctl.signal, onWave()).then(
     (info) => state.track?.ref === ref && set({ info }),
     () => {},
   ).finally(() => clearTimeout(timeout));
@@ -430,7 +440,7 @@ function prefetchNext() {
   const ctl = new AbortController();
   prefetching = { ref: nextTrack.ref, ctl };
   const timeout = setTimeout(() => ctl.abort(), 20_000);
-  api.listen(nextTrack.nd_song_id ? `nd:${nextTrack.nd_song_id}` : nextTrack.ref, ctl.signal).catch(() => {
+  api.listen(nextTrack.nd_song_id ? `nd:${nextTrack.nd_song_id}` : nextTrack.ref, ctl.signal, onWave()).catch(() => {
     /* the track itself will show the error when it is reached */
   }).finally(() => clearTimeout(timeout));
 }
@@ -826,6 +836,20 @@ export function prev() {
 export function toggle() {
   if (state.phase === 'playing' || state.phase === 'loading' || state.phase === 'resolving') pause();
   else resume();
+}
+
+/** A wrong recording is a technical interruption, never a taste skip/dislike. */
+export function interruptRecording(ref: string, binding: string) {
+  if (state.track?.ref !== ref || state.info?.recording_binding !== binding) return;
+  reportEnd(false, false, true);
+  pause();
+}
+
+export function retryRecording(ref: string) {
+  if (state.track?.ref !== ref) return;
+  reportEnd(false, false, true);
+  refreshed = null;
+  start(state.queue, state.index);
 }
 
 function resume() {

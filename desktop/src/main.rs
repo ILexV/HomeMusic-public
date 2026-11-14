@@ -25,6 +25,8 @@ mod remote_playback;
 mod smart_playlists;
 mod stream_details;
 mod connection_settings;
+mod recommendations;
+mod listening_events;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -102,6 +104,7 @@ enum HubEvent {
     WaveMore(hub::WaveBatch),
     WaveFailed {
         message: String,
+        session: String,
         played: Vec<serde_json::Value>,
     },
     Lists(Vec<hub::PlaylistLine>),
@@ -112,6 +115,7 @@ enum HubEvent {
 struct AlbumPreview {
     id: String,
     cover_id: String,
+    catalog_ref: String,
     tracks: Vec<queue::Item>,
 }
 
@@ -147,6 +151,8 @@ struct HubState {
     home_error: RefCell<String>,
     wave: RefCell<hub::WaveLive>,
     wave_busy: Cell<bool>,
+    wave_start_preferences: RefCell<serde_json::Value>,
+    listening: RefCell<listening_events::State>,
     was_playing: Cell<bool>,
     playlists: RefCell<Vec<hub::PlaylistLine>>,
     liked_songs: RefCell<Vec<hub::Playable>>,
@@ -218,6 +224,8 @@ impl HubState {
             home_error: RefCell::new(String::new()),
             wave: RefCell::new(hub::WaveLive::default()),
             wave_busy: Cell::new(false),
+            wave_start_preferences: RefCell::new(hub::neutral_preferences()),
+            listening: RefCell::new(listening_events::State::default()),
             was_playing: Cell::new(false),
             playlists: RefCell::new(Vec::new()),
             liked_songs: RefCell::new(Vec::new()),
@@ -292,6 +300,7 @@ fn take_events(events: &Mutex<Vec<HubEvent>>) -> Vec<HubEvent> {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    slint::BackendSelector::new().backend_name("winit".into()).select()?;
     let ui = AppWindow::new()?;
     let player = Rc::new(RefCell::new(Player::open(PlayerOptions {
         null_audio: false,
@@ -382,6 +391,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let _smart_playlists = smart_playlists::bind(&feature_context, &tools);
     let _remote_playback = remote_playback::bind(&feature_context, &tools);
     let _connection_settings = connection_settings::bind(&feature_context, &tools);
+    let _recommendations = recommendations::bind(&feature_context, &tools);
     let tools_weak = tools.as_weak();
     ui.on_open_tools(move || {
         if let Some(tools) = tools_weak.upgrade() {
@@ -743,6 +753,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     connect_album_actions(&ui, &hub_state, &player, &queue, &config, &config_status, &waves);
     connect_queue_actions(&ui, &hub_state, &player, &queue, &config, &config_status, &waves);
+
+    let ui_back = ui.as_weak();
+    commands::bind_back_button(ui.window(), move || {
+        if let Some(ui) = ui_back.upgrade() {
+            if ui.get_album_open() { ui.invoke_close_album(); }
+        }
+    });
 
     let ui_nav = ui.as_weak();
     let hub_nav = hub_state.clone();
@@ -1241,6 +1258,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 let player = player_tick.borrow();
                 let snapshot = player.snapshot();
+                hub_tick.listening.borrow_mut().tick(&snapshot, &queue_tick.borrow(), &hub_tick);
+                maybe_extend_wave(&hub_tick, &queue_tick.borrow());
                 push_playback(&ui, &snapshot);
                 show_status(&ui, &player, &hub_tick, &status_tick);
                 let playing = snapshot.playing;
@@ -2077,8 +2096,9 @@ fn apply_hub_events(
                 }
                 hub.wave_busy.set(false);
                 if batch.tracks.is_empty() || batch.session_id.is_empty() {
-                    *hub.hub_note.borrow_mut() = "Волна пока пустая: попробуйте чуть позже".into();
+                    *hub.hub_note.borrow_mut() = format!("Волна пока не готова: попробуйте чуть позже. {}", batch.notice);
                 } else {
+                    *hub.hub_note.borrow_mut() = batch.notice.clone();
                     cancel_queue_load(ui, hub);
                     *hub.wave.borrow_mut() = hub::WaveLive {
                         id: batch.session_id.clone(),
@@ -2086,6 +2106,10 @@ fn apply_hub_events(
                         origin,
                         pending: Vec::new(),
                         asking: false,
+                        preferences: batch.preferences.clone(),
+                        notice: batch.notice.clone(),
+                        retry_at: None,
+                        exhausted: false,
                     };
                     *hub.album_id.borrow_mut() = String::new();
                     let name = if batch.title.is_empty() {
@@ -2094,6 +2118,7 @@ fn apply_hub_events(
                         batch.title.clone()
                     };
                     let mut next = queue_from_playables(&name, &batch.tracks);
+                    next.set_context(format!("wave:{}", batch.session_id));
                     let moved = next.select(0);
                     next.inherit_preferences(&queue.borrow());
                     *queue.borrow_mut() = next;
@@ -2105,6 +2130,10 @@ fn apply_hub_events(
                     continue;
                 }
                 hub.wave.borrow_mut().asking = false;
+                hub.wave.borrow_mut().preferences = batch.preferences.clone();
+                hub.wave.borrow_mut().notice = batch.notice.clone();
+                hub.wave.borrow_mut().retry_at = Some(Instant::now() + Duration::from_secs(3));
+                hub.wave.borrow_mut().exhausted = batch.tracks.is_empty() && !batch.pending;
                 let at_end = {
                     let queue = queue.borrow();
                     queue.index().map(|index| index + 1 >= queue.items().len()).unwrap_or(false)
@@ -2118,9 +2147,11 @@ fn apply_hub_events(
                     show_queue(ui, &queue.borrow(), hub);
                 }
             }
-            HubEvent::WaveFailed { message, played } => {
+            HubEvent::WaveFailed { message, played, session } => {
+                if hub.wave.borrow().id != session { continue; }
                 hub.wave_busy.set(false);
                 hub.wave.borrow_mut().asking = false;
+                hub.wave.borrow_mut().retry_at = Some(Instant::now() + Duration::from_secs(15));
                 hub.wave.borrow_mut().pending.extend(played);
                 *hub.hub_note.borrow_mut() = message;
             }
@@ -2176,29 +2207,7 @@ fn note_wave_leave(player: &Player, item: &queue::Item, hub: &HubState, natural_
 }
 
 fn note_departure(snap: &player::PlaybackState, item: &queue::Item, hub: &HubState, natural_end: bool) {
-    if let Some(modes) = hub.modes.borrow().upgrade() {
-        modes.note_leave_with_snapshot(natural_end, snap.position_s, snap.duration_s);
-    }
-    let (session, origin) = {
-        let wave = hub.wave.borrow();
-        if !wave.on() {
-            return;
-        }
-        (wave.id.clone(), wave.origin.clone())
-    };
-    let finish = natural_end || (snap.duration_s > 0.5 && snap.position_s / snap.duration_s >= 0.9);
-    let kind = if finish { "finish" } else { "skip" };
-    if let Some(event) = hub::wave_event(
-        kind,
-        &item.id,
-        &item.listen_ref,
-        if natural_end { snap.duration_s } else { snap.position_s },
-        snap.duration_s,
-        &session,
-        &origin,
-    ) {
-        hub.wave.borrow_mut().pending.push(event);
-    }
+    hub.listening.borrow_mut().depart(snap, item, hub, natural_end);
 }
 
 fn note_wave_mark(item: &queue::Item, hub: &HubState, kind: &str) {
@@ -2216,6 +2225,7 @@ fn note_wave_mark(item: &queue::Item, hub: &HubState, kind: &str) {
 }
 
 fn maybe_extend_wave(hub: &HubState, queue: &queue::Queue) {
+    if hub.wave_busy.get() { return; }
     let Some(index) = queue.index() else { return };
     let left = queue.items().len().saturating_sub(index + 1);
     if left > 1 {
@@ -2228,7 +2238,7 @@ fn maybe_extend_wave(hub: &HubState, queue: &queue::Queue) {
         .collect();
     let (id, played) = {
         let mut wave = hub.wave.borrow_mut();
-        if !wave.on() || wave.asking {
+        if !wave.on() || wave.asking || wave.exhausted || wave.retry_at.is_some_and(|at| Instant::now() < at) {
             return;
         }
         wave.asking = true;
@@ -2236,12 +2246,13 @@ fn maybe_extend_wave(hub: &HubState, queue: &queue::Queue) {
     };
     let client = Arc::clone(&hub.hub);
     let events = Arc::clone(&hub.events);
-    std::thread::spawn(move || match client.wave_next(&id, &played, &queued) {
+    std::thread::spawn(move || match client.wave_next(&id, &played, &queued, None) {
         Ok(batch) => push_event(&events, HubEvent::WaveMore(batch)),
         Err(message) => push_event(
             &events,
             HubEvent::WaveFailed {
                 message,
+                session: id,
                 played,
             },
         ),
@@ -2513,30 +2524,20 @@ fn begin_wave(ui: &AppWindow, hub: &HubState, artist_id: String, origin: &'stati
     let client = Arc::clone(&hub.hub);
     let events = Arc::clone(&hub.events);
     let personal = origin == "home_card";
+    let preferences = hub.wave_start_preferences.replace(hub::neutral_preferences());
     std::thread::spawn(move || {
-        for attempt in 0..3 {
-            match client.wave_start(&artist_id, origin) {
-                Ok(batch) if !batch.tracks.is_empty() || !batch.pending || attempt == 2 => {
-                    push_event(
-                        &events,
-                        HubEvent::WaveStarted {
-                            ticket,
-                            batch,
-                            personal,
-                            origin: origin.to_string(),
-                        },
-                    );
-                    return;
-                }
-                Ok(_) => std::thread::sleep(Duration::from_secs(2)),
-                Err(message) => {
-                    push_event(
-                        &events,
-                        HubEvent::WaveStartFailed { ticket, message },
-                    );
-                    return;
-                }
-            }
+        let mut result = client.wave_start(&artist_id, origin, &preferences);
+        for _ in 0..2 {
+            let Ok(batch) = &result else { break };
+            if !batch.tracks.is_empty() || !batch.pending || batch.session_id.is_empty() { break; }
+            std::thread::sleep(Duration::from_secs(2));
+            result = client.wave_next(&batch.session_id, &[], &[], None);
+        }
+        match result {
+            Ok(batch) => push_event(&events, HubEvent::WaveStarted {
+                ticket, batch, personal, origin: origin.to_string(),
+            }),
+            Err(message) => push_event(&events, HubEvent::WaveStartFailed { ticket, message }),
         }
     });
 }
@@ -2592,6 +2593,8 @@ fn play_songs(
     }
     if hub.pane.get() == home::Pane::Liked {
         queue_next.set_context("liked");
+    } else if hub.pane.get() == home::Pane::Mix {
+        queue_next.set_context(format!("mix:{}", hub.mix.borrow().id));
     }
     let moved = queue_next.select(index);
     queue_next.inherit_preferences(&queue.borrow());
@@ -2785,9 +2788,13 @@ fn play_current_at(
     }
     ui.set_wave(empty_wave());
     waves.load(target.clone(), &cookie);
+    hub.listening.borrow_mut().begin(&queue.borrow(), hub);
     let loaded = match target {
         Some(target) => player.borrow_mut().load_cookie_at(&target, &cookie, position_s, paused),
-        None => Err("Нет трека".into()),
+        None => {
+            player.borrow_mut().stop();
+            Err("Нет доступного адреса трека или сессии Хаба".into())
+        },
     };
     maybe_extend_wave(hub, &queue.borrow());
     // The previous cover must not stay on the next track when this one has none.
@@ -2798,6 +2805,7 @@ fn play_current_at(
             Ok(())
         }
         Err(err) => {
+            hub.listening.borrow_mut().failed(hub);
             ui.set_error(err.clone().into());
             Err(err)
         }
@@ -2810,7 +2818,7 @@ fn current_target(
     config: &navidrome::ServerConfig,
     hub: &HubState,
 ) -> Option<(String, String)> {
-    let full_only = hub.wave.borrow().on() || queue.index().and_then(|index| queue.recommendation(index)).is_some();
+    let full_only = hub.wave.borrow().on() || queue.context().starts_with("mix:") || queue.index().and_then(|index| queue.recommendation(index)).is_some();
     item_target(queue.current()?, config, hub, full_only)
 }
 

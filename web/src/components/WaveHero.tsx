@@ -3,6 +3,7 @@ import { canWave, startWave, useWave } from '../lib/wave';
 import { Icon } from './Icon';
 import { Spinner } from './ui';
 import { WaveGlow } from './WaveGlow';
+import { WavePreferenceControls } from './WavePreferences';
 
 /** «Моя волна» as the hero of «Главная» on a computer (`useDesktop()`): no card, a living soft blob glows right on the
  * page background (a canvas wider than the column, its edges fade out); the title, the state line and the round play
@@ -31,6 +32,7 @@ export function WaveHero() {
   const label = busy ? 'Моя волна: запускаем' : running ? 'Моя волна: пауза' : on ? 'Моя волна: продолжить' : 'Моя волна: слушать';
 
   return (
+    <>
     <div className="relative mt-1 flex h-[360px] items-center justify-center">
       <WaveGlow
         playing={playing}
@@ -62,5 +64,7 @@ export function WaveHero() {
         </button>
       </div>
     </div>
+    <WavePreferenceControls />
+    </>
   );
 }

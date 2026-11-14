@@ -18,12 +18,12 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import Job, utcnow
+from app.models import DownloadItem, Job, utcnow
 from app.net import Priority, _priority
 
 log = logging.getLogger(__name__)
@@ -82,12 +82,21 @@ def notify() -> None:
 
 
 async def recover_stale() -> int:
-    """Called at startup: jobs left `running` by a crashed/stopped process go back to the queue."""
+    """Reclaim interrupted jobs and imports whose old handler finished before scheduling their scan."""
     async with session_scope() as s:
         res = await s.execute(
             update(Job).where(Job.status == "running").values(status="queued", locked_by=None, locked_at=None)
         )
-        return res.rowcount or 0
+        recovered = res.rowcount or 0
+        active = select(func.json_extract(Job.payload_json, "$.item_id")).where(
+            Job.kind == "download_item", Job.status.in_(("queued", "running")))
+        orphaned = (await s.execute(select(DownloadItem.id).where(
+            DownloadItem.status == "importing",
+            ~DownloadItem.id.in_(active.where(func.json_extract(Job.payload_json, "$.item_id").is_not(None))),
+        ))).scalars().all()
+        for item_id in orphaned:
+            await enqueue(s, "download_item", {"item_id": item_id})
+        return recovered + len(orphaned)
 
 
 def background_slots() -> int:
@@ -209,6 +218,10 @@ class WorkerPool:
         self.n = n
         self._tasks: list[asyncio.Task] = []
         self._stopping = False
+
+    @property
+    def tasks(self) -> tuple[asyncio.Task, ...]:
+        return tuple(self._tasks)
 
     async def _worker(self, idx: int) -> None:
         wid = f"{os.getpid()}-{idx}"

@@ -383,7 +383,7 @@ export interface DownloadTrackIn {
   explicit?: boolean | null;
   version?: string | null;
   catalog_ref?: string | null;
-  candidate?: Candidate | null;
+  file_ref?: string | null;
 }
 
 export interface DownloadIn {
@@ -414,6 +414,8 @@ export interface ListenOut {
   nd_song_id?: string | null;
   /** audio with Range support (same session cookie) */
   stream_url: string;
+  /** Server-bound identity used to report the actual recording, never a client-supplied URL. */
+  recording_binding?: string | null;
 }
 
 export interface DownloadBatchOut {
@@ -614,7 +616,7 @@ export interface AssistantChoice {
   kind: 'catalog' | 'library' | 'candidate' | 'manual' | 'skip';
   ref?: string | null;
   track_id?: number | null;
-  candidate?: Candidate | null;
+  file_ref?: string | null;
   artist?: string | null;
   title?: string | null;
 }
@@ -884,7 +886,7 @@ export interface HubEventMap {
 export interface HealthOut {
   capabilities?: string[];
   ok: boolean;
-  navidrome: boolean;
+  navidrome: boolean | null;
   providers: Record<string, unknown>;
   version: string;
   today?: ISODate | null;
@@ -956,6 +958,7 @@ export interface DislikeOut {
 export type MixMode = 'normal' | 'favorites' | 'discover';
 
 export interface MixTrackOut extends TrackOut {
+  explanation: string[];
   position: number;
   /** the strongest source of the song: favorites, stash, ytm_radio, lastfm_similar… */
   generator: string;
@@ -976,6 +979,8 @@ export interface MixOut {
   mode_title: string;
   created_at: ISODateTime;
   nd_playlist_id?: string | null;
+  playlist_status: 'pending' | 'error' | 'published';
+  playlist_error: string | null;
   /** songs in the library already; the rest download quietly */
   ready: number;
   total: number;
@@ -1024,7 +1029,14 @@ export interface WaveSeedIn {
   by_artist?: boolean;
 }
 
+export interface WavePreferences {
+  energy: 'any' | 'calm' | 'energetic';
+  vocals: 'any' | 'vocal' | 'instrumental';
+  discovery: 'balanced' | 'familiar' | 'new';
+}
+
 export interface WaveStartIn {
+  preferences?: WavePreferences;
   seed?: WaveSeedIn | null;
   mode?: MixMode | null;
   /** analytics only: where it was started (`home_card`, `catalog_card`, `track_menu`, `artist_menu`, `player`,
@@ -1038,6 +1050,7 @@ export type WaveOrigin = 'home_card' | 'catalog_card' | 'track_menu' | 'artist_m
   | 'search_file' | 'restart';
 
 export interface WaveNextIn {
+  preferences?: WavePreferences;
   /** the events since the previous call (the same ones go to /api/plays/events: one event_id is stored once) */
   played: PlayEventIn[];
   /** refs of the wave's tracks still ahead in the player, not started: the answer replaces them */
@@ -1045,6 +1058,7 @@ export interface WaveNextIn {
 }
 
 export interface WaveTrackOut extends TrackOut {
+  explanation: string[];
   generator: string;
   generator_title: string;
   familiar: boolean;
@@ -1098,6 +1112,9 @@ export interface SmartAddOut {
 }
 
 export interface WaveOut {
+  preferences: WavePreferences;
+  preferences_status: string | null;
+  preparation: { ready: number; pending: number; unavailable: number };
   session_id: string;
   title: string;
   mode: MixMode;

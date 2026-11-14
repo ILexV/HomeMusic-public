@@ -17,8 +17,8 @@ router = APIRouter(prefix="/api/smart-shuffle", tags=["smart-shuffle"])
 
 async def plan_out(s: AsyncSession, plan: smart.Plan, user_id: int) -> SmartOut:
     tracks = await track_outs(s, [c for _, _, c in plan.recs], user_id)
-    recs = [SmartRecOut(**t.model_dump(), after=after, slot=slot)
-            for t, (slot, after, _) in zip(tracks, plan.recs, strict=True)]
+    recs = [SmartRecOut(**{**t.model_dump(), "explanation": list(c.explanation)}, after=after, slot=slot)
+            for t, (slot, after, c) in zip(tracks, plan.recs, strict=True)]
     recorded = None
     if plan.recorded is not None:
         r = plan.recorded

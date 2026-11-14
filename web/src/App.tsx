@@ -16,6 +16,7 @@ import { SessionContext } from './lib/session';
 import { matchPath, navigate, useRoute, type Route } from './lib/router';
 import { AdminPage } from './pages/Admin';
 import { AdminUserPage } from './pages/AdminUser';
+import { SystemHealthPage } from './pages/SystemHealth';
 import { TasteMatrixPage } from './pages/insights/Matrix';
 import { InsightsOverviewPage } from './pages/insights/Overview';
 import { MixDetailPage, WaveDetailPage } from './pages/insights/Recs';
@@ -39,6 +40,8 @@ import { PlaylistsPage } from './pages/Playlists';
 import { SearchPage, searchTab } from './pages/Search';
 import { SharePage } from './pages/Share';
 import { UploadPage } from './pages/Upload';
+import { RecommendationPausesPage, RecommendationQualityPage } from './pages/Recommendations';
+import { ReleasesPage } from './pages/Releases';
 
 type RouteDef = [pattern: string, tab: Tab | null, render: (p: Record<string, string>, r: Route) => ReactNode];
 
@@ -90,7 +93,11 @@ const ROUTES: RouteDef[] = [
     ),
   ],
   ['/more', 'more', () => <MorePage />],
+  ['/recommendations', 'more', () => <RecommendationQualityPage />],
+  ['/recommendations/pauses', 'more', () => <RecommendationPausesPage />],
+  ['/releases', 'more', () => <ReleasesPage />],
   ['/admin', 'more', () => <AdminPage />],
+  ['/admin/system', 'more', () => <SystemHealthPage />],
   ['/admin/user/:id', 'more', (p) => <AdminUserPage key={p.id} id={Number(p.id)} />],
   ['/admin/insights', 'more', () => <InsightsOverviewPage />],
   ['/admin/taste', 'more', () => <TasteMatrixPage />],
@@ -138,6 +145,8 @@ export function App() {
   useEffect(() => {
     const onUnauthorized = () => {
       invalidateCache();
+      restoreWave(null);
+      setListeningAccount(null);
       setMe(null);
     };
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
@@ -169,6 +178,8 @@ export function App() {
       /* ignore: we drop the session anyway */
     }
     invalidateCache();
+    restoreWave(null);
+    setListeningAccount(null);
     stopListening();
     resetStars();
     setMe(null);
@@ -205,7 +216,7 @@ export function App() {
   // the admin's analytics are wide (tables, two columns on a desktop)
   const wide = route.path.startsWith('/admin/');
   return (
-    <SessionContext.Provider value={{ me, logout }}>
+    <SessionContext.Provider key={me.id} value={{ me, logout }}>
       <main className={cx('mx-auto min-h-dvh', wide ? 'max-w-6xl' : 'max-w-2xl', !fullPlayer && 'pb-[calc(var(--tabbar-h)+16px+env(safe-area-inset-bottom))]')}>
         {resolved?.node}
         {!fullPlayer && <PlayerSpacer />}

@@ -64,12 +64,15 @@ services:
       NAVIDROME_URL: http://navidrome:4533
       YTDLP_POT_BASE_URL: http://youtube-pot:4416
       YTDLP_CACHE_DIR: /data/yt-dlp-cache
+      BACKUP_CONFIG_FILES: '${BACKUP_CONFIG_FILES:-["/config/navidrome.toml"]}'
     volumes:
       - hub-data:/data
       - ${MUSIC_ROOT}:/music
       - ./config.yaml:/config/config.yaml:ro
+      - navidrome-data:/navidrome-data:ro
+      - ./navidrome/navidrome.toml:/config/navidrome.toml:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status == 200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=8).status == 200 else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3

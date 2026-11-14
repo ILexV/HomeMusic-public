@@ -558,6 +558,7 @@ class WaveItem(Base):
     score: Mapped[float] = mapped_column(Float, default=0, server_default="0")
     sim: Mapped[float | None] = mapped_column(Float)
     value: Mapped[float | None] = mapped_column(Float)  # `wave.value` the pick ranked it by (none: the seed)
+    decision_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class SmartSession(Base):
@@ -608,6 +609,7 @@ class SmartItem(Base):
     sim: Mapped[float | None] = mapped_column(Float)  # closeness by sound to the playlist's center
     value: Mapped[float | None] = mapped_column(Float)
     state: Mapped[str] = mapped_column(String(12), default="handed", server_default="handed")  # handed/added/hidden
+    decision_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class SmartHidden(Base):

@@ -4,8 +4,8 @@ import { Mini } from "mini.slint";
 import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
 
 import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
-import { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow } from "tools.slint";
-export { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow }
+import { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow } from "tools.slint";
+export { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow }
 
 export enum Mode { mini, medium, large }
 
@@ -70,6 +70,7 @@ export component AppWindow inherits Window {
     in-out property <bool> album-busy;
     in-out property <string> album-error;
     in-out property <string> album-note;
+    in-out property <bool> album-can-download;
     in-out property <bool> liked;
     in-out property <bool> disliked;
     in-out property <bool> album-known;
@@ -106,6 +107,7 @@ export component AppWindow inherits Window {
     callback close-album();
     callback album-play();
     callback album-enqueue();
+    callback album-download();
     callback album-play-row(int);
     callback pick-artist(int);
     callback open-album(int);
@@ -261,6 +263,7 @@ export component AppWindow inherits Window {
                         album-busy: root.album-busy;
                         album-error: root.album-error;
                         album-note: root.album-note;
+                        album-can-download: root.album-can-download;
                         queue-search-edited(text) => { root.queue-search-edited(text); }
                         move-queue-row(from, to) => { root.move-queue-row(from, to); }
                         remove-queue-row(index) => { root.remove-queue-row(index); }
@@ -268,6 +271,7 @@ export component AppWindow inherits Window {
                         close-album => { root.close-album(); }
                         album-play => { root.album-play(); }
                         album-enqueue => { root.album-enqueue(); }
+                        album-download => { root.album-download(); }
                         album-play-row(index) => { root.album-play-row(index); }
                         queue: root.queue;
                         queue-title: root.queue-title;
@@ -332,6 +336,7 @@ export component AppWindow inherits Window {
                         album-busy: root.album-busy;
                         album-error: root.album-error;
                         album-note: root.album-note;
+                        album-can-download: root.album-can-download;
                         queue-search-edited(text) => { root.queue-search-edited(text); }
                         move-queue-row(from, to) => { root.move-queue-row(from, to); }
                         remove-queue-row(index) => { root.remove-queue-row(index); }
@@ -339,6 +344,7 @@ export component AppWindow inherits Window {
                         close-album => { root.close-album(); }
                         album-play => { root.album-play(); }
                         album-enqueue => { root.album-enqueue(); }
+                        album-download => { root.album-download(); }
                         album-play-row(index) => { root.album-play-row(index); }
                         queue: root.queue;
                         queue-title: root.queue-title;

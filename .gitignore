@@ -19,6 +19,8 @@ __pycache__/
 node_modules/
 web/dist/
 hub/app/static/
+web/test-results/
+web/playwright-report/
 
 # local data
 .agent-work/

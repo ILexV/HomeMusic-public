@@ -6,6 +6,10 @@ Navidrome is not notified here: callers enqueue an `nd_scan` job (coalesced) tha
 from __future__ import annotations
 
 import asyncio
+import base64
+import errno
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -148,8 +152,16 @@ def _move(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(src, dest)
-    except OSError:
-        shutil.move(str(src), str(dest))
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        # A crash while copying across mounts must leave either the staging file or the complete destination.
+        tmp = dest.with_name(f".{dest.name}.part")
+        shutil.copyfile(src, tmp)
+        with tmp.open("rb") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, dest)
+        src.unlink()
 
 
 def _write_cover_file(album_dir: Path, cover: bytes) -> None:
@@ -165,10 +177,47 @@ def is_original(source_date: date | None, explicit: bool | None) -> bool:
     return bool(explicit) or (source_date is not None and source_date < cutoff)
 
 
-async def import_file(s: AsyncSession, src: Path, spec: ImportSpec) -> Track:
-    """Tag `src` (a file in staging/), move it into the library and create the Track row (caller commits)."""
+def _save_import(journal: Path, record: dict) -> None:
+    tmp = journal.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, journal)
+
+
+def prepare_import(journal: Path, src: Path, spec: ImportSpec) -> None:
+    """Persist the intent before tagging or moving bytes; keep it until the caller's DB commit."""
+    _save_import(journal, {
+        "src": str(src), "uid": str(uuid.uuid4()), "spec": spec.model_dump(mode="json", exclude={"cover"}),
+        "cover": base64.b64encode(spec.cover).decode("ascii") if spec.cover else None,
+    })
+
+
+def load_import(journal: Path) -> tuple[Path, ImportSpec]:
+    record = json.loads(journal.read_text(encoding="utf-8"))
+    spec = ImportSpec(**record["spec"], cover=base64.b64decode(record["cover"]) if record["cover"] else None)
+    return Path(record["src"]), spec
+
+
+def _digest(path: Path) -> str:
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+async def import_file(s: AsyncSession, src: Path, spec: ImportSpec, *, journal: Path | None = None) -> Track:
+    """Import once; a download's durable journal also recovers a move whose DB transaction rolled back."""
     async with library_lock:
+        record = json.loads(journal.read_text(encoding="utf-8")) if journal else {}
+        if record:
+            existing = (await s.execute(select(Track).where(Track.uid == record["uid"]))).scalar_one_or_none()
+            if existing is not None:
+                return existing
         album = await get_or_create_album(s, spec)
+        if record.get("album_uid") and album.uid != record["album_uid"]:
+            has_tracks = (await s.execute(select(Track.id).where(Track.album_id == album.id).limit(1))).scalar()
+            if has_tracks is None:
+                album.uid = record["album_uid"]
         cover = tagger.prepare_cover(spec.cover) if spec.cover else None
         album_dir_rel = album_reldir(album)
         album_dir = library_abs(album_dir_rel)
@@ -176,7 +225,7 @@ async def import_file(s: AsyncSession, src: Path, spec: ImportSpec) -> Track:
             cover = (album_dir / "cover.jpg").read_bytes()
 
         track = Track(
-            uid=str(uuid.uuid4()),
+            uid=record.get("uid") or str(uuid.uuid4()),
             album_id=album.id,
             path="",
             artist=spec.artist,
@@ -203,22 +252,37 @@ async def import_file(s: AsyncSession, src: Path, spec: ImportSpec) -> Track:
             added_by=spec.added_by,
         )
 
-        await asyncio.to_thread(
-            tagger.write_tags, src, tagdata_for(track, album, cover=cover, artists=spec.artists,
-                                                track_total=spec.track_total)
-        )
-
-        ext = src.suffix.lstrip(".").lower() or "mp3"
-        name = track_filename(spec.disc_no, spec.track_no, spec.title, ext)
-        dest = album_dir / name
-        if dest.exists():
-            dest = next_version_path(dest) if spec.force else unique_path(album_dir, name)
-        await asyncio.to_thread(_move, src, dest)
-        if cover and not (album_dir / "cover.jpg").is_file():
-            await asyncio.to_thread(_write_cover_file, album_dir, cover)
+        if record.get("dest"):
+            dest = library_abs(record["dest"])
+        else:
+            ext = src.suffix.lstrip(".").lower() or "mp3"
+            name = track_filename(spec.disc_no, spec.track_no, spec.title, ext)
+            dest = album_dir / name
+            if dest.exists():
+                dest = next_version_path(dest) if spec.force else unique_path(album_dir, name)
+            if journal:
+                record.update(dest=PurePosixPath(album_dir_rel, dest.name).as_posix(), album_uid=album.uid)
+                await asyncio.to_thread(_save_import, journal, record)
+        if record.get("digest") and dest.is_file():
+            if await asyncio.to_thread(_digest, dest) != record["digest"]:
+                raise ValueError("import destination changed; refusing to adopt another file")
+        else:
+            if dest.exists():
+                raise ValueError("import destination is occupied")
+            await asyncio.to_thread(
+                tagger.write_tags, src, tagdata_for(track, album, cover=cover, artists=spec.artists,
+                                                  track_total=spec.track_total)
+            )
+            if journal:
+                record["digest"] = await asyncio.to_thread(_digest, src)
+                await asyncio.to_thread(_save_import, journal, record)
+            await asyncio.to_thread(_move, src, dest)
+        if cover:
+            if not (album_dir / "cover.jpg").is_file():
+                await asyncio.to_thread(_write_cover_file, album_dir, cover)
             album.cover_path = (album_dir_rel / "cover.jpg").as_posix()
 
-        track.path = PurePosixPath(album_dir_rel, dest.name).as_posix()
+        track.path = dest.relative_to(get_settings().library_dir).as_posix()
         s.add(track)
         await s.flush()
         log.info("imported %s", track.path, extra={"user_id": spec.added_by})

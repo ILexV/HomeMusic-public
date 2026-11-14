@@ -38,6 +38,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog.models import CatalogTrack, split_ref
+from app.api.schemas import WavePreferences
 from app.config import get_settings
 from app.db import session_scope
 from app.jobs.queue import enqueue, notify
@@ -78,6 +79,12 @@ EMBED_NEW = 60  # new candidates without a vector whose previews go to the embed
 VECTORS_TOP = 80  # best candidates whose vectors are asked for the session's sound centers
 ASK_AGAIN_S = 60  # a vector the embedder did not have is asked again after this
 REFILL_SEEDS = 3
+PREPARE_POOL = 10  # bounded reserve: failed audio never turns into a taste signal
+PREFERENCE_WEIGHT = 2.0
+PREFERENCE_PROMPTS = {
+    "energy": ("calm, gentle, relaxing music with low energy", "energetic, intense, driving music"),
+    "vocals": ("instrumental music without singing or vocals", "music with a singer and prominent vocals"),
+}
 
 
 class WaveError(Exception):
@@ -91,13 +98,15 @@ class WaveError(Exception):
 
 def cand_json(c: build.Cand) -> dict[str, Any]:
     return {"track": c.track.model_dump(mode="json"), "gens": c.gens, "familiar": c.familiar,
-            "nd_song_id": c.nd_song_id, "library_track_id": c.library_track_id, "sim": c.sim}
+            "nd_song_id": c.nd_song_id, "library_track_id": c.library_track_id, "sim": c.sim,
+            "score": c.score, "parts": c.parts, "known": c.known, "explanation": c.explanation}
 
 
 def cand_of(d: dict[str, Any]) -> build.Cand:
     return build.Cand(track=CatalogTrack.model_validate(d["track"]), gens=dict(d.get("gens") or {}),
                       familiar=bool(d.get("familiar")), nd_song_id=d.get("nd_song_id"),
-                      library_track_id=d.get("library_track_id"), sim=d.get("sim"))
+                      library_track_id=d.get("library_track_id"), sim=d.get("sim"), score=float(d.get("score") or 0),
+                      parts=d.get("parts"), known=d.get("known"), explanation=list(d.get("explanation") or []))
 
 
 def fp_of(c: build.Cand) -> str:
@@ -140,6 +149,13 @@ class State:
     downloads: list[str] = field(default_factory=list)  # refs downloaded for the session
     gens: dict[str, Any] = field(default_factory=dict)  # generator -> {tracks, seconds, error?, off?}
     seed_artist: str | None = None  # artist key of a wave by an artist: it plays more often (`SEED_ARTIST_GAP`)
+    preferences: dict[str, str] = field(default_factory=lambda: WavePreferences().model_dump())
+    preferences_status: str | None = None
+    preparation: dict[str, int] = field(default_factory=lambda: {"ready": 0, "pending": 0, "unavailable": 0})
+    awaiting_seed: str | None = None
+    unavailable: set[str] = field(default_factory=set)
+    refills_since_play: int = 0
+    more_to_prepare: bool = False
 
     def dump(self) -> dict[str, Any]:
         return {"version": self.version, "taste_model": self.taste_model, "seen": sorted(self.seen),
@@ -148,7 +164,10 @@ class State:
                 "played": [p.__dict__ for p in self.played], "heard": sorted(self.heard), "skips": self.skips,
                 "pos": self.pos, "neg": self.neg, "radios": self.radios, "seeds_used": self.seeds_used,
                 "started": self.started, "started_familiar": self.started_familiar, "downloads": self.downloads,
-                "gens": self.gens, "seed_artist": self.seed_artist}
+                "gens": self.gens, "seed_artist": self.seed_artist, "preferences": self.preferences,
+                "preferences_status": self.preferences_status, "preparation": self.preparation,
+                "awaiting_seed": self.awaiting_seed, "unavailable": sorted(self.unavailable),
+                "refills_since_play": self.refills_since_play, "more_to_prepare": self.more_to_prepare}
 
     @classmethod
     def load(cls, d: dict[str, Any]) -> State:
@@ -160,7 +179,13 @@ class State:
                  radios=list(d.get("radios") or []), seeds_used=list(d.get("seeds_used") or []),
                  started=int(d.get("started") or 0), started_familiar=int(d.get("started_familiar") or 0),
                  downloads=list(d.get("downloads") or []), gens=dict(d.get("gens") or {}),
-                 heard=set(d.get("heard") or []), seed_artist=d.get("seed_artist"))
+                 heard=set(d.get("heard") or []), seed_artist=d.get("seed_artist"),
+                 preferences=WavePreferences.model_validate(d.get("preferences") or {}).model_dump(),
+                 preferences_status=d.get("preferences_status"),
+                 preparation=d.get("preparation") or {"ready": 0, "pending": 0, "unavailable": 0},
+                 awaiting_seed=d.get("awaiting_seed"), unavailable=set(d.get("unavailable") or []),
+                 refills_since_play=int(d.get("refills_since_play") or 0),
+                 more_to_prepare=bool(d.get("more_to_prepare")))
         st.pool = {c.track.ref: c for c in map(cand_of, d.get("pool") or [])}
         st.out = {c.track.ref: c for c in map(cand_of, d.get("out") or [])}
         st.played = [Played(**p) for p in d.get("played") or []]
@@ -324,7 +349,7 @@ async def absorb(rt: Runtime, results: list[build.GenResult]) -> int:
             for g, pos in c.gens.items():
                 have.gens[g] = min(have.gens.get(g, pos), pos)
             have.score = build.score(have, weights(), p)
-        elif fp not in known:
+        elif fp not in known and c.track.ref not in st.unavailable:
             fresh[c.track.ref] = c
     if not fresh:
         return 0
@@ -568,24 +593,30 @@ def value(c: build.Cand, st: State, vectors: dict[str, list[float]], pos: list[f
             v += SOUND_WEIGHT * (build._cos(vec, pos) - .5 * nearest)
         else:
             v += SOUND_WEIGHT * (build._cos(vec, pos) - build._cos(vec, neg))
-    return v
+    parts = c.parts or {}
+    v += parts.get("session_preferences", {}).get("contribution", 0.0)
+    multiplier = parts.get("pause_multiplier", 1.0)
+    # A soft restriction must also lower a negative score, never make it more attractive.
+    return v * multiplier if v >= 0 else v / multiplier
 
 
 def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: int = BATCH,
          queued: set[str] = frozenset(), first: build.Cand | None = None,
-         values: dict[str, float] | None = None) -> list[build.Cand]:
+         values: dict[str, float] | None = None, eligible: set[str] | None = None) -> list[build.Cand]:
     """The next `n`: the best by `value` keeping the mode's familiar share, an artist at most once in `ARTIST_GAP`
     tracks (counting the played ones; the artist of a wave by an artist — once in `SEED_ARTIST_GAP`); with nothing else left, the gap gives way (never the same artist twice in a
     row). «Не нравится» set since the candidate came in drops it. `queued` — refs the client has ahead already.
     `values` gets the `value` of every candidate ranked, by ref (the analytics of `wave_items`)."""
     pos = _weighted_center(st.positive_weights, vectors) if st.taste_model == "v2" else _center(st.pos, vectors)
     neg = None if st.taste_model == "v2" else _center(st.neg, vectors)
-    pool = [c for c in [*st.out.values(), *st.pool.values()] if c is not first and not _disliked(c, p)]
+    pool = [c for c in [*st.out.values(), *st.pool.values()] if c is not first and not _disliked(c, p)
+            and (eligible is None or c.track.ref in eligible)]
     vals = {id(c): value(c, st, vectors, pos, neg, c.track.ref in queued) for c in pool}
     if values is not None:
         values.update((c.track.ref, vals[id(c)]) for c in pool)
     ranked = sorted(pool, key=lambda c: -vals[id(c)])
-    share = build.MODES.get(mode, build.MODES["normal"])
+    share = {"familiar": 0.8, "new": 0.1}.get(st.preferences.get("discovery"),
+                                               build.MODES.get(mode, build.MODES["normal"]))
     out: list[build.Cand] = [first] if first is not None else []
     recent = [x.artist for x in st.played]
     while len(out) < n and ranked:
@@ -676,6 +707,7 @@ def _start(st: State, c: build.Cand) -> Played:
     st.played = [*st.played, x][-HISTORY_MAX:]
     st.heard.add(fp_of(c))
     st.started += 1
+    st.refills_since_play = 0
     st.started_familiar += c.familiar
     return x
 
@@ -814,6 +846,9 @@ class Batch:
     tracks: list[build.Cand]
     pending: bool  # sources still answering in the background
     recorded: Any = None
+    preferences: dict[str, str] = field(default_factory=lambda: WavePreferences().model_dump())
+    preferences_status: str | None = None
+    preparation: dict[str, int] = field(default_factory=lambda: {"ready": 0, "pending": 0, "unavailable": 0})
 
 
 async def _artist_songs(nd, artist_id: str, name: str) -> list[CatalogTrack]:
@@ -953,7 +988,7 @@ async def clear_old(s: AsyncSession, now: datetime | None = None) -> int:
 
 async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, origin: str | None = None,
                 client: str | None = None, restart_of: str | None = None,
-                request: dict[str, Any] | None = None) -> Batch:
+                request: dict[str, Any] | None = None, preferences: dict[str, str] | None = None) -> Batch:
     """A new session. `origin`, `client`, `restart_of` and `request` (the start's body as it came) are kept for the
     analytics only."""
     from app.mixes.core import settings_of
@@ -978,7 +1013,8 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
         if profile.empty or not seeds:
             raise WaveError(409, "Волне не от чего оттолкнуться: послушайте что-нибудь или выберите исполнителей")
     sid = uuid.uuid4().hex[:16]
-    rt = Runtime(user_id=user.id, mode=mode, state=State(taste_model=cfg.taste_model), profile=profile)
+    rt = Runtime(user_id=user.id, mode=mode, state=State(taste_model=cfg.taste_model,
+                 preferences=WavePreferences.model_validate(preferences or {}).model_dump()), profile=profile)
     rt.state.seeds_used = [t.key for t in seeds]
     rt.state.seed_artist = artist_key(seed_artist["name"]) if seed_artist else None
     seed_json = ({"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title} if seed_track
@@ -995,30 +1031,32 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
             first = build.Cand(track=seed_track, gens={"seed": 0})
             await build.link_library({seed_track.ref: first})
             if _disliked(first, profile):
-                first = None
-            else:
-                first.familiar = build.keep(first, profile, cfg) and first.familiar
-                first.score = build.score(first, weights(), profile)
+                raise WaveError(409, "Начальный трек исключён из рекомендаций")
+            first.familiar = build.keep(first, profile, cfg) and first.familiar
+            first.score = build.score(first, weights(), profile)
         if first is not None:
             rt.state.heard.add(fp_of(first))  # the radios' copies of the seed stay out
         await _gather(sid, rt, list(generators(profile, seed_track, seed_artist, seeds).items()),
                       lambda: len(rt.state.pool) >= 4 * BATCH)
         tracks = await _hand_out(sid, rt, set(), first)
-        pending = bool(rt.tasks)
-    return Batch(sid, title_of(seed_json), mode, seed_json, tracks, pending)
+        pending = bool(rt.tasks) or rt.state.preparation["pending"] > 0 or rt.state.more_to_prepare
+    return Batch(sid, title_of(seed_json), mode, seed_json, tracks, pending,
+                 preferences=rt.state.preferences, preferences_status=rt.state.preferences_status,
+                 preparation=rt.state.preparation)
 
 
-async def next_batch(user: User, sid: str, played: list[Any], queued: list[str]) -> Batch:
+async def next_batch(user: User, sid: str, played: list[Any], queued: list[str],
+                     preferences: dict[str, str] | None = None) -> Batch:
     rt = await _runtime(sid, user)
     if not rt.state.pool and rt.tasks:  # nothing to pick from yet: the sources still answer (outside the lock)
         await asyncio.wait(set(rt.tasks), timeout=get_settings().wave_wait_s)
     async with rt.lock:
         async with session_scope() as s:
             recorded, events = await record(s, sid, user.id, played)
-            if rt.state.taste_model == "v2":
-                events = list((await s.execute(select(PlayEvent).where(PlayEvent.user_id == user.id,
-                    PlayEvent.context == f"wave:{sid}", PlayEvent.ts <= utcnow())
-                    .order_by(PlayEvent.ts, PlayEvent.id))).scalars())
+            # Playback may have arrived through /plays before a preferences-only refresh.
+            events = list((await s.execute(select(PlayEvent).where(PlayEvent.user_id == user.id,
+                PlayEvent.context == f"wave:{sid}", PlayEvent.ts <= utcnow())
+                .order_by(PlayEvent.ts, PlayEvent.id))).scalars())
             row = await s.get(WaveSession, sid)
             seed_json = row.seed_json if row else None
             if row is not None:
@@ -1026,46 +1064,159 @@ async def next_batch(user: User, sid: str, played: list[Any], queued: list[str])
         await _profile(rt, user)  # Must follow the event transaction, including external state changes.
         await learn(sid, rt, events)
         st = rt.state
-        if len(st.pool) < POOL_LOW:
+        if preferences is not None:
+            st.preferences = WavePreferences.model_validate(preferences).model_dump()
+        # No actual playback between calls: try only a bounded number of new source batches.
+        # Repeated empty/all-unavailable results must not keep clients polling forever.
+        if len(st.pool) < POOL_LOW and not rt.refilling and st.refills_since_play < REFILL_SEEDS:
             _refill(sid, rt)
+            st.refills_since_play += 1
         tracks = await _hand_out(sid, rt, {q for q in queued if q in st.out})
-        pending = bool(rt.tasks)
-    return Batch(sid, title_of(seed_json), rt.mode, seed_json, tracks, pending, recorded)
+        pending = bool(rt.tasks) or st.preparation["pending"] > 0 or st.more_to_prepare
+    return Batch(sid, title_of(seed_json), rt.mode, seed_json, tracks, pending, recorded,
+                 st.preferences, st.preferences_status, st.preparation)
+
+
+async def _preferences(rt: Runtime, candidates: list[build.Cand]) -> None:
+    """Contrast text prompts against actual MuQ audio vectors, never inferred genre/tag labels."""
+    st = rt.state
+    st.preferences_status = None
+    for c in candidates:
+        if c.parts is None:
+            c.parts = {}
+        c.parts.pop("session_preferences", None)
+    active = {axis: st.preferences[axis] for axis in PREFERENCE_PROMPTS if st.preferences[axis] != "any"}
+    if not active:
+        return
+    if not embedder.configured():
+        st.preferences_status = "Аудиомодель недоступна: энергия и вокал пока не учитываются."
+        return
+    best = sorted(candidates, key=lambda c: -c.score)[:VECTORS_TOP]
+    keys = list(dict.fromkeys(c.key for c in best))
+    if not keys:
+        st.preferences_status = "Нет аудиовекторов для оценки энергии и вокала."
+        return
+    try:
+        # MuQ loads lazily (about 9 s on the CPU server); leave headroom within the desktop's 25 s read deadline.
+        async with asyncio.timeout(20.0), embedder.EmbedderClient() as client:
+            prompts = [(axis, text) for axis in active for text in PREFERENCE_PROMPTS[axis]]
+            responses = await asyncio.gather(*(client._post("/text", {
+                "text": text, "keys": keys, "limit": len(keys)}) for _, text in prompts))
+        models = {r.get("model") for r in responses}
+        if len(models) != 1 or not next(iter(models)) or next(iter(models)) == "fake":
+            raise embedder.EmbedderDown("no consistent real text/audio model")
+        model = next(iter(models))
+        scores = []
+        for response in responses:
+            scores.append({r["key"]: float(r["sim"]) for r in response.get("results", [])
+                           if r.get("key") in keys and isinstance(r.get("sim"), (float, int))
+                           and math.isfinite(r["sim"]) and -1.0001 <= r["sim"] <= 1.0001})
+        complete = set(keys)
+        for i, (axis, preference) in enumerate(active.items()):
+            low, high = scores[2 * i:2 * i + 2]
+            available = low.keys() & high.keys()
+            complete.intersection_update(available)
+            sign = 1 if preference in ("energetic", "vocal") else -1
+            for c in best:
+                if c.key not in available:
+                    continue
+                evidence = c.parts.setdefault("session_preferences", {"model": model, "contribution": 0.0})
+                contrast = sign * (high[c.key] - low[c.key])
+                evidence[axis] = {"preference": preference, "contrast": contrast}
+                evidence["contribution"] += PREFERENCE_WEIGHT * contrast
+        if len(complete) < len({c.key for c in candidates}):
+            st.preferences_status = "Энергия и вокал учитываются только для треков с доступными аудиовекторами."
+    except (embedder.EmbedderDown, TimeoutError, TypeError, ValueError, KeyError) as exc:
+        log.info("wave: session audio preferences unavailable: %r", exc)
+        st.preferences_status = "Аудиомодель недоступна: энергия и вокал пока не учитываются."
 
 
 async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand | None = None) -> list[build.Cand]:
-    """Picks the next batch; it becomes the client's queue (the rest of the old one goes back to the pool). Their
-    files are picked by the Hub now."""
-    from app import listen
+    """Rank once, check a bounded full-file reserve, then hand out only verified ready recordings."""
+    from app import listen, recommendations
+    from app.recommendation_policy import load_policy
 
     assert rt.profile is not None
     st = rt.state
+    if first is not None:
+        st.awaiting_seed = first.track.ref
+        st.pool[first.track.ref] = first
+    elif st.awaiting_seed:
+        first = st.pool.get(st.awaiting_seed)
+        if first is None:
+            raise WaveError(409, "Полная запись начального трека недоступна")
+    policy = await load_policy(rt.user_id)
+    if first is not None and (policy.blocked(first) or _disliked(first, rt.profile)):
+        raise WaveError(409, "Начальный трек временно исключён из рекомендаций")
     if isinstance(rt.profile, V2Profile):
         cfg = get_settings().cfg.mixes
         for pool in (st.pool, st.out):
             for ref, c in list(pool.items()):
-                if not build.keep(c, rt.profile, cfg):
+                if c is not first and not build.keep(c, rt.profile, cfg):
                     del pool[ref]
         _session_weights(st, rt.profile)
+    vectors = await _vectors(rt)
+    source_weights = await recommendations.adapted_weights(rt.user_id, weights())
+    candidates = [*st.out.values(), *st.pool.values()]
+    for c in candidates:
+        c.parts = build.score_parts(c, source_weights, rt.profile)
+        c.score = c.parts["total"]
+        c.known = build.known_of(c, rt.profile)
+        c.parts["pause_multiplier"] = policy.multiplier(c)
+        c.parts["preferences"] = dict(st.preferences)
+    await _preferences(rt, candidates)
+    eligible = {c.track.ref for c in candidates if not policy.blocked(c) and not _disliked(c, rt.profile)
+                and not (rt.blocked and rt.blocked(c))}
     values: dict[str, float] = {}
-    tracks = pick(st, rt.profile, rt.mode, await _vectors(rt), queued=queued, first=first, values=values)
+    reserve = pick(st, rt.profile, rt.mode, vectors, n=PREPARE_POOL, queued=queued, first=first,
+                   values=values, eligible=eligible)
+    st.more_to_prepare = len(reserve) == PREPARE_POOL and len(eligible) > len(reserve)
+    refs = {c.track.ref: f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in reserve}
+    statuses = await listen.prepare_full(rt.user_id, list(dict.fromkeys(refs.values())), timeout_s=2.0)
+    ready = {ref for ref, playback_ref in refs.items() if statuses.get(playback_ref) == "ready"}
+    unavailable = {ref for ref, playback_ref in refs.items() if statuses.get(playback_ref) == "unavailable"}
+    pending = refs.keys() - ready - unavailable
+    st.preparation = {"ready": len(ready), "pending": len(pending), "unavailable": len(unavailable)}
+    for ref in unavailable:
+        st.pool.pop(ref, None)
+        st.out.pop(ref, None)
+    st.unavailable.update(unavailable)
+    if first is not None and first.track.ref in unavailable:
+        await _save(sid, rt)
+        raise WaveError(409, "Полная запись начального трека недоступна; другой трек не подставлен")
+    tracks = ([] if first is not None and first.track.ref not in ready else
+              pick(st, rt.profile, rt.mode, vectors, queued=queued, first=first, values=values, eligible=ready))
+    if tracks and first is not None:
+        st.awaiting_seed = None
     for ref in list(st.out):
         st.pool[ref] = st.out.pop(ref)
     for c in tracks:
+        c.parts["selection_value"] = values.get(c.track.ref)
+        c.explanation = recommendations.explain_candidate(c)
+        if c.gens.get("seed") == 0:
+            c.explanation.insert(0, "Выбран начальным треком волны")
+        evidence = c.parts.get("session_preferences", {})
+        for axis, names in (("energy", {"calm": "спокойному", "energetic": "энергичному"}),
+                            ("vocals", {"instrumental": "инструментальному", "vocal": "вокальному"})):
+            feature = evidence.get(axis)
+            if feature and feature["contrast"] > 0:
+                c.explanation.append(f"По аудиомодели ближе к выбранному {names[feature['preference']]} звучанию")
+        discovery = st.preferences["discovery"]
+        if discovery == "familiar" and c.familiar:
+            c.explanation.append("В этой волне увеличена доля знакомой музыки")
+        elif discovery == "new" and not c.familiar:
+            c.explanation.append("В этой волне увеличена доля незнакомой музыки")
+        if c.parts["pause_multiplier"] < 1:
+            c.explanation.append("Приоритет исполнителя временно снижен на 30 дней")
         st.pool.pop(c.track.ref, None)
         st.out[c.track.ref] = c
     await _save(sid, rt)
-    try:  # its own transaction after the state's: a failure here never costs the wave its answer or its state
+    try:
         async with session_scope() as s:
             await save_items(s, sid, rt.user_id, tracks, values)
     except Exception:
         log.exception("wave %s: handed out tracks not recorded", sid)
-    stream = [c.track.ref for c in tracks if not c.nd_song_id and c.track.source != "nd"]
-    if stream:
-        listen.prefetch(rt.user_id, stream)
-    # the light copies for a metered network (app.light): library songs plain, the others after their files load
-    listen.warm_light([f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in tracks
-                       if c.nd_song_id or c.track.source != "nd"])
+    listen.warm_light([f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in tracks])
     return tracks
 
 
@@ -1089,14 +1240,19 @@ async def save_items(s: AsyncSession, sid: str, user_id: int, tracks: list[build
                          position=-1 if ref in have else nxt, ref=ref, nd_song_id=c.nd_song_id, key=c.key,
                          artist=(c.track.artist or "")[:256], title=(c.track.title or "")[:256],
                          generator=top_generator(c)[:32], gens=dict(c.gens), familiar=c.familiar,
-                         score=c.score, sim=c.sim, value=values.get(ref)))
+                         score=c.score, sim=c.sim, value=values.get(ref),
+                         decision_json={**c.features(),
+                                        "source_weights": (c.parts or {}).get("generator_weights", {}),
+                                        "preferences": (c.parts or {}).get("preferences", {})}))
         if ref not in have:
             have.add(ref)
             nxt += 1
     q = sqlite_insert(WaveItem).values(rows)
     await s.execute(q.on_conflict_do_update(index_elements=["session_id", "ref"], set_={
         "handed_count": WaveItem.handed_count + 1, "last_handed_at": q.excluded.last_handed_at,
-        "score": q.excluded.score, "sim": q.excluded.sim, "value": q.excluded.value}))
+        "score": q.excluded.score, "sim": q.excluded.sim, "value": q.excluded.value,
+        "generator": q.excluded.generator, "gens": q.excluded.gens, "familiar": q.excluded.familiar,
+        "decision_json": q.excluded.decision_json}))
 
 
 async def settle(sid: str) -> None:
@@ -1123,8 +1279,7 @@ def generator_title(name: str) -> str:
 
 
 def top_generator(c: build.Cand) -> str:
-    w = weights()
-    return max(c.gens, key=lambda g: w.get(g, 0.5) / math.log2(c.gens[g] + 2)) if c.gens else "seed"
+    return c.generator if c.gens else "seed"
 
 
 __all__ = ["BATCH", "Batch", "WaveError", "generator_title", "next_batch", "reset", "settle", "start"]

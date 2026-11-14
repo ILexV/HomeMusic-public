@@ -84,7 +84,9 @@ class JobsCfg(BaseModel):
 
 
 class UploadsCfg(BaseModel):
-    max_file_mb: int = 500
+    max_file_mb: int = Field(default=500, ge=1, le=500)
+    max_total_mb: int = Field(default=500, ge=1, le=500)
+    max_files: int = Field(default=100, ge=1, le=100)
     extensions: list[str] = ["mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"]
 
 

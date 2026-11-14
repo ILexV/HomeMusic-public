@@ -70,7 +70,7 @@ impl State {
             let queue = self.ctx.queue.borrow();
             self.local.set(queue.current().is_some_and(|item| self.ctx.hub.offline.local_path(item).is_some()
                 || !item.path.is_empty() && !item.path.starts_with("http://") && !item.path.starts_with("https://")));
-            self.full_only.set(self.ctx.hub.wave.borrow().on() || queue.index().and_then(|index| queue.recommendation(index)).is_some());
+            self.full_only.set(self.ctx.hub.wave.borrow().on() || queue.context().starts_with("mix:") || queue.index().and_then(|index| queue.recommendation(index)).is_some());
             tools.set_info_title(queue.current().map(|item| format!("{} — {}", item.artist, item.title)).unwrap_or_default().into());
             tools.set_info_source("Определяется…".into());
             tools.set_info_kind("".into());

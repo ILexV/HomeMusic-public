@@ -208,7 +208,7 @@ impl Hub {
     }
 
     /// The user's own wave when `artist_id` is empty. `origin` is `home_card` or `radio`.
-    pub fn wave_start(&self, artist_id: &str, origin: &str) -> Result<WaveBatch, String> {
+    pub fn wave_start(&self, artist_id: &str, origin: &str, preferences: &Value) -> Result<WaveBatch, String> {
         let seed = if artist_id.is_empty() {
             Value::Null
         } else {
@@ -221,6 +221,7 @@ impl Hub {
                 "seed": seed,
                 "origin": origin,
                 "client": CLIENT,
+                "preferences": preferences,
             })),
         )?;
         Ok(parse_wave(&body))
@@ -231,6 +232,7 @@ impl Hub {
         session_id: &str,
         played: &[Value],
         queued: &[String],
+        preferences: Option<&Value>,
     ) -> Result<WaveBatch, String> {
         let path = format!("/api/wave/{}/next", encode(session_id));
         let body = self.send(
@@ -239,6 +241,7 @@ impl Hub {
             Some(serde_json::json!({
                 "played": played,
                 "queued": queued,
+                "preferences": preferences,
             })),
         )?;
         Ok(parse_wave(&body))
@@ -687,6 +690,8 @@ pub struct WaveBatch {
     pub title: String,
     pub tracks: Vec<Playable>,
     pub pending: bool,
+    pub preferences: Value,
+    pub notice: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,6 +788,10 @@ pub struct WaveLive {
     pub origin: String,
     pub pending: Vec<Value>,
     pub asking: bool,
+    pub preferences: Value,
+    pub notice: String,
+    pub retry_at: Option<std::time::Instant>,
+    pub exhausted: bool,
 }
 
 impl WaveLive {
@@ -869,11 +878,24 @@ pub fn parse_wave(value: &Value) -> WaveBatch {
         session_id: text(value, "session_id"),
         title: text(value, "title"),
         tracks: playables(value.get("tracks")),
+        preferences: value.get("preferences").cloned().unwrap_or_else(neutral_preferences),
+        notice: wave_notice(value),
         pending: value
             .get("pending")
             .and_then(Value::as_bool)
             .unwrap_or(false),
     }
+}
+
+pub fn neutral_preferences() -> Value {
+    serde_json::json!({"energy": "any", "vocals": "any", "discovery": "balanced"})
+}
+
+fn wave_notice(value: &Value) -> String {
+    let p = &value["preparation"];
+    format!("Полные записи: готово {}, ожидают {}, недоступны {}. {}",
+        p["ready"].as_u64().unwrap_or(0), p["pending"].as_u64().unwrap_or(0),
+        p["unavailable"].as_u64().unwrap_or(0), value["preferences_status"].as_str().unwrap_or(""))
 }
 
 pub fn parse_playlists(value: &Value) -> Vec<PlaylistLine> {
@@ -1080,15 +1102,15 @@ fn json_tenth(value: f32) -> Value {
     serde_json::json!(tenths as f64 / 10.0)
 }
 
-fn event_id() -> String {
+pub(crate) fn event_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("d{secs:x}{n:x}")
+    format!("d{secs:x}-{:x}-{n:x}", std::process::id())
 }
 
 fn rfc3339_now() -> String {
@@ -1125,6 +1147,21 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave_response_preserves_preference_and_verified_reserve_status() {
+        let batch = parse_wave(&serde_json::json!({
+            "session_id": "s", "tracks": [], "pending": true,
+            "preferences": {"energy": "calm", "vocals": "instrumental", "discovery": "new"},
+            "preferences_status": "Audio model unavailable",
+            "preparation": {"ready": 2, "pending": 3, "unavailable": 1}
+        }));
+        assert_eq!(batch.preferences["energy"], "calm");
+        assert!(batch.pending);
+        assert!(batch.notice.contains("готово 2"));
+        assert!(batch.notice.contains("Audio model unavailable"));
+        assert_eq!(parse_wave(&serde_json::json!({})).preferences, neutral_preferences());
+    }
 
     #[test]
     fn hub_address_follows_the_navidrome_host() {

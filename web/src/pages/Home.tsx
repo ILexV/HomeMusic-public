@@ -42,6 +42,8 @@ export function HomePage() {
         <Shortcut to="/playlists" icon="playlist" title="Плейлисты" />
         <Shortcut to="/artists" icon="user" title="Исполнители" />
         <Shortcut to="/lib/albums" icon="disc" title="Все альбомы" />
+        <Shortcut to="/releases" icon="disc" title="Новые релизы" />
+        <Shortcut to="/recommendations" icon="sparkle" title="Мои рекомендации" />
       </div>
 
       {res.loading ? (

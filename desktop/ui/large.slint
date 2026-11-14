@@ -187,6 +187,7 @@ export component Large inherits Rectangle {
     in property <bool> album-busy;
     in property <string> album-error;
     in property <string> album-note;
+    in property <bool> album-can-download;
     callback queue-search-edited(string);
     callback move-queue-row(int, int);
     callback remove-queue-row(int);
@@ -194,6 +195,7 @@ export component Large inherits Rectangle {
     callback close-album();
     callback album-play();
     callback album-enqueue();
+    callback album-download();
     callback album-play-row(int);
     callback play-pause();
     callback stop();
@@ -287,9 +289,11 @@ export component Large inherits Rectangle {
                     album-busy: root.album-busy;
                     album-error: root.album-error;
                     album-note: root.album-note;
+                    album-can-download: root.album-can-download;
                     close-album => { root.close-album(); }
                     album-play => { root.album-play(); }
                     album-enqueue => { root.album-enqueue(); }
+                    album-download => { root.album-download(); }
                     album-play-row(index) => { root.album-play-row(index); }
                 }
                 if !root.album-open && !root.catalog-open && (root.library-busy || root.library-error != "") : Rectangle {

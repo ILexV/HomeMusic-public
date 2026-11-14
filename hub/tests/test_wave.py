@@ -219,10 +219,13 @@ async def env(hub_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from app.main import create_app
     from app.services import svc
 
-    prefetched: list[list[str]] = []
-    warmed: list[list[str]] = []
-    monkeypatch.setattr(listen, "prefetch", lambda uid, refs: prefetched.append(list(refs)) or len(refs))
-    monkeypatch.setattr(listen, "warm_light", lambda refs: warmed.append(list(refs)))
+    monkeypatch.setattr(listen, "warm_light", lambda refs: None)
+
+    async def prepared_audio(user_id, refs, *, timeout_s=2.0):
+        # Ranking/API fixtures have no real audio; full-file validation has its own tests.
+        return {ref: "ready" for ref in refs}
+
+    monkeypatch.setattr(listen, "prepare_full", prepared_audio)
     nd = ND()
     app = create_app()
     async with app.router.lifespan_context(app):
@@ -230,7 +233,7 @@ async def env(hub_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         with respx.mock(assert_all_called=False) as mock:
             mock.route(host="navidrome.test").mock(side_effect=nd.handler)
             async with app_client(app) as client:
-                yield {"client": client, "nd": nd, "admin": await user_id("admin"), "prefetched": prefetched, "warmed": warmed}
+                yield {"client": client, "nd": nd, "admin": await user_id("admin")}
 
 
 def fake_sources(monkeypatch: pytest.MonkeyPatch, tracks: list[CatalogTrack],
@@ -282,9 +285,6 @@ async def test_a_wave_hands_out_five_and_learns_from_what_was_played(env, monkey
     sid, tracks = w["session_id"], w["tracks"]
     assert w["title"] == "Моя волна" and len(tracks) == 5 and seen["seed"] == [None]
     assert len({t["artist"] for t in tracks}) == 5
-    assert env["prefetched"][-1] == [t["ref"] for t in tracks if not t["owned"]]  # files picked ahead
-    # their light copies (app.light) are made ahead too: a library song by its id, the others by their refs
-    assert len(env["warmed"][-1]) == 5 and set(env["prefetched"][-1]) <= set(env["warmed"][-1])
 
     first = tracks[0]
     r = await c.post(f"/api/wave/{sid}/next", json={
@@ -398,7 +398,7 @@ async def test_a_wave_by_search_file_keeps_the_file_and_continues_after_restart(
     assert (first["ref"], first["source"], first["artist"], first["title"]) == (
         ref, "file", "Travis Scott", "Serenade")
     assert first["cover_url"] == file.cover_url and first["generator"] == "seed"
-    assert seen["seed"] == [ref] and ref in env["prefetched"][-1]
+    assert seen["seed"] == [ref]
     await wave.reset()
     response = await c.post(f"/api/wave/{out['session_id']}/next", json={
         "played": [ev("start", ref)], "queued": [t["ref"] for t in out["tracks"][1:]]})

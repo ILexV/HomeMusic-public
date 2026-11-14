@@ -35,8 +35,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import shutil
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field, replace
@@ -61,6 +63,7 @@ from app.jobs.downloads import (
     search_provider,
 )
 from app.library.owned import find_existing
+from app.library.probe import ProbeError, probe
 from app.models import Track
 from app.matching.select import rank_candidates
 from app.net import Priority, in_background, make_client, priority_context
@@ -83,6 +86,10 @@ PROBE_RANGE = "bytes=0-0"
 HEARD_CHECK_WAIT_S = 10  # a download waits this long for the check of the file just heard
 PREFETCH_WORKERS = 3
 PREFETCH_MAX = 40  # tracks per user
+FULL_NEGATIVE_TTL_S = 60  # recommendation-only rejection; never a dislike or a permanent source verdict
+FULL_RETRY_TTL_S = 2  # a transient failure can be retried by the next wave request
+FULL_MAX_JOBS = PREFETCH_MAX * PREFETCH_WORKERS
+FULL_PROBE_TIMEOUT_S = 15
 _PLAYABLE_TYPES = ("audio/", "video/")  # googlevideo may label audio-only formats video/*
 LOCAL_DIR = "listen"  # under staging: server copies, and copies of files of sources without plain HTTP audio
 LOCAL_KEEP_S = MEM_TTL_S  # a copy, since its last use
@@ -105,6 +112,10 @@ class ListenError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
         self.status = status
+
+
+class _FullUnavailable(ListenError):
+    """No full source was found, rather than a temporary upstream failure."""
 
 
 @dataclass
@@ -138,6 +149,14 @@ class _Job:
     prio: Priority
 
 
+@dataclass(frozen=True)
+class _Representation:
+    candidate: tuple[str, str] | None
+    url: str
+    size: int | None
+    etag: str | None
+
+
 @dataclass(eq=False)
 class _Copy:
     """The server copy of a picked file: downloaded to the Hub's disk, read by streams while it grows."""
@@ -153,6 +172,7 @@ class _Copy:
     readers: int = 0  # streams of a played track reading it
     task: asyncio.Task | None = None
     cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+    representation: _Representation | None = None
 
     def settled(self) -> bool:
         return self.done or self.failed is not None
@@ -181,7 +201,17 @@ class Media:
     close: Callable[[], Awaitable[None]] | None = None  # after the answer (the body may never have been read)
 
 
+@dataclass
+class _FullResult:
+    status: str
+    until: float
+    choice: Choice | None = None
+    path: Path | None = None
+    signature: tuple[str, int | None, str] | None = None
+
+
 _choices: dict[str, Choice] = {}
+_user_choices: dict[tuple[int, str], Choice] = {}  # only accounts with a recording rejection
 _inflight: dict[str, _Job] = {}
 _fetching: dict[str, _Job] = {}  # ref -> download of a local copy (`_predownload`)
 _copies: dict[str, _Copy] = {}  # ref -> server copy of its picked file
@@ -190,6 +220,10 @@ _missed: dict[str, float] = {}  # ref -> monotonic time until which the prefetch
 _wanted: dict[int, list[str]] = {}  # user id -> refs on their screen still to pick, top first
 _wake: asyncio.Event | None = None
 _workers: list[asyncio.Task] = []
+_full_wanted: dict[int, list[str]] = {}
+_full_jobs: dict[str, asyncio.Future[None]] = {}
+_full_active: set[str] = set()
+_full_results: dict[str, _FullResult] = {}
 _tasks: set[asyncio.Task] = set()  # fire-and-forget work (kept referenced until done)
 _http: httpx.AsyncClient | None = None  # Deezer preview CDN
 # Audio is proxied over HTTP/1.1: on a shared HTTP/2 connection a stream the player abandons (track switch, seek)
@@ -198,7 +232,46 @@ _http: httpx.AsyncClient | None = None  # Deezer preview CDN
 _media: httpx.AsyncClient | None = None
 
 
-async def choose(ref: str, *, background: bool = False, stale: Choice | None = None, full_only: bool = False) -> Choice:
+async def choose(ref: str, *, background: bool = False, stale: Choice | None = None, full_only: bool = False,
+                 user_id: int | None = None) -> Choice:
+    if user_id is None:
+        return await _choose_shared(ref, background=background, stale=stale, full_only=full_only)
+    from app.recording_feedback import library_candidate, rejected_candidates
+    rejected = await rejected_candidates(user_id, ref)
+    private = _user_choices.get((user_id, ref))
+    if rejected and private is not None and private is not stale and private.fresh() and _usable(private):
+        if private.candidate and (private.candidate.provider, private.candidate.provider_id) not in rejected:
+            private.alternates = [c for c in private.alternates if (c.provider, c.provider_id) not in rejected]
+            return private
+    choice = await _choose_shared(ref, background=background, stale=stale, full_only=full_only)
+    blocked = choice.candidate and (choice.candidate.provider, choice.candidate.provider_id) in rejected
+    if rejected and choice.kind == "library" and choice.path:
+        blocked = await library_candidate(choice.path, choice.nd_song_id) in rejected
+    if blocked:
+        src, ident = split_ref(ref)
+        if src == "nd":
+            async with session_scope() as s:
+                catalog_id = (await s.execute(select(Track.deezer_track_id).where(
+                    Track.nd_song_id == ident, Track.deezer_track_id.is_not(None)).limit(1))).scalar_one_or_none()
+            if catalog_id:
+                src, ident = "dz", catalog_id
+        if src != "dz":
+            raise ListenError(409, "Вы отклонили эту запись. Выберите другой файл или отмените сообщение.")
+        choice = await _resolve_deezer(ref, ident, background, full_only=True, rejected=rejected)
+        if choice.kind == "preview":
+            raise ListenError(404, "Другой полной записи пока нет. Попробуйте другой источник.")
+    # A private copy prevents another request's fallback from changing this user's binding.
+    if rejected:
+        choice = replace(choice, alternates=[c for c in choice.alternates
+                         if (c.provider, c.provider_id) not in rejected])
+        if len(_user_choices) >= MEM_MAX:
+            _user_choices.pop(next(iter(_user_choices)))
+        _user_choices[user_id, ref] = choice
+    return choice
+
+
+async def _choose_shared(ref: str, *, background: bool = False, stale: Choice | None = None,
+                         full_only: bool = False) -> Choice:
     """The pick for `ref`: in memory, remembered or found now. Concurrent callers share one resolution, which
     also survives the caller going away (the next tap finds it ready). `background`: a prefetch, which yields to
     user requests (a user request joining it lifts it). `stale`: this pick did not open, find another."""
@@ -237,12 +310,12 @@ MOBILE = "mobile"  # the quality of a stream for a metered network (`light`)
 
 
 async def open_media(ref: str, range_header: str | None, *, ahead: bool = False, quality: str | None = None,
-                     full_only: bool = False) -> Media:
+                     full_only: bool = False, user_id: int | None = None) -> Media:
     """The audio for the client's Range: the library file, a local copy, the server copy of the picked file (a
     preview: the upstream). `ahead`: the app loads a track of its queue ahead; its server copy waits for those of
     played tracks. `quality` "mobile": the light variant when the file is heavy (`app.light`). A pick none of whose
     files opens is replaced by a new one (once)."""
-    c = await choose(ref, background=ahead, full_only=full_only)
+    c = await choose(ref, background=ahead, full_only=full_only, user_id=user_id)
     lite = quality == MOBILE
     for retry in (False, True):
         if c.kind == "library":
@@ -262,7 +335,16 @@ async def open_media(ref: str, range_header: str | None, *, ahead: bool = False,
             return _variant(c, known)
         cp = _server_copy(c, background=ahead)
         await cp.until(lambda cp=cp: cp.size is not None or cp.settled())
+        from app.recording_feedback import rejected_candidates
+        rejected = await rejected_candidates(user_id, ref)
+        if (cp.cand.provider, cp.cand.provider_id) in rejected:
+            if retry:
+                raise ListenError(409, "Вы отклонили эту запись. Выберите другой источник.")
+            c = await choose(ref, background=ahead, stale=c, full_only=full_only, user_id=user_id)
+            continue
         if cp.failed is None or cp.have:
+            if not _same_file(c.candidate, cp.cand):
+                c = replace(c, candidate=cp.cand, source=None)
             _heard(c)
             variant = known[1] if known else light.PENDING
             if lite and known is None:
@@ -274,7 +356,7 @@ async def open_media(ref: str, range_header: str | None, *, ahead: bool = False,
             break
         if retry:
             raise cp.failed
-        c = await choose(ref, background=ahead, stale=c, full_only=full_only)
+        c = await choose(ref, background=ahead, stale=c, full_only=full_only, user_id=user_id)
     resp, src = await open_stream(c, range_header)
     _heard(c)
     media = _upstream_media(c, resp, src)
@@ -382,17 +464,21 @@ def local_media_type(path: Path) -> str:
     return LOCAL_MEDIA_TYPES.get(path.suffix.lower(), "audio/mpeg")
 
 
-async def listened_candidate(ref: str | None) -> Candidate | None:
+async def listened_candidate(ref: str | None, *, user_id: int | None = None) -> Candidate | None:
     """The file the user listened to for this catalog ref, if it passed the check (a download tries it first)."""
     if not ref:
         return None
-    c = _choices.get(ref)
+    c = _user_choices.get((user_id, ref)) if user_id is not None else None
+    c = c or _choices.get(ref)
     if c is None or not c.fresh():
         c = await _remembered(ref, library=False)
     if c is None or c.kind != "full" or not c.heard:
         return None
     if c.checking is not None and not c.checking.done():
         await asyncio.wait([c.checking], timeout=HEARD_CHECK_WAIT_S)
+    from app.recording_feedback import rejected_candidates
+    if c.candidate and (c.candidate.provider, c.candidate.provider_id) in await rejected_candidates(user_id, ref):
+        return None
     return c.candidate if c.verified else None
 
 
@@ -402,6 +488,9 @@ async def forget(ref: str) -> None:
     if is_file_ref(ref):
         return
     _choices.pop(ref, None)
+    for key in [key for key in _user_choices if key[1] == ref]:
+        del _user_choices[key]
+    _full_results.pop(ref, None)
     await cache_delete(_key(ref))
 
 
@@ -433,29 +522,39 @@ async def file_candidate(ref: str) -> Candidate | None:
     return c.candidate if c is not None else None
 
 
-async def open_stream(choice: Choice, range_header: str | None) -> tuple[httpx.Response, StreamSource]:
+async def open_stream(choice: Choice, range_header: str | None, *,
+                      resume: _Representation | None = None) -> tuple[httpx.Response, StreamSource]:
     """Upstream response (not read yet) for the client's Range. A link that stopped working (expired CDN URL,
     dead mirror) is renewed from the candidate once; a candidate that still doesn't open gives way to the next."""
     last = ""
+    missing = False
     while True:
+        if resume is not None and _candidate_key(choice) != resume.candidate:
+            raise ListenError(502, "Файл трека сменился")
         cand = choice.candidate
         for _ in range(2):
             try:
                 src = choice.source or await _upstream(choice)
             except ListenError as e:
                 last = str(e)
+                missing = e.status in (400, 404, 410)
                 break
             headers = httpx.Headers(src.client.headers)  # the provider's own (hitmoz: Accept-Language)
             headers.update(src.headers)
             headers["Accept-Encoding"] = "identity"
             if range_header:
                 headers["Range"] = range_header
+            if resume is not None:
+                if not resume.etag:
+                    raise ListenError(502, "Источник не подтверждает неизменность файла")
+                headers["If-Range"] = resume.etag
             media = _media_client()
             try:
                 resp = await media.send(media.build_request("GET", src.url, headers=headers), stream=True,
                                         follow_redirects=True)
             except httpx.HTTPError as e:
                 last = repr(e)
+                missing = False
                 choice.source = None
                 continue
             ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
@@ -463,14 +562,26 @@ async def open_stream(choice: Choice, range_header: str | None) -> tuple[httpx.R
                 resp.status_code in (200, 206)
                 and (ctype.startswith(_PLAYABLE_TYPES) or ctype in ("", "application/octet-stream"))
             ):
+                if ((cand.provider, cand.provider_id) if cand else None) != _candidate_key(choice):
+                    await resp.aclose()
+                    raise ListenError(502, "Файл трека сменился")
                 choice.source = replace(src, url=str(resp.url))  # later Range requests skip the redirects
+                try:
+                    _validate_response(resp, range_header)
+                    if resume is not None:
+                        _validate_resume(choice, resp, range_header, resume)
+                except BaseException:
+                    await resp.aclose()
+                    raise
                 return resp, src
             last = f"HTTP {resp.status_code} {ctype}".strip()
+            missing = resp.status_code in (404, 410)
             await resp.aclose()
             choice.source = None
         if choice.candidate is cand:  # (a concurrent request may have moved on already)
-            if choice.kind != "full" or not choice.alternates:
-                raise ListenError(502, f"Источник не отдаёт файл ({last})")
+            if resume is not None or choice.kind != "full" or not choice.alternates:
+                error = _FullUnavailable if missing else ListenError
+                raise error(502, f"Источник не отдаёт файл ({last})")
             log.info("listen %s: %s does not open (%s), next file", choice.ref, cand.page_url if cand else "", last)
             choice.candidate = choice.alternates.pop(0)
             choice.source = None
@@ -491,12 +602,7 @@ def _media_client() -> httpx.AsyncClient:
 def prefetch(user_id: int, refs: list[str]) -> int:
     """The catalog tracks on this user's screen, top first: their files are picked in the background. Replaces
     the user's previous list (tracks that scrolled away are dropped). Returns how many are still to pick."""
-    global _wake
-    if _wake is None:
-        _wake = asyncio.Event()
-    if not _workers:
-        for _ in range(PREFETCH_WORKERS):
-            _workers.append(asyncio.create_task(_worker(), context=priority_context(Priority(True))))
+    _start_prefetch()
     todo = [r for r in dict.fromkeys(refs) if not _ready(r)][:PREFETCH_MAX]
     if todo:
         _wanted[user_id] = todo
@@ -504,6 +610,175 @@ def prefetch(user_id: int, refs: list[str]) -> int:
     else:
         _wanted.pop(user_id, None)
     return len(todo)
+
+
+def _start_prefetch() -> None:
+    global _wake
+    if _wake is None:
+        _wake = asyncio.Event()
+    if not _workers:
+        for _ in range(PREFETCH_WORKERS):
+            _workers.append(asyncio.create_task(_worker(), context=priority_context(Priority(True))))
+
+
+async def prepare_full(user_id: int, refs: list[str], *, timeout_s: float = 2.0) -> dict[str, str]:
+    """Prepare a bounded recommendation reserve, using the ordinary prefetch workers and shared copies.
+
+    A ready result means the complete file has an audio stream and its measured duration passes the library's
+    duration tolerance. Short recordings are valid; a 30-second file of a three-minute song is not. Timeout or
+    temporary source/probe trouble is pending. Waiting never cancels shared resolution, copying or verification.
+    No playback/taste event is emitted and ordinary manual playback remains unchanged.
+    """
+    refs = list(dict.fromkeys(refs))
+    can_queue = user_id in _full_wanted or len(_full_wanted) < MEM_MAX
+    _prune_full()
+    # Replace this user's obsolete queued reserve; another user's interest and work already started survive.
+    if can_queue:
+        _full_wanted[user_id] = refs[:PREFETCH_MAX]
+    _drop_full_unwanted()
+    queued: list[str] = []
+    waiting: set[asyncio.Future[None]] = set()
+    for ref in refs[:PREFETCH_MAX]:
+        if _full_status(ref) is not None:
+            continue
+        future = _full_jobs.get(ref)
+        if future is None:
+            if not can_queue or len(_full_jobs) >= FULL_MAX_JOBS:
+                continue
+            future = asyncio.get_running_loop().create_future()
+            _full_jobs[ref] = future
+        waiting.add(future)
+        if ref not in _full_active:
+            queued.append(ref)
+    if queued and can_queue:
+        _full_wanted[user_id] = queued
+        _start_prefetch()
+        assert _wake is not None
+        _wake.set()
+    else:
+        _full_wanted.pop(user_id, None)
+    if waiting and timeout_s > 0:
+        await asyncio.wait(waiting, timeout=timeout_s)  # unlike wait_for/gather, cancellation leaves futures intact
+    return {ref: _full_status(ref) or "pending" for ref in refs}
+
+
+def _full_expected(c: Choice) -> int | None:
+    return ((c.query or {}).get("duration_s") or c.duration_s
+            or (c.candidate.duration_s if c.candidate else None))
+
+
+def _full_signature(c: Choice, path: Path) -> tuple[str, int | None, str]:
+    return _file_ident(c), _full_expected(c), _library_ident(path)
+
+
+def _full_status(ref: str) -> str | None:
+    result = _full_results.get(ref)
+    if result is None:
+        return None
+    valid = result.until > time.monotonic()
+    if valid and result.status == "ready":
+        c = result.choice
+        valid = c is not None and _choices.get(ref) is c and c.fresh() and result.path is not None
+        if valid:
+            try:
+                valid = result.signature == _full_signature(c, result.path)
+            except OSError:
+                valid = False
+        if valid:
+            c.at = time.monotonic()
+    if not valid:
+        _full_results.pop(ref, None)
+        return None
+    return result.status
+
+
+def _prune_full() -> None:
+    now = time.monotonic()
+    for ref in [ref for ref, result in _full_results.items() if result.until <= now]:
+        del _full_results[ref]
+    while len(_full_results) > MEM_MAX:
+        del _full_results[next(iter(_full_results))]
+
+
+def _drop_full_unwanted() -> None:
+    wanted = {ref for refs in _full_wanted.values() for ref in refs} | _full_active
+    for ref in [ref for ref in _full_jobs if ref not in wanted]:
+        future = _full_jobs.pop(ref)
+        if not future.done():
+            future.set_result(None)
+
+
+def _next_full_wanted() -> str | None:
+    while _full_wanted:
+        uid = next(iter(_full_wanted))
+        refs = _full_wanted.pop(uid)
+        while refs:
+            ref = refs.pop(0)
+            if ref in _full_jobs and ref not in _full_active:
+                if refs:
+                    _full_wanted[uid] = refs
+                _full_active.add(ref)
+                return ref
+    return None
+
+
+async def _prepare_recording(ref: str) -> _FullResult:
+    c = await choose(ref, background=True, full_only=True)
+    if c.kind == "preview":
+        return _FullResult("pending" if c.transient else "unavailable", 0)
+    if c.kind == "library":
+        path = c.path
+    elif _downloads_only(c):
+        path = await _predownload(c)
+    else:
+        cp = _server_copy(c, background=True)
+        await cp.until(cp.settled)
+        if cp.failed is not None:
+            raise cp.failed
+        path = cp.path
+    if path is None or not path.is_file():
+        return _FullResult("unavailable", 0)
+    expected = _full_expected(c)
+    if c.kind != "library" and not expected:
+        # With no reference duration a complete HTTP response could still be a catalog preview.
+        return _FullResult("unavailable", 0)
+    signature = _full_signature(c, path)
+    info = await probe(path, timeout=FULL_PROBE_TIMEOUT_S)
+    if signature != _full_signature(c, path):
+        return _FullResult("pending", 0)
+    tolerance = get_settings().cfg.matching.duration_tolerance_s
+    if (not math.isfinite(info.duration_s) or info.duration_s <= 0
+            or (expected and abs(info.duration_s - expected) > tolerance)):
+        return _FullResult("unavailable", 0)
+    return _FullResult("ready", 0, c, path, signature)
+
+
+async def _warm_full(ref: str) -> None:
+    try:
+        try:
+            result = await _prepare_recording(ref)
+        except ListenError as e:
+            status = "unavailable" if e.status in (400, 404, 410) or isinstance(e, _FullUnavailable) else "pending"
+            result = _FullResult(status, 0)
+        except ProbeError as e:
+            # Missing ffprobe is a service problem, not evidence of a bad recording.
+            result = _FullResult("pending" if isinstance(e.__cause__, FileNotFoundError) else "unavailable", 0)
+        except (OSError, TimeoutError):
+            result = _FullResult("pending", 0)
+        except Exception:
+            log.exception("listen full readiness %s", ref)
+            result = _FullResult("pending", 0)
+        ttl = MEM_TTL_S if result.status == "ready" else (
+            FULL_NEGATIVE_TTL_S if result.status == "unavailable" else FULL_RETRY_TTL_S)
+        result.until = time.monotonic() + ttl
+        _full_results.pop(ref, None)
+        _full_results[ref] = result
+        _prune_full()
+    finally:
+        _full_active.discard(ref)
+        future = _full_jobs.pop(ref, None)
+        if future is not None and not future.done():
+            future.set_result(None)
 
 
 def _ready(ref: str) -> bool:
@@ -531,14 +806,23 @@ def _next_wanted() -> str | None:
 
 async def _worker() -> None:
     assert _wake is not None
+    prefer_full = True
     while True:
-        ref = _next_wanted()
+        full = prefer_full
+        ref = _next_full_wanted() if full else _next_wanted()
+        if ref is None:
+            full = not full
+            ref = _next_full_wanted() if full else _next_wanted()
+        prefer_full = not full
         if ref is None:
             _wake.clear()
             await _wake.wait()
             continue
         try:
-            await _warm(ref)
+            if full:
+                await _warm_full(ref)
+            else:
+                await _warm(ref)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -572,8 +856,16 @@ async def reset() -> None:
     _fetching.clear()
     _copies.clear()
     _choices.clear()
+    _user_choices.clear()
     _missed.clear()
     _wanted.clear()
+    _full_wanted.clear()
+    for future in _full_jobs.values():
+        if not future.done():
+            future.set_result(None)
+    _full_jobs.clear()
+    _full_active.clear()
+    _full_results.clear()
     _wake = _calm = None
     light.reset()
     for client in (_http, _media):
@@ -627,7 +919,8 @@ async def _resolve(ref: str, *, probe: bool, remembered: bool, full_only: bool =
         choice = await (_resolve_deezer(ref, id_, probe, full_only=full_only) if src == "dz" else _resolve_hitmoz(ref, id_, probe))
         how = "probed" if probe else "searched"
         if full_only and choice.kind == "preview":
-            raise ListenError(503, "Полная версия пока недоступна. Повторите позже или выберите другой источник.")
+            error = ListenError if choice.transient else _FullUnavailable
+            raise error(503, "Полная версия пока недоступна. Повторите позже или выберите другой источник.")
         await _save(choice)
     _prune()
     _choices[ref] = choice
@@ -673,7 +966,9 @@ async def _resolve_song(ref: str, song_id: str) -> Choice:
     return choice
 
 
-async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = False) -> Choice:
+async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = False,
+                          rejected: set[tuple[str, str]] | frozenset = frozenset()) -> Choice:
+    from app.recording_feedback import library_candidate
     assert svc.deezer is not None
     try:
         t = await svc.deezer.get_track(id_)
@@ -685,7 +980,7 @@ async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = 
     query = {**q.model_dump(), "deezer_track_id": t.id}
     # An owned song never waits for optional album/name metadata from external services.
     path, nd_song_id = await _library_file(query)
-    if path:
+    if path and (not rejected or await library_candidate(path, nd_song_id) not in rejected):
         return Choice(ref, "library", q.artist, q.title, q.duration_s, path=path, nd_song_id=nd_song_id, query=query)
 
     # the same steps as handle_download_item: Cyrillic original, source order, ranking
@@ -707,12 +1002,12 @@ async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = 
     trouble: list[str] = []  # sources that failed, files that didn't open: "not found" may not be true
     if probe:
         for p in providers:
-            if cands := await _search(ref, p, pq, trouble):
+            if cands := await _search(ref, p, pq, trouble, rejected=rejected):
                 choice = full(cands)
                 if await _opens_bounded(choice):
                     return choice
                 trouble.append(f"{p.name}: файлы не открываются")
-    elif cands := await _search_all(ref, providers, pq, trouble):
+    elif cands := await _search_all(ref, providers, pq, trouble, rejected=rejected):
         return full(cands)
 
     # A failed regular source must not silently turn a full-song request into a short preview.
@@ -720,7 +1015,7 @@ async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = 
     for p in svc.provider_order(pq, for_download=True):
         if p.name in regular:
             continue
-        if cands := await _search(ref, p, pq, trouble, timeout_s=FALLBACK_TIMEOUT_S):
+        if cands := await _search(ref, p, pq, trouble, timeout_s=FALLBACK_TIMEOUT_S, rejected=rejected):
             choice = full(cands)
             if not probe or await _opens_bounded(choice):
                 return choice
@@ -728,7 +1023,7 @@ async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = 
 
     # A queued heart may have finished importing while these sources were being searched.
     path, nd_song_id = await _library_file(query)
-    if path:
+    if path and (not rejected or await library_candidate(path, nd_song_id) not in rejected):
         return Choice(ref, "library", q.artist, q.title, q.duration_s, path=path, nd_song_id=nd_song_id, query=query)
     choice = Choice(ref, "preview", q.artist, q.title, PREVIEW_S, query=query, transient=bool(trouble))
     if t.preview_url and (full_only or not probe or await _opens_bounded(choice)):
@@ -753,7 +1048,8 @@ async def _opens_bounded(choice: Choice) -> bool:
         return False
 
 
-async def _search(ref: str, p, pq: TrackQuery, trouble: list[str], *, timeout_s: float | None = None) -> list[Candidate]:
+async def _search(ref: str, p, pq: TrackQuery, trouble: list[str], *, timeout_s: float | None = None,
+                  rejected: set[tuple[str, str]] | frozenset = frozenset()) -> list[Candidate]:
     try:
         cands, err = await asyncio.wait_for(search_provider(p, pq, 0, limit=SEARCH_LIMIT, enrich_top_n=0),
                                           SEARCH_TIMEOUT_S if timeout_s is None else timeout_s)
@@ -762,12 +1058,13 @@ async def _search(ref: str, p, pq: TrackQuery, trouble: list[str], *, timeout_s:
     if err:
         log.info("listen %s: %s", ref, err)
         trouble.append(err)
-    return cands[:MAX_TRIES_PER_PROVIDER]
+    return [c for c in cands if (c.provider, c.provider_id) not in rejected][:MAX_TRIES_PER_PROVIDER]
 
 
-async def _search_all(ref: str, providers: list, pq: TrackQuery, trouble: list[str]) -> list[Candidate]:
+async def _search_all(ref: str, providers: list, pq: TrackQuery, trouble: list[str], *,
+                      rejected: set[tuple[str, str]] | frozenset = frozenset()) -> list[Candidate]:
     """All sources at once; the first in source order that has the track wins (the rest are cancelled)."""
-    tasks = [asyncio.create_task(_search(ref, p, pq, trouble)) for p in providers]
+    tasks = [asyncio.create_task(_search(ref, p, pq, trouble, rejected=rejected)) for p in providers]
     try:
         for t in tasks:
             if cands := await t:
@@ -859,14 +1156,15 @@ async def _predownload(c: Choice) -> Path:
     if c.local is not None and c.local.is_file():
         await asyncio.to_thread(os.utime, c.local)  # in use: pruned last
         return c.local
-    job = _fetching.get(c.ref)
+    key = _file_ident(c)
+    job = _fetching.get(key)
     if job is None:
         assert c.candidate is not None
         prio = Priority(in_background())
-        job = _Job(asyncio.create_task(_fetch_local(c.ref, c.candidate), context=priority_context(prio)), prio)
-        _fetching[c.ref] = job
+        job = _Job(asyncio.create_task(_fetch_local(key, c.candidate), context=priority_context(prio)), prio)
+        _fetching[key] = job
 
-        def done(t: asyncio.Task, _ref: str = c.ref) -> None:
+        def done(t: asyncio.Task, _ref: str = key) -> None:
             _fetching.pop(_ref, None)
             if not t.cancelled():
                 t.exception()  # retrieved here: nobody may be awaiting it any more
@@ -938,12 +1236,12 @@ def _server_copy(c: Choice, *, background: bool) -> _Copy:
             cp.prio.foreground()
             _stir()
         return cp
-    if cp is not None and cp.task is not None:
+    if cp is not None and cp.task is not None and _same_file(cp.cand, c.candidate):
         cp.task.cancel()
     for ref in [r for r, old in _copies.items() if old.failed or (old.done and not old.path.is_file())]:
         del _copies[ref]
     assert c.candidate is not None
-    cp = _Copy(c.candidate, get_settings().staging_dir / LOCAL_DIR / _local_name(c.ref) / COPY_NAME,
+    cp = _Copy(c.candidate, get_settings().staging_dir / LOCAL_DIR / _local_name(c.ref) / f"{COPY_NAME}-{time.monotonic_ns()}",
                Priority(background))
     cp.task = _spawn(_download_copy(c, cp), prio=cp.prio)
     _copies[c.ref] = cp
@@ -980,54 +1278,35 @@ async def _yield_to_played(cp: _Copy) -> None:
 
 def _busy_dirs() -> set[str]:
     return ({_local_name(r) for r in _fetching}
-            | {cp.path.parent.name for cp in _copies.values() if not cp.settled()})
+            | {cp.path.parent.name for cp in _copies.values() if not cp.settled()}
+            | {_local_name(ref) for ref in _full_active})
 
 
 async def _download_copy(c: Choice, cp: _Copy) -> None:
-    """Download the file to its server copy from start to end. A connection the source drops midway is resumed
-    from the byte it broke at; a copy loaded ahead pauses while one of a played track downloads."""
+    """Append only validated bytes; never truncate a copy that a reader may already have consumed."""
     t0 = time.monotonic()
     f = None
+    resp = None
     try:
         await asyncio.to_thread(prune_local, cp.path.parent.parent, _busy_dirs())
         await asyncio.to_thread(cp.path.parent.mkdir, parents=True, exist_ok=True)
-        f = await asyncio.to_thread(open, cp.path, "wb", buffering=0)  # unbuffered: readers see every byte written
-        drops = 0
-        while not cp.done:
-            if not _same_file(c.candidate, cp.cand):
-                if cp.have:
-                    raise ListenError(502, "Файл трека сменился")
-                cp.cand = c.candidate  # the first file didn't open: the pick moved on to the next one
-            resp, src = await open_stream(c, f"bytes={cp.have}-")
-            try:
-                if resp.status_code == 416:
-                    raise ListenError(502, "Источник не отдаёт файл (HTTP 416)")
-                if resp.status_code == 200 and cp.have:  # the Range was ignored: start over
-                    await asyncio.to_thread(f.truncate, 0)
-                    await asyncio.to_thread(f.seek, 0)
-                    cp.have = 0
-                if cp.size is None:
-                    cp.size = _total_size(resp)
-                    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-                    cp.media_type = ctype if ctype.startswith("audio/") else src.media_type
-                    await cp.changed()
-                async for chunk in resp.aiter_raw():
-                    await _yield_to_played(cp)
-                    await asyncio.to_thread(_write_all, f, chunk)
-                    cp.have += len(chunk)
-                    drops = 0
-                    await cp.changed()
-            except httpx.TransportError as e:
-                drops += 1
-                if drops > COPY_RESUMES:
-                    raise ListenError(502, f"Источник обрывает передачу файла: {e!r}") from e
-                log.info("listen %s: upstream dropped at %d of %s bytes (%r), resuming", c.ref, cp.have, cp.size, e)
-                continue
-            finally:
-                await resp.aclose()
-            if cp.size is None or cp.have >= cp.size:
-                cp.size = cp.have
-                cp.done = True
+        f = await asyncio.to_thread(open, cp.path, "wb", buffering=0)
+        resp, src = await open_stream(c, "bytes=0-")
+        if resp.status_code == 416:
+            raise ListenError(502, "Источник не отдаёт файл (HTTP 416)")
+        cp.cand = c.candidate
+        cp.representation = _representation(c, resp)
+        cp.size = cp.representation.size
+        ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+        cp.media_type = ctype if ctype.startswith("audio/") else src.media_type
+        await cp.changed()
+        async for chunk in _relay(c, resp, representation=cp.representation):
+            await _yield_to_played(cp)
+            await asyncio.to_thread(_write_all, f, chunk)
+            cp.have += len(chunk)
+            await cp.changed()
+        cp.size = cp.have
+        cp.done = True
         log.info("listen %s: server copy %d KB (%.1f s%s)", c.ref, cp.have // 1024, time.monotonic() - t0,
                  ", ahead" if cp.prio.background else "")
     except ListenError as e:
@@ -1036,6 +1315,8 @@ async def _download_copy(c: Choice, cp: _Copy) -> None:
         log.warning("listen %s: server copy failed: %r", c.ref, e)
         cp.failed = ListenError(502, f"Не удалось скачать файл: {e}")
     finally:
+        if resp is not None:
+            await resp.aclose()
         if f is not None:
             f.close()
         if not cp.done and cp.failed is None:
@@ -1053,10 +1334,10 @@ def _write_all(f, data: bytes) -> None:
 def _total_size(resp: httpx.Response) -> int | None:
     """The whole file's size: from Content-Range of a 206, from Content-Length of a 200."""
     if resp.status_code == 206:
-        total = resp.headers.get("content-range", "").rpartition("/")[2]
-        return int(total) if total.isdigit() else None
+        parsed = _content_range(resp)
+        return parsed[2] if parsed else None
     length = resp.headers.get("content-length", "")
-    return int(length) if length.isdigit() else None
+    return int(length) if resp.status_code == 200 and length.isdigit() else None
 
 
 def _byte_range(header: str | None, size: int) -> tuple[int, int] | Literal[False] | None:
@@ -1125,9 +1406,11 @@ async def _read_copy(c: Choice, cp: _Copy, first: int, last: int, *, foreground:
             if not cp.readers and not cp.settled():
                 cp.prio.background = True  # nobody plays it any more (a skip): a played track's copy goes first
                 _stir()
-    if pos <= last and _same_file(c.candidate, cp.cand):
-        resp, _ = await open_stream(c, f"bytes={pos}-{last}")
-        async for chunk in _relay(c, resp):
+    if pos <= last:
+        if cp.representation is None:
+            raise ListenError(502, "Источник не подтверждает неизменность файла")
+        resp, _ = await open_stream(c, f"bytes={pos}-{last}", resume=cp.representation)
+        async for chunk in _relay(c, resp, representation=cp.representation):
             yield chunk
 
 
@@ -1143,38 +1426,86 @@ def _upstream_media(c: Choice, resp: httpx.Response, src: StreamSource) -> Media
                  media_type=ctype if ctype.startswith("audio/") else src.media_type, close=resp.aclose)
 
 
-async def _relay(c: Choice, resp: httpx.Response) -> AsyncIterator[bytes]:
-    """The upstream body; a connection the source drops midway is resumed from the byte it broke at."""
+async def _relay(c: Choice, resp: httpx.Response, *,
+                 representation: _Representation | None = None) -> AsyncIterator[bytes]:
+    """Resume only the exact remaining range of a validator-confirmed representation."""
     span = _span(resp)
+    rep = representation or _representation(c, resp)
     pos = span[0] if span else 0
     drops = 0
     try:
         while True:
             try:
                 async for chunk in resp.aiter_raw():
+                    if span and pos + len(chunk) > span[1] + 1:
+                        raise ListenError(502, "Источник передал больше байтов, чем объявлено")
                     pos += len(chunk)
                     drops = 0
                     yield chunk
-                return
-            except httpx.TransportError as e:
+                if span is None or pos == span[1] + 1:
+                    return
+                raise httpx.RemoteProtocolError("upstream ended before Content-Length")
+            except httpx.TransportError:
+                if span and pos == span[1] + 1:
+                    return
                 drops += 1
                 if span is None or drops > COPY_RESUMES:
                     raise
-                log.info("listen %s: upstream dropped at byte %d (%r), resuming", c.ref, pos, e)
             await resp.aclose()
-            resp, _ = await open_stream(c, f"bytes={pos}-{span[1]}")
+            resp, _ = await open_stream(c, f"bytes={pos}-{span[1]}", resume=rep)
     finally:
         await resp.aclose()
 
 
-def _span(resp: httpx.Response) -> tuple[int, int] | None:
-    """The bytes (first, last) of the file a response carries, when it says."""
+def _candidate_key(c: Choice) -> tuple[str, str] | None:
+    return (c.candidate.provider, c.candidate.provider_id) if c.candidate else None
+
+
+def _representation(c: Choice, resp: httpx.Response) -> _Representation:
+    etag = resp.headers.get("etag", "")
+    # Weak validators and dates alone cannot prove byte-for-byte identity.
+    strong = etag if len(etag) >= 2 and etag.startswith('"') and etag.endswith('"') else None
+    return _Representation(_candidate_key(c), str(resp.url), _total_size(resp), strong)
+
+
+def _content_range(resp: httpx.Response) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", resp.headers.get("content-range", ""))
+    if match is None:
+        return None
+    first, last, size = map(int, match.groups())
+    return (first, last, size) if first <= last < size else None
+
+
+def _validate_response(resp: httpx.Response, requested: str | None) -> None:
+    if resp.headers.get("content-encoding", "identity").lower() != "identity":
+        raise ListenError(502, "Источник вернул сжатый диапазон")
+    length = resp.headers.get("content-length")
+    if length is not None and not length.isdigit():
+        raise ListenError(502, "Источник вернул неверный Content-Length")
     if resp.status_code == 206:
-        rng = resp.headers.get("content-range", "").removeprefix("bytes ").partition("/")[0]
-        a, _, b = rng.partition("-")
-        return (int(a), int(b)) if a.isdigit() and b.isdigit() else None
+        parsed = _content_range(resp)
+        if parsed is None:
+            raise ListenError(502, "Источник вернул неверный Content-Range")
+        first, last, size = parsed
+        if length is not None and int(length) != last - first + 1:
+            raise ListenError(502, "Размер диапазона не совпадает с Content-Length")
+        if _byte_range(requested, size) != (first, last):
+            raise ListenError(502, "Источник вернул другой диапазон")
+
+
+def _validate_resume(c: Choice, resp: httpx.Response, requested: str | None, rep: _Representation) -> None:
+    current = _representation(c, resp)
+    if (resp.status_code != 206 or rep.size is None or not rep.etag or current != rep
+            or _span(resp) != _byte_range(requested, rep.size)):
+        raise ListenError(502, "Источник не подтвердил диапазон того же файла")
+
+
+def _span(resp: httpx.Response) -> tuple[int, int] | None:
+    if resp.status_code == 206:
+        parsed = _content_range(resp)
+        return parsed[:2] if parsed else None
     length = resp.headers.get("content-length", "")
-    return (0, int(length) - 1) if resp.status_code == 200 and length.isdigit() and int(length) else None
+    return (0, int(length) - 1) if resp.status_code == 200 and length.isdigit() else None
 
 
 # --- after listening -------------------------------------------------------------------------------------------

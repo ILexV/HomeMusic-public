@@ -9,6 +9,8 @@ import httpx
 import numpy as np
 
 MIN_SECONDS = 1.0
+PROCESS_TIMEOUT_SECONDS = 60
+PROCESS_TERMINATE_SECONDS = 3
 
 
 class AudioError(Exception):
@@ -51,8 +53,31 @@ async def _run(*args: str) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    out, err = await proc.communicate()
-    return proc.returncode or 0, out, err
+    communicate = asyncio.create_task(proc.communicate())
+    try:
+        out, err = await asyncio.wait_for(asyncio.shield(communicate), PROCESS_TIMEOUT_SECONDS)
+        return proc.returncode or 0, out, err
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        # Keep draining pipes while stopping the child: wait() alone can deadlock on a full stdout pipe.
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(asyncio.shield(communicate), PROCESS_TERMINATE_SECONDS)
+        except TimeoutError:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await communicate
+        finally:
+            await proc.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise AudioError("audio subprocess timed out", retry=True) from None
 
 
 async def duration(path: Path) -> float | None:

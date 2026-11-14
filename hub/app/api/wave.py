@@ -27,7 +27,7 @@ async def track_outs(s: AsyncSession, cands: list, user_id: int) -> list[WaveTra
             d.update(owned=True, nd_song_id=c.nd_song_id, library_track_id=c.library_track_id or d.get("library_track_id"))
         g = wave.top_generator(c)
         tracks.append(WaveTrackOut(**d, generator=g, generator_title=wave.generator_title(g), familiar=c.familiar,
-                                   sim=c.sim))
+                                   sim=c.sim, explanation=c.explanation))
     return tracks
 
 
@@ -38,7 +38,8 @@ async def wave_out(s: AsyncSession, b: wave.Batch, user_id: int) -> WaveOut:
         r = b.recorded
         recorded = PlayEventsOut(accepted=r.accepted, duplicates=r.duplicates, rejected=r.rejected)
     return WaveOut(session_id=b.session_id, title=b.title, mode=b.mode,  # type: ignore[arg-type]
-                   seed=b.seed, tracks=tracks, pending=b.pending, recorded=recorded)
+                   seed=b.seed, tracks=tracks, pending=b.pending, recorded=recorded,
+                   preferences=b.preferences, preferences_status=b.preferences_status, preparation=b.preparation)
 
 
 @router.post("/start", response_model=WaveOut)
@@ -49,7 +50,8 @@ async def start(body: WaveStartIn | None = None, user: User = Depends(current_us
     try:
         b = await wave.start(user, body.seed.model_dump(exclude_none=True) if body.seed else None, body.mode,
                              origin=body.origin, client=body.client, restart_of=body.restart_of,
-                             request=body.model_dump(mode="json", exclude_none=True))
+                             request=body.model_dump(mode="json", exclude_none=True),
+                             preferences=body.preferences.model_dump() if body.preferences is not None else None)
     except wave.WaveError as e:
         raise HTTPException(e.status, str(e)) from e
     return await wave_out(s, b, user.id)
@@ -60,7 +62,8 @@ async def next_(session_id: str, body: WaveNextIn, user: User = Depends(current_
                 s: AsyncSession = Depends(get_session, scope="function")):
     """The events since the last call; the next 5 tracks, picked again with them (they replace `queued`)."""
     try:
-        b = await wave.next_batch(user, session_id, body.played, body.queued)
+        b = await wave.next_batch(user, session_id, body.played, body.queued,
+                                 preferences=body.preferences.model_dump() if body.preferences is not None else None)
     except wave.WaveError as e:
         raise HTTPException(e.status, str(e)) from e
     return await wave_out(s, b, user.id)

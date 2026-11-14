@@ -25,7 +25,7 @@ from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from app.config import HitmosFmCfg
 from app.net import RateLimiter, make_client, request_with_backoff
-from app.providers.base import Candidate, ProviderError, ProviderUnavailable, StreamSource, TrackQuery
+from app.providers.base import Candidate, ProviderError, ProviderUnavailable, StreamSource, TrackQuery, staging_path
 from app.providers.hitmoz import HEALTH_TTL_S, ProgressCb, abs_url, download_audio, parse_duration
 
 log = logging.getLogger(__name__)
@@ -252,10 +252,10 @@ class HitmosFmProvider:
         return c.model_copy(update={"enriched": True})
 
     async def fetch(self, c: Candidate, dest_dir: Path, on_progress: ProgressCb | None = None) -> Path:
-        """Download the dwc1 MP3 to `dest_dir/hitmos_fm_<id>.mp3`."""
+        """Download the dwc1 MP3 to a server-generated staging name."""
         if not c.download_url:
             raise ProviderError("hitmos.fm: нет ссылки на MP3")
-        dest = Path(dest_dir) / f"hitmos_fm_{c.provider_id}.mp3"
+        dest = staging_path(dest_dir, ".mp3")
         async with self.download_sem:
             return await download_audio(
                 self.client,

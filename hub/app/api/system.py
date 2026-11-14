@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import HealthOut
@@ -19,20 +19,25 @@ from app.config import get_settings
 from app.db import get_session
 from app.library.navidrome import admin_client
 from app.models import User
-from app.services import svc
+from app import health as health_checks
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["system"])
 
 
 async def _navidrome_ok() -> bool:
-    nd = admin_client()
+    nd = None
     try:
-        return await asyncio.wait_for(nd.ping(), timeout=5)
+        nd = admin_client()
+        return bool(await asyncio.wait_for(nd.ping(), timeout=3))
     except Exception:
         return False
     finally:
-        await nd.aclose()
+        if nd is not None:
+            try:
+                await asyncio.wait_for(nd.aclose(), timeout=1)
+            except Exception:
+                pass
 
 
 _BUILD_META = re.compile(r'<meta\s+name="hm-build"\s+content="([^"]+)"')
@@ -56,23 +61,22 @@ def web_build(static_dir: Path) -> str | None:
 
 @router.get("/healthz", response_model=HealthOut)
 async def healthz():
-    return HealthOut(ok=True, navidrome=await _navidrome_ok(), web_build=web_build(get_settings().static_dir))
+    return HealthOut(ok=True, navidrome=health_checks.navidrome_cached, web_build=web_build(get_settings().static_dir))
 
 
-@router.get("/api/system/health", response_model=HealthOut)
+@router.get("/readyz")
+async def readyz():
+    result = await health_checks.readiness(_navidrome_ok)
+    return JSONResponse(result, status_code=200 if result["ok"] else 503)
+
+
+@router.get("/api/system/health", response_model=health_checks.AdminHealthOut)
 async def health(user: User = Depends(admin_user)):
-    from app.housekeeping import smoke_test_providers
-
-    providers: dict = {}
-    hitmoz = svc.providers.get("hitmoz")
-    if hitmoz is not None and hasattr(hitmoz, "health"):
-        try:
-            providers["hitmoz_domain"] = await hitmoz.health()
-        except Exception as e:
-            providers["hitmoz_domain"] = {"ok": False, "error": repr(e)}
-    providers["search"] = await smoke_test_providers()
-    return HealthOut(ok=True, navidrome=await _navidrome_ok(), providers=providers,
-                     web_build=web_build(get_settings().static_dir))
+    result, details = await asyncio.gather(health_checks.readiness(_navidrome_ok), health_checks.admin_details())
+    return health_checks.AdminHealthOut(
+        **result, **details, navidrome=health_checks.navidrome_cached,
+        web_build=web_build(get_settings().static_dir),
+    )
 
 
 @router.post("/share-target")

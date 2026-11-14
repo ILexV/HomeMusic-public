@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { api } from '../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, errorMessage, isAbort } from '../api/client';
+import { downloadPage, type DownloadFilter, type DownloadPage } from '../api/downloads';
 import type { DownloadItemOut } from '../api/types';
 import { Icon } from '../components/Icon';
 import { Button, Cover, Empty, ErrorState, IconButton, PageHeader, ProgressBar, Segmented, SkeletonRows, StatusChip, cx } from '../components/ui';
@@ -8,48 +9,123 @@ import { DOWNLOAD_ACTIVE, fmtWhen, providerLabel, warningText } from '../lib/for
 import { useAsync, useInterval } from '../lib/hooks';
 import { canPlay, playList } from '../lib/player';
 import { Link } from '../lib/router';
+import { useSession } from '../lib/session';
 import { attempt, toast } from '../lib/ui';
 
-type Filter = 'all' | 'active' | 'problems';
+type LoadMode = 'refresh' | 'more';
+
+function useDownloadHistory(filter: DownloadFilter) {
+  const [data, setData] = useState<DownloadPage>();
+  const [error, setError] = useState<string>();
+  const [pending, setPending] = useState<LoadMode | null>('refresh');
+  const current = useRef<DownloadPage | undefined>(undefined);
+  const active = useRef<AbortController | null>(null);
+  const mounted = useRef(false);
+  const refreshPending = useRef(false);
+  const timer = useRef<number | undefined>(undefined);
+  const failedMode = useRef<LoadMode>('refresh');
+
+  const load = useCallback(async (mode: LoadMode) => {
+    if (!mounted.current) return;
+    if (active.current) {
+      if (mode === 'refresh') refreshPending.current = true;
+      return;
+    }
+    const previous = current.current;
+    if (mode === 'more' && previous?.next_cursor == null) return;
+    const ctl = new AbortController();
+    active.current = ctl;
+    setPending(mode);
+    setError(undefined);
+    try {
+      let page: DownloadPage;
+      if (mode === 'more') {
+        const next = await downloadPage(filter, previous!.next_cursor!, ctl.signal);
+        page = { ...next, items: [...previous!.items, ...next.items] };
+      } else {
+        // Refresh through the oldest loaded id, not just page one: new arrivals must not discard
+        // history the user has already opened. The server owns membership, order and all counters.
+        const oldest = previous?.items.at(-1)?.id;
+        page = await downloadPage(filter, undefined, ctl.signal);
+        while (!ctl.signal.aborted && oldest !== undefined && page.next_cursor !== null && page.next_cursor > oldest) {
+          const next = await downloadPage(filter, page.next_cursor, ctl.signal);
+          page = { ...next, items: [...page.items, ...next.items] };
+        }
+      }
+      if (!ctl.signal.aborted) {
+        current.current = page;
+        setData(page);
+      }
+    } catch (e) {
+      if (!ctl.signal.aborted && !isAbort(e)) {
+        failedMode.current = mode;
+        setError(errorMessage(e));
+      }
+    } finally {
+      if (!ctl.signal.aborted) {
+        active.current = null;
+        setPending(null);
+        if (refreshPending.current) {
+          refreshPending.current = false;
+          scheduleRefresh();
+        }
+      }
+    }
+  }, [filter]);
+
+  function scheduleRefresh() {
+    if (!mounted.current || timer.current !== undefined) return;
+    // A throttle, not a debounce: a busy queue must still update. Never cancel an in-flight
+    // page append; coalesce invalidations and refresh its expanded range when it finishes.
+    timer.current = window.setTimeout(() => {
+      timer.current = undefined;
+      void load('refresh');
+    }, 500);
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    void load('refresh');
+    return () => {
+      mounted.current = false;
+      active.current?.abort();
+      active.current = null;
+      clearTimeout(timer.current);
+      timer.current = undefined;
+      refreshPending.current = false;
+    };
+  }, [load]);
+
+  // Events intentionally invalidate rather than upsert: an unseen id can be an old item outside
+  // this page, and its previous status/visibility (needed for global counters) is unknown.
+  useHubEvent('download', scheduleRefresh);
+  useHubEvent('reconnect', () => void load('refresh'));
+  return {
+    data, error, pending,
+    reload: () => void load('refresh'),
+    loadMore: () => void load('more'),
+    retry: () => void load(failedMode.current),
+  };
+}
 
 export function DownloadsPage() {
-  const res = useAsync((s) => api.downloads(undefined, 200, s), []);
+  const { me } = useSession();
+  const [filter, setFilter] = useState<DownloadFilter>('all');
+  // Filter/account changes synchronously discard the previous view and abort all its requests.
+  return <DownloadHistory key={`${me.id}:${filter}`} filter={filter} onFilterChange={setFilter} />;
+}
+
+function DownloadHistory({ filter, onFilterChange }: { filter: DownloadFilter; onFilterChange: (filter: DownloadFilter) => void }) {
+  const res = useDownloadHistory(filter);
   const connected = useHubConnected();
-  const [filter, setFilter] = useState<Filter>('all');
   const [clearing, setClearing] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
-
-  // Live updates: upsert the item; unknown items (new batches) are prepended.
-  useHubEvent('download', (d) => {
-    res.setData((prev) => {
-      if (!prev) return prev;
-      const i = prev.findIndex((x) => x.id === d.id);
-      if (i < 0) return [d, ...prev];
-      const next = prev.slice();
-      next[i] = { ...prev[i], ...d, candidates: prev[i].candidates };
-      return next;
-    });
-  });
-  useHubEvent('reconnect', () => res.reload(true));
-
-  // downloads queued only for ♥ or by an import are the Hub's own business: not shown (an import has its card); a ♥
-  // download that failed comes with `star` false and is shown
   const imports = useAsync((s) => api.imports(s), []);
   useHubEvent('import', () => imports.reload(true));
   const running = (imports.data ?? []).filter((x) => x.status === 'running');
   useInterval(() => imports.reload(true), running.length ? 15_000 : null);
-  const items = useMemo(() => (res.data ?? []).filter((x) => !x.star), [res.data]);
-  const counts = useMemo(
-    () => ({
-      active: items.filter((x) => DOWNLOAD_ACTIVE.includes(x.status)).length,
-      problems: items.filter((x) => x.status === 'failed' || x.status === 'needs_review').length,
-      finished: items.filter((x) => x.status === 'done' || x.status === 'cancelled').length,
-    }),
-    [items],
-  );
-  const shown = items.filter((x) =>
-    filter === 'active' ? DOWNLOAD_ACTIVE.includes(x.status) : filter === 'problems' ? x.status === 'failed' || x.status === 'needs_review' : true,
-  );
+  const shown = res.data?.items ?? [];
+  const counts = res.data?.counts ?? { all: 0, active: 0, problems: 0, finished: 0 };
 
   const clear = async () => {
     setClearing(true);
@@ -57,7 +133,7 @@ export function DownloadsPage() {
     setClearing(false);
     if (r) {
       toast(r.removed ? `Убрано из списка: ${r.removed}` : 'Нечего очищать', 'success');
-      res.setData((prev) => prev?.filter((x) => x.status !== 'done' && x.status !== 'cancelled'));
+      res.reload();
     }
   };
 
@@ -65,11 +141,11 @@ export function DownloadsPage() {
     setBusyId(item.id);
     const r = await attempt(() => (kind === 'retry' ? api.retry(item.id) : api.cancel(item.id)));
     setBusyId(null);
-    if (r) res.setData((prev) => prev?.map((x) => (x.id === r.id ? { ...x, ...r } : x)));
+    if (r) res.reload();
   };
 
   return (
-    <div>
+    <div data-testid="downloads-page" data-filter={filter}>
       <PageHeader
         title="Загрузки"
         sub={
@@ -97,23 +173,22 @@ export function DownloadsPage() {
         </Link>
       ))}
       <div className="px-4 pb-2">
-        <Segmented<Filter>
+        <Segmented<DownloadFilter>
           label="Фильтр"
           value={filter}
-          onChange={setFilter}
+          onChange={onFilterChange}
           options={[
-            { value: 'all', label: `Все ${items.length || ''}`.trim() },
+            { value: 'all', label: `Все ${counts.all || ''}`.trim() },
             { value: 'active', label: `Активные ${counts.active || ''}`.trim() },
             { value: 'problems', label: `Проблемы ${counts.problems || ''}`.trim() },
           ]}
         />
       </div>
 
-      {res.loading ? (
+      {res.error && <ErrorState text={res.error} onRetry={res.retry} />}
+      {!res.data && res.pending ? (
         <SkeletonRows />
-      ) : res.error ? (
-        <ErrorState text={res.error} onRetry={() => res.reload()} />
-      ) : shown.length === 0 ? (
+      ) : !res.data ? null : shown.length === 0 ? (
         <Empty icon="download" title={filter === 'all' ? 'Загрузок пока нет' : 'Здесь пусто'} text={filter === 'all' ? 'Найдите трек или альбом в поиске и нажмите «Скачать».' : undefined}>
           {filter === 'all' && (
             <Link to="/search" className="mt-2 rounded-full bg-fg px-5 py-2.5 font-semibold text-bg">
@@ -122,7 +197,7 @@ export function DownloadsPage() {
           )}
         </Empty>
       ) : (
-        <ul className="divide-y divide-line/60">
+        <ul className="divide-y divide-line/60" data-testid="download-history" aria-label="История загрузок">
           {shown.map((item) => (
             <DownloadRow
               key={item.id}
@@ -134,6 +209,13 @@ export function DownloadsPage() {
             />
           ))}
         </ul>
+      )}
+      {res.data?.next_cursor != null && (
+        <div className="px-4 py-4">
+          <Button block data-testid="downloads-load-more" busy={res.pending === 'more'} disabled={res.pending !== null} onClick={res.loadMore}>
+            Загрузить ещё
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -158,7 +240,7 @@ function DownloadRow({
   const warnings = (item.warnings ?? []).map(warningText);
   const cover = item.chosen?.cover_url;
   return (
-    <li className="flex items-start gap-3 py-3 pl-4 pr-1">
+    <li className="flex items-start gap-3 py-3 pl-4 pr-1" data-testid="download-row" data-download-id={item.id} data-status={item.status}>
       <Link to={`/downloads/${item.id}`} className="flex min-w-0 flex-1 gap-3" aria-label={`Подробности: ${item.artist} — ${item.title}`}>
         <div className="relative shrink-0">
           <Cover src={cover} size={48} alt="" />

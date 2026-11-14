@@ -14,7 +14,6 @@ import logging
 import os
 import re
 import shutil
-import socket
 import ssl
 import threading
 import time
@@ -28,13 +27,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlsplit
 
+import httpcore
 import httpx
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled, DownloadError, ExtractorError
 
 from app.config import YtdlpCfg
+from app.external import PublicSyncBackend
 from app.net import PrioritySemaphore, make_client
-from app.providers.base import Candidate, ProviderError, StreamSource, TrackQuery
+from app.providers.base import Candidate, ProviderError, StreamSource, TrackQuery, contained_path, staging_path
+from app.providers.external_ytdlp import PublicRH
 
 log = logging.getLogger(__name__)
 
@@ -148,10 +150,14 @@ def _media_host_answers(host: str) -> bool:
     if hit and now - hit[0] < MEDIA_PROBE_TTL_S:
         return hit[1]
     try:
-        with socket.create_connection((host, 443), timeout=MEDIA_PROBE_TIMEOUT_S) as sock, \
-                ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+        stream = PublicSyncBackend().connect_tcp(host, 443, timeout=MEDIA_PROBE_TIMEOUT_S)
+        try:
+            tls = stream.start_tls(ssl.create_default_context(), server_hostname=host, timeout=MEDIA_PROBE_TIMEOUT_S)
+            tls.close()
             ok = True
-    except OSError:
+        finally:
+            stream.close()
+    except (OSError, httpcore.NetworkError, httpcore.TimeoutException):
         ok = False
     with _media_lock:
         _media_hosts[host] = (now, ok)
@@ -476,6 +482,10 @@ class YtdlpProvider:
             "socket_timeout": 30,
             "retries": 3,
             "fragment_retries": 3,
+            "proxy": "",  # never inherit an environment proxy that resolves media hosts remotely
+            "hls_prefer_native": True,
+            "external_downloader": "native",
+            "external_downloader_args": {"ffmpeg_i": ["-protocol_whitelist", "file,crypto,data"]},
         }
         if self._youtube:
             opts.update({
@@ -520,6 +530,10 @@ class YtdlpProvider:
                 # Cookie parser exceptions may contain credentials from the offending line.
                 raise ProviderError("Не удалось прочитать cookies YouTube. Владельцу сервера нужно проверить файл cookies.") from None
         with yt_dlp.YoutubeDL({**self._base_opts(), **opts}) as ydl:
+            ydl._request_director.close()
+            ydl._request_director = ydl.build_request_director([PublicRH])
+            if self._youtube and (base_url := os.environ.get("YTDLP_POT_BASE_URL")):
+                ydl._request_director.handlers[PublicRH.RH_KEY].token_service = base_url.rstrip("/")
             for cookie in cookies:
                 if cookie.domain.lstrip(".") == "youtube.com" or cookie.domain.endswith(".youtube.com"):
                     # Netscape exports use 0 for session cookies; the stdlib treats it as already expired.
@@ -716,8 +730,8 @@ class YtdlpProvider:
         return WATCH_URL.format(id=c.provider_id)
 
     async def fetch(self, c: Candidate, dest_dir: Path, on_progress: ProgressCb | None = None) -> Path:
-        dest_dir = Path(dest_dir)
-        await asyncio.to_thread(dest_dir.mkdir, parents=True, exist_ok=True)
+        dest_dir = Path(dest_dir).resolve()
+        dest = staging_path(dest_dir)
         loop = asyncio.get_running_loop()
         cancelled = threading.Event()
         last = [-1.0]
@@ -746,8 +760,9 @@ class YtdlpProvider:
         else:
             pp = {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}
         opts = {
-            "format": "bestaudio/best",
-            "outtmpl": str(dest_dir / f"ytdlp_{c.provider_id}.%(ext)s"),
+            # Only native HTTP/HLS downloaders: ffmpeg must never fetch an unchecked remote URL.
+            "format": "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio[protocol=m3u8_native]",
+            "outtmpl": str(dest) + ".%(ext)s",
             "postprocessors": [pp],
             "progress_hooks": [hook],
             "overwrites": True,
@@ -757,12 +772,16 @@ class YtdlpProvider:
         def download() -> Path:
             with self._youtube_dl(opts) as ydl:
                 info = ydl.extract_info(self.media_url(c), download=False, process=False)
+                # Token calls belong to extraction; media, fragments and keys are public-only.
+                ydl._request_director.handlers[PublicRH.RH_KEY].token_service = None
                 info = ydl.process_ie_result(on_answering_servers(info), download=True)
             for rd in (info or {}).get("requested_downloads") or []:
-                if (fp := rd.get("filepath")) and Path(fp).is_file():
-                    return Path(fp)
+                if fp := rd.get("filepath"):
+                    path = contained_path(dest_dir, Path(fp))
+                    if path.is_file():
+                        return path
             files = [
-                p for p in dest_dir.glob(f"ytdlp_{c.provider_id}.*")
+                contained_path(dest_dir, p) for p in dest_dir.glob(f"{dest.name}.*")
                 if p.suffix.lower() in _AUDIO_EXTS and p.is_file()
             ]
             if not files:

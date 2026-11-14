@@ -79,6 +79,14 @@ export component Glyph inherits Rectangle {
         height: 12px;
         background: root.tint;
     }
+    if root.kind == "play-next" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 2 2 L 4 2 L 4 9 L 10 9 L 10 6 L 15 10 L 10 14 L 10 11 L 2 11 Z";
+        fill: root.tint;
+    }
     if root.kind == "speaker" : Path {
         width: 100%;
         height: 100%;

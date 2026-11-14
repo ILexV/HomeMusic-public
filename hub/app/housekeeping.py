@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -16,30 +16,35 @@ KEEP_BACKUPS = 7
 
 
 def backup_hub_db() -> Path | None:
+    from app.backup import record_status, snapshot_sqlite
+
     s = get_settings()
+    record_status("local", success=None)
     if not s.db_path.is_file():
+        record_status("local", success=False, error="Hub database unavailable")
         return None
     dest_dir = s.backups_dir / "hub"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"hub-{datetime.now():%Y%m%d}.sqlite3"
     tmp = dest_dir / ".hub-backup.part"
-    # backup into the WSL2 filesystem first, then copy: SQLite file locking on the Windows mount is unreliable
     local_tmp = s.data_dir / "backup.tmp.sqlite3"
-    src = sqlite3.connect(s.db_path)
     try:
-        dst = sqlite3.connect(local_tmp)
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
+        # SQLite locking on Windows mounts is unreliable: snapshot locally before copying.
+        local_tmp.unlink(missing_ok=True)
+        snapshot_sqlite(s.db_path, local_tmp)
+        shutil.copyfile(local_tmp, tmp)
+        tmp.chmod(0o600)
+        tmp.replace(dest)
+        for old in sorted(dest_dir.glob("hub-*.sqlite3"))[:-KEEP_BACKUPS]:
+            old.unlink(missing_ok=True)
+        record_status("local", success=True)
+        return dest
+    except Exception as exc:
+        record_status("local", success=False, error=type(exc).__name__)
+        raise
     finally:
-        src.close()
-    tmp.write_bytes(local_tmp.read_bytes())
-    tmp.replace(dest)
-    local_tmp.unlink(missing_ok=True)
-    for old in sorted(dest_dir.glob("hub-*.sqlite3"))[:-KEEP_BACKUPS]:
-        old.unlink(missing_ok=True)
-    return dest
+        local_tmp.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
 
 
 async def smoke_test_providers() -> dict[str, str]:
@@ -70,6 +75,13 @@ async def run_daily() -> None:
     try:
         path = await asyncio.to_thread(backup_hub_db)
         log.info("hub db backup: %s", path)
+        if path:
+            from app.backup import external_backup
+
+            try:
+                await asyncio.to_thread(external_backup)
+            except Exception:
+                log.error("external backup failed; see admin backup status")
     except Exception:
         log.exception("hub db backup failed")
     try:

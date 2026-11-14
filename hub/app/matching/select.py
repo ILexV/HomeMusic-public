@@ -17,7 +17,7 @@ from app.matching.normalize import (
     to_latin,
     version_kind,
 )
-from app.matching.score import ScoreBreakdown, score
+from app.matching.score import ScoreBreakdown, score, version_identity
 from app.providers.base import Candidate, TrackQuery
 
 Verdict = Literal["auto", "confirm", "not_found"]
@@ -142,12 +142,12 @@ def classify_scores(scores: list[float], cfg: MatchingCfg) -> Verdict:
 
 def classify(ranked: list[Candidate], cfg: MatchingCfg) -> Verdict:
     """classify_scores over ranked candidates. Other uploads of the same recording as the top one (same fingerprint
-    and version kind, e.g. hitmoz duplicates) do not count as competitors for the margin."""
+    and named version, e.g. hitmoz duplicates) do not count as competitors for the margin."""
     if not ranked:
         return "not_found"
 
-    def key(c: Candidate) -> tuple[str, str | None]:
-        return fingerprint(c.artist, c.title), version_kind(normalize_title(c.title).version)
+    def key(c: Candidate) -> tuple[str, tuple[str | None, str]]:
+        return fingerprint(c.artist, c.title), version_identity(normalize_title(c.title).version)
 
     top_key = key(ranked[0])
     return classify_scores([ranked[0].score] + [c.score for c in ranked[1:] if key(c) != top_key], cfg)

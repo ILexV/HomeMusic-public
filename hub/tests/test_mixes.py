@@ -77,6 +77,8 @@ class ND:
             pl["songs"] += p.get_list("songIdToAdd")
             if "comment" in p:
                 pl["comment"] = p["comment"]
+            if "name" in p:
+                pl["name"] = p["name"]
         return httpx.Response(200, json={"subsonic-response": ok})
 
 
@@ -688,3 +690,136 @@ async def test_v2_shadow_does_not_repeat_build_services(env, monkeypatch, shadow
         jobs = list((await s.execute(select(Job).where(Job.kind == "download_item"))).scalars())
     active_downloads = [row for row in rows if row.state == "active" and row.download_item_id]
     assert len(jobs) == len(downloads) == len(active_downloads)
+
+
+async def test_publication_failure_keeps_local_mix_and_retries_the_sync_job(env, monkeypatch):
+    from app.db import session_scope
+    from app.jobs.queue import run_job
+    from app.mixes import core
+    from app.models import Job, Mix
+
+    await history(env["admin"])
+    fake_generators(monkeypatch, [new_track(5000 + i) for i in range(10)])
+    with monkeypatch.context() as m:
+        async def unavailable(*args):
+            raise httpx.ReadTimeout("temporary Navidrome outage")
+
+        m.setattr(core, "write_playlist", unavailable)
+        mix = await core.build_for(env["admin"])
+        assert mix.stats_json["playlist_status"] == "error"
+        assert len([row for row in await mix_rows(mix.id) if row.state == "active"]) == 6
+        async with session_scope() as s:
+            job = (await s.execute(select(Job).where(Job.kind == "mix_sync"))).scalar_one()
+            job.attempts = 1
+        await run_job(job)
+        async with session_scope() as s:
+            retried = await s.get(Job, job.id)
+            assert retried.status == "queued" and "temporary Navidrome outage" in retried.last_error
+            assert len(list((await s.execute(select(Mix))).scalars())) == 1
+        out = (await env["client"].get(f"/api/mixes/{mix.id}")).json()
+        assert out["playlist_status"] == "error" and out["playlist_error"]
+    await run_job(job)
+    async with session_scope() as s:
+        current = await s.get(Mix, mix.id)
+        assert current.stats_json["playlist_status"] == "published"
+        assert current.stats_json["playlist_error"] is None
+        assert (await s.get(Job, job.id)).status == "done"
+    assert len(env["nd"].playlists) == 1
+
+
+@pytest.mark.parametrize("failure", ["lost_create_response", "songs", "comment"])
+async def test_publication_reconciles_remote_identity_without_duplicates(env, monkeypatch, failure):
+    import sqlite3
+
+    from app import auth, db, listen
+    from app.mixes import core
+    from app.models import Mix
+
+    await history(env["admin"])
+    # Light-copy warming has its own transactions; this test isolates the publisher's write lock.
+    monkeypatch.setattr(listen, "warm_light", lambda refs: None)
+    fake_generators(monkeypatch, [new_track(5000 + i) for i in range(10)])
+    original = auth.user_navidrome
+    armed = True
+
+    def assert_committed():
+        with sqlite3.connect(db.engine().url.database, timeout=0) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT json_extract(stats_json, '$.playlist_status') FROM mixes "
+                "WHERE user_id=? ORDER BY id DESC LIMIT 1", (env["admin"],),
+            ).fetchone()
+            assert row == ("pending",)
+
+    def client(user):
+        nd = original(user)
+        create, songs, update = nd.create_playlist, nd.set_playlist_songs, nd.update_playlist
+
+        async def create_once(*args, **kwargs):
+            nonlocal armed
+            assert_committed()
+            result = await create(*args, **kwargs)
+            if failure == "lost_create_response" and armed:
+                armed = False
+                raise httpx.ReadTimeout("response lost after create")
+            return result
+
+        async def songs_once(*args, **kwargs):
+            nonlocal armed
+            assert_committed()
+            if failure == "songs" and armed:
+                armed = False
+                raise httpx.ReadTimeout("songs unavailable")
+            return await songs(*args, **kwargs)
+
+        async def comment_once(*args, **kwargs):
+            nonlocal armed
+            assert_committed()
+            if failure == "comment" and armed:
+                armed = False
+                raise httpx.ReadTimeout("comment unavailable")
+            return await update(*args, **kwargs)
+
+        nd.create_playlist, nd.set_playlist_songs, nd.update_playlist = create_once, songs_once, comment_once
+        return nd
+
+    monkeypatch.setattr(auth, "user_navidrome", client)
+    mix = await core.build_for(env["admin"])
+    assert mix.stats_json["playlist_status"] == "error"
+    assert len(env["nd"].playlists) == 1
+    await core.sync(mix.id)
+    await core.sync(mix.id)
+    async with db.session_scope() as s:
+        current = await s.get(Mix, mix.id)
+    assert current.stats_json["playlist_status"] == "published"
+    assert len(env["nd"].playlists) == 1
+    playlist = env["nd"].playlists[current.nd_playlist_id]
+    assert playlist["name"] == core.PLAYLIST_NAME
+    assert playlist["songs"] == current.stats_json["playlist_songs"]
+
+
+async def test_ambiguous_create_without_visible_remote_identity_is_not_reissued(env, monkeypatch):
+    from app import auth
+    from app.mixes import core
+
+    await history(env["admin"])
+    fake_generators(monkeypatch, [new_track(5000 + i) for i in range(10)])
+    original = auth.user_navidrome
+    creates = 0
+
+    def client(user):
+        nd = original(user)
+
+        async def lost(*args, **kwargs):
+            nonlocal creates
+            creates += 1
+            raise httpx.ReadTimeout("unknown create outcome")
+
+        nd.create_playlist = lost
+        return nd
+
+    monkeypatch.setattr(auth, "user_navidrome", client)
+    mix = await core.build_for(env["admin"])
+    with pytest.raises(RuntimeError, match="не подтверждено"):
+        await core.sync(mix.id)
+    assert creates == 1 and mix.stats_json["playlist_status"] == "error"

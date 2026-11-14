@@ -9,11 +9,12 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile
 
 from app.api.schemas import UploadCommitIn, UploadCommitOut, UploadOut
 from app.auth import current_user
@@ -25,6 +26,7 @@ from app.jobs.queue import notify
 from app.library import probe, tagger
 from app.library.importer import ImportSpec, import_file
 from app.models import Album, Upload, User
+from app.upload_ingress import COVER_LIMITS, bounded_form, upload_limits
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -58,38 +60,65 @@ def _copy_limited(src, dest: Path, limit: int) -> int:
     return n
 
 
-@router.post("", response_model=list[UploadOut])
-async def upload(files: list[UploadFile] = File(...), user: User = Depends(current_user),
+async def _upload_files(request: Request, user: User = Depends(current_user)):
+    async with bounded_form(request, upload_limits()) as form:
+        files = form.getlist("files")
+        if not files or any(not isinstance(f, UploadFile) for f in files):
+            raise HTTPException(422, "Ожидаются файлы в поле files")
+        if any(key != "files" for key in form):
+            raise HTTPException(422, "Неизвестное поле формы")
+        yield files
+
+
+async def _commit_form(request: Request, user: User = Depends(current_user)):
+    async with bounded_form(request, COVER_LIMITS) as form:
+        yield form
+
+
+@router.post("", response_model=list[UploadOut], openapi_extra={
+    "requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {
+        "type": "object", "required": ["files"], "properties": {
+            "files": {"type": "array", "items": {"type": "string", "format": "binary"}},
+        },
+    }}}},
+})
+async def upload(files: list[UploadFile] = Depends(_upload_files, scope="function"),
+                 user: User = Depends(current_user),
                  s: AsyncSession = Depends(get_session, scope="function")):
     cfg = get_settings().cfg.uploads
     limit = cfg.max_file_mb * 1024 * 1024
     out = []
-    for f in files:
-        name = Path(f.filename or "file").name
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        if ext not in cfg.extensions:
-            raise HTTPException(415, f"Формат не поддерживается: {name}")
-        rel = Path("uploads") / str(user.id) / f"{uuid.uuid4().hex}.{ext}"
-        dest = get_settings().staging_dir / rel
-        _upload_dir(user.id)
-        try:
-            size = await asyncio.to_thread(_copy_limited, f.file, dest, limit)
-        except ValueError:
+    staged: list[Path] = []
+    try:
+        for f in files:
+            name = Path(f.filename or "file").name
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext not in cfg.extensions:
+                raise HTTPException(415, f"Формат не поддерживается: {name}")
+            rel = Path("uploads") / str(user.id) / f"{uuid.uuid4().hex}.{ext}"
+            dest = get_settings().staging_dir / rel
+            _upload_dir(user.id)
+            staged.append(dest)
+            try:
+                size = await asyncio.to_thread(_copy_limited, f.file, dest, limit)
+            except ValueError:
+                raise HTTPException(413, f"Файл больше {cfg.max_file_mb} МБ: {name}") from None
+            try:
+                tags = await asyncio.to_thread(tagger.read_tags, dest)
+            except Exception as e:
+                raise HTTPException(400, f"Не удалось прочитать файл {name}: {e}") from e
+            if not tags.get("title"):
+                tags["title"] = name.rsplit(".", 1)[0]
+            u = Upload(user_id=user.id, staging_path=rel.as_posix(), orig_name=name, size=size,
+                       probed_tags_json=json.loads(json.dumps(tags, default=str)))
+            s.add(u)
+            await s.flush()
+            out.append(upload_out(u))
+        return out
+    except BaseException:
+        for dest in staged:
             dest.unlink(missing_ok=True)
-            raise HTTPException(413, f"Файл больше {cfg.max_file_mb} МБ: {name}") from None
-        try:
-            tags = await asyncio.to_thread(tagger.read_tags, dest)
-        except Exception as e:
-            dest.unlink(missing_ok=True)
-            raise HTTPException(400, f"Не удалось прочитать файл {name}: {e}") from e
-        if not tags.get("title"):
-            tags["title"] = name.rsplit(".", 1)[0]
-        u = Upload(user_id=user.id, staging_path=rel.as_posix(), orig_name=name, size=size,
-                   probed_tags_json=json.loads(json.dumps(tags, default=str)))
-        s.add(u)
-        await s.flush()
-        out.append(upload_out(u))
-    return out
+        raise
 
 
 @router.get("", response_model=list[UploadOut])
@@ -126,9 +155,19 @@ async def remove(upload_id: int, user: User = Depends(current_user), s: AsyncSes
     return {"ok": True}
 
 
-@router.post("/commit", response_model=UploadCommitOut)
-async def commit(payload: str = Form(...), cover: UploadFile | None = File(None), user: User = Depends(current_user),
+@router.post("/commit", response_model=UploadCommitOut, openapi_extra={
+    "requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {
+        "type": "object", "required": ["payload"], "properties": {
+            "payload": {"type": "string"}, "cover": {"type": "string", "format": "binary"},
+        },
+    }}}},
+})
+async def commit(form=Depends(_commit_form, scope="function"), user: User = Depends(current_user),
                  s: AsyncSession = Depends(get_session, scope="function")):
+    payload = form.get("payload")
+    cover = form.get("cover")
+    if not isinstance(payload, str) or (cover is not None and not isinstance(cover, UploadFile)):
+        raise HTTPException(422, "Ожидается payload и необязательный файл cover")
     try:
         body = UploadCommitIn.model_validate_json(payload)
     except ValidationError as e:

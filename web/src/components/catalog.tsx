@@ -43,10 +43,11 @@ export function TrackStatus({
 }
 
 /** What the page player needs to know about a catalog track. */
-export function listenTrack(t: TrackOut): ListenTrack {
+export function listenTrack(t: TrackOut & { explanation?: string[] }): ListenTrack {
   return {
     ref: t.ref,
     nd_song_id: t.nd_song_id,
+    explanation: t.explanation,
     title: t.title,
     artist: t.artists?.length ? t.artists.join(', ') : t.artist,
     cover_url: t.cover_url,

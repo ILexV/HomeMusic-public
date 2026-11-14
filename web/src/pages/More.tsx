@@ -80,6 +80,9 @@ export function MorePage() {
 
       <ul className="mx-4 overflow-hidden rounded-xl bg-surface">
         {STANDALONE && <Item icon="transfer" to="/player" title="Плеер и устройства" sub="Перенести воспроизведение или управлять компьютером с телефона" />}
+        <Item icon="sparkle" to="/recommendations" title="Качество рекомендаций" sub="Ваши прослушивания и личные веса источников" />
+        <Item icon="pause" to="/recommendations/pauses" title="Паузы рекомендаций" sub="Временные ограничения и их отмена" />
+        <Item icon="disc" to="/releases" title="Новые релизы" sub="За 7 или 30 дней у ваших исполнителей" />
         {STANDALONE && <Item icon="sparkle" to="/assistant" title="Ассистент" sub="Скриншот, список или просьба — найдёт и скачает" />}
         {STANDALONE && (
           <Item

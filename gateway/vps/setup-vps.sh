@@ -171,7 +171,11 @@ ${PUBLIC_IP}:${MUSIC_PORT} {
 
 ${PUBLIC_IP}:${HUB_PORT} {
 	encode zstd gzip
-	# SSE (/api/events) is flushed immediately; uploads up to 500 MB are streamed without a body limit.
+	# 500 MiB of files + 1 MiB multipart framing; Hub enforces smaller route/config limits.
+	request_body {
+		max_size 525336576
+	}
+	# SSE (/api/events) is flushed immediately; upload bodies remain streamed.
 	reverse_proxy 127.0.0.1:8080 {
 		flush_interval -1
 	}

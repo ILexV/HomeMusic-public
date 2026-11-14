@@ -28,7 +28,6 @@ pub(crate) struct State {
     seen: RefCell<HashSet<String>>,
     events: RefCell<Vec<Value>>,
     token: Cell<Option<u64>>,
-    last_snapshot: Cell<Option<(u64, f32, f32)>>,
     pending: Cell<bool>,
     due: Cell<Instant>,
     actions: RefCell<HashSet<u64>>,
@@ -42,7 +41,6 @@ pub(crate) fn bind(ctx: &Context, tools: &ToolsWindow) -> Rc<State> {
         epoch: Cell::new(0), instance: Cell::new(ctx.queue.borrow().instance()), revision: Cell::new(0),
         busy: Cell::new(false), session: RefCell::new(String::new()), seen: RefCell::new(HashSet::new()),
         events: RefCell::new(Vec::new()), token: Cell::new(None), pending: Cell::new(false),
-        last_snapshot: Cell::new(None),
         due: Cell::new(Instant::now()), actions: RefCell::new(HashSet::new()), displayed: RefCell::new(Vec::new()),
     });
     let weak = Rc::downgrade(&state);
@@ -81,13 +79,18 @@ pub(crate) fn bind(ctx: &Context, tools: &ToolsWindow) -> Rc<State> {
 }
 
 impl State {
+    pub(crate) fn queue_event(&self, event: Value) {
+        self.events.borrow_mut().push(event);
+        self.pending.set(true);
+        self.due.set(Instant::now());
+    }
     fn message(&self, message: &str) {
         if let Some(tools) = self.tools.upgrade() { tools.set_modes_status(message.into()); }
     }
 
     fn can_smart(&self) -> bool {
         let q = self.ctx.queue.borrow();
-        q.smart_enabled() && !q.context().is_empty() && !q.is_empty()
+        q.smart_enabled() && (q.context() == "liked" || q.context().starts_with("playlist:")) && !q.is_empty()
             && q.items().len() <= 5000 && q.items().iter().all(|item| {
                 let key = Queue::song_key(item);
                 !key.is_empty() && key.len() <= 80
@@ -103,7 +106,6 @@ impl State {
         self.busy.set(false);
         self.pending.set(false);
         self.token.set(None);
-        self.last_snapshot.set(None);
     }
 
     fn refresh(&self) {
@@ -133,52 +135,16 @@ impl State {
     /// Call immediately before an actual departure, while queue/player still describe it.
     /// Automatic EOF/promotion uses true; manual skip/selection/removal uses false.
     pub(crate) fn note_leave(&self, automatic: bool) {
-        if automatic {
-            // mpv may already be playing the promoted stream: never sample it here.
-            self.note_leave_with_snapshot(true, 0.0, 0.0);
-        } else {
-            let snapshot = self.ctx.player.borrow().snapshot();
-            self.note_leave_with_snapshot(false, snapshot.position_s, snapshot.duration_s);
+        let snapshot = self.ctx.player.borrow().snapshot();
+        if let Some(item) = self.ctx.queue.borrow().current() {
+            crate::note_departure(&snapshot, item, &self.ctx.hub, automatic);
         }
     }
 
-    /// Also usable when the caller already holds a Player borrow. The queue must
-    /// still identify the departing occurrence. Automatic departures use the
-    /// cached old occurrence, not the possibly promoted Player snapshot.
-    pub(crate) fn note_leave_with_snapshot(&self, automatic: bool, position: f32, duration: f32) {
-        let q = self.ctx.queue.borrow();
-        let Some(index) = q.index() else { return };
-        let Some(rec) = q.recommendation(index) else { return };
-        let item = &q.items()[index];
-        let (position, duration) = if automatic {
-            let (_, position, duration) = self.last_snapshot.get()
-                .filter(|(token, _, _)| Some(*token) == q.current_token())
-                .unwrap_or((0, 0.0, item.duration_s as f32));
-            let duration = if duration > 0.0 { duration } else { item.duration_s as f32 };
-            (if duration > 0.0 { duration } else { position }, duration)
-        } else { (position, duration) };
-        let kind = if automatic || (duration > 0.0 && position >= duration * 0.9) { "finish" } else { "skip" };
-        if let Some(event) = smart_event(kind, item, rec, position, duration) {
-            self.events.borrow_mut().push(event);
-            self.pending.set(true);
-            self.due.set(Instant::now());
-        }
-    }
 
     fn tick(&self) {
         let instance = self.ctx.queue.borrow().instance();
         if self.instance.replace(instance) != instance { self.reset(); }
-        if let Some(token) = self.ctx.queue.borrow().current_token() {
-            let snapshot = self.ctx.player.borrow().snapshot();
-            if snapshot.position_s.is_finite() && snapshot.duration_s.is_finite() {
-                let previous = self.last_snapshot.get().filter(|(old, _, _)| *old == token);
-                let duration = if snapshot.duration_s > 0.0 { snapshot.duration_s }
-                    else { previous.map_or(0.0, |(_, _, duration)| duration) };
-                self.last_snapshot.set(Some((token, snapshot.position_s.max(0.0), duration)));
-            }
-        } else {
-            self.last_snapshot.set(None);
-        }
         while let Ok(reply) = self.rx.try_recv() {
             if reply.epoch != self.epoch.get() || reply.instance != instance { continue; }
             match reply.kind {
@@ -267,12 +233,6 @@ impl State {
         }
         let token = self.ctx.queue.borrow().current_token();
         if self.token.replace(token) != token {
-            let q = self.ctx.queue.borrow();
-            if let Some(index) = q.index() {
-                if let Some(rec) = q.recommendation(index) {
-                    if let Some(event) = smart_event("start", &q.items()[index], rec, 0.0, 0.0) { self.events.borrow_mut().push(event); }
-                }
-            }
             self.pending.set(true);
             self.due.set(Instant::now());
         }
@@ -344,12 +304,6 @@ impl State {
     }
 }
 
-fn smart_event(kind: &str, item: &Item, rec: &Recommendation, position: f32, duration: f32) -> Option<Value> {
-    let mut event = crate::hub::wave_event(kind, &item.id, &item.listen_ref, position, duration, &rec.session, "playlist_page")?;
-    event["context"] = json!(format!("smart:{}", rec.session));
-    event["launch_id"] = json!(format!("smart:{}", rec.session));
-    Some(event)
-}
 
 fn encode(value: &str) -> String {
     value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()

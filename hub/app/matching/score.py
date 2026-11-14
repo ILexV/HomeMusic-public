@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 
 from rapidfuzz import fuzz
@@ -22,6 +23,15 @@ class ScoreBreakdown:
     version_penalty: float
     total: float
 
+
+def version_identity(version: str | None) -> tuple[str | None, str]:
+    """Keep named mixes/venues distinct; a version kind is not a recording identity."""
+    kind = version_kind(version)
+    if kind not in ("remix", "live"):
+        return kind, ""
+    detail = re.sub(r"\b(?:remix|remiks|rmx|mix|live|laiv|concert|kontsert)\b", " ",
+                    to_latin(version or "").casefold())
+    return kind, " ".join(re.sub(r"[^\w]+", " ", detail).split())
 
 def _ratio(a: str, b: str) -> float:
     """0..1, max of plain and token-sort ratio (word order does not matter)."""
@@ -81,7 +91,7 @@ def score(
 ) -> ScoreBreakdown:
     """Score a candidate against a query. `query_version` overrides the version parsed from `query_title`.
 
-    Versions are compared by kind (remix/live/slowed...); remaster/OST/album version count as no version.
+    Named remixes/live venues must agree; remaster/OST/album version count as no version.
     """
     qt, ct = normalize_title(query_title), normalize_title(cand_title)
     if truncated and not qt.truncated:
@@ -90,6 +100,8 @@ def score(
     a = artist_sim(normalize_artist(query_artist), normalize_artist(cand_artist))
     b = _bonus(query_album, cand_album, query_duration, cand_duration)
     qv = query_version if query_version is not None else qt.version
-    pen = VERSION_PENALTY if version_kind(qv) != version_kind(ct.version) else 0.0
+    qkind, qdetail = version_identity(qv)
+    ckind, cdetail = version_identity(ct.version)
+    pen = VERSION_PENALTY if qkind != ckind or (qdetail and qdetail != cdetail) else 0.0
     total = max(0.0, W_TITLE * t + W_ARTIST * a + W_BONUS * b - pen)
     return ScoreBreakdown(round(t, 4), round(a, 4), round(b, 4), pen, round(total, 4))

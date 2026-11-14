@@ -1,0 +1,16 @@
+{
+  "version": "music-matches-v1",
+  "provenance": "Hand-labelled synthetic metadata cases; no audio/network or user history. Labels describe recording identity, not implementation scores.",
+  "cases": [
+    {"id":"original-vs-remix", "query":{"artist":"Кино","title":"Группа крови","duration_s":285}, "candidates":[{"id":"remix","artist":"Кино","title":"Группа крови (Remix)","duration_s":285},{"id":"original","artist":"Кино","title":"Группа крови","duration_s":285}], "acceptable":["original"], "automatic_allowed":true},
+    {"id":"named-remix-wrong-dj", "query":{"artist":"Artist","title":"Song (Alpha Remix)","duration_s":240}, "candidates":[{"id":"beta","artist":"Artist","title":"Song (Beta Remix)","duration_s":240}], "acceptable":[], "automatic_allowed":false},
+    {"id":"named-remix-correct-alternative", "query":{"artist":"Artist","title":"Song (Alpha Remix)","duration_s":240}, "candidates":[{"id":"beta","artist":"Artist","title":"Song (Beta Remix)","duration_s":240},{"id":"alpha","artist":"Artist","title":"Song (Alpha Remix)","duration_s":240}], "acceptable":["alpha"], "automatic_allowed":true},
+    {"id":"live-wrong-venue", "query":{"artist":"Queen","title":"Love of My Life (Live at Wembley)","duration_s":220}, "candidates":[{"id":"rio","artist":"Queen","title":"Love of My Life (Live in Rio)","duration_s":220}], "acceptable":[], "automatic_allowed":false},
+    {"id":"original-vs-live", "query":{"artist":"Queen","title":"Love of My Life","duration_s":218}, "candidates":[{"id":"live","artist":"Queen","title":"Love of My Life (Live)","duration_s":218},{"id":"studio","artist":"Queen","title":"Love of My Life","duration_s":218}], "acceptable":["studio"], "automatic_allowed":true},
+    {"id":"transliteration", "query":{"artist":"Кино","title":"Пачка сигарет","duration_s":268}, "candidates":[{"id":"latin","artist":"Kino","title":"Pachka sigaret","duration_s":268}], "acceptable":["latin"], "automatic_allowed":true},
+    {"id":"same-title-different-artist", "query":{"artist":"Adele","title":"Hello","duration_s":295}, "candidates":[{"id":"lionel","artist":"Lionel Richie","title":"Hello","duration_s":295}], "acceptable":[], "automatic_allowed":false},
+    {"id":"missing-duration", "query":{"artist":"Кино","title":"Группа крови"}, "candidates":[{"id":"studio","artist":"Кино","title":"Группа крови"},{"id":"live","artist":"Кино","title":"Группа крови (Live)"}], "acceptable":["studio"], "automatic_allowed":true},
+    {"id":"preview-duration-mismatch", "query":{"artist":"Adele","title":"Hello","duration_s":295}, "candidates":[{"id":"preview","artist":"Adele","title":"Hello","duration_s":30}], "acceptable":[], "automatic_allowed":false},
+    {"id":"ambiguous-unspecified-remix", "query":{"artist":"Artist","title":"Song (Remix)","duration_s":240}, "candidates":[{"id":"alpha","artist":"Artist","title":"Song (Alpha Remix)","duration_s":240},{"id":"beta","artist":"Artist","title":"Song (Beta Remix)","duration_s":240}], "acceptable":["alpha","beta"], "automatic_allowed":false}
+  ]
+}

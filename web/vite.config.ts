@@ -26,7 +26,7 @@ function buildId(): Plugin {
   };
 }
 
-const backend = 'http://localhost:8080';
+const backend = process.env.HOMEMUSIC_DEV_BACKEND || 'http://localhost:8080';
 
 export default defineConfig(({ command, mode }) => ({
   plugins: [react(), tailwindcss(), buildId(), ...(mode === 'mock' ? [mockApi()] : [])],

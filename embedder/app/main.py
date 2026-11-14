@@ -267,6 +267,7 @@ def create_app(settings: Settings | None = None, factory: Callable[[Settings], M
         app.state.store, app.state.engine, app.state.worker, app.state.index = store, engine, worker, Index()
         app.state.geometry = Geometry()
         task = None if settings.disable_worker else asyncio.create_task(worker.run())
+        app.state.worker_task = task
         try:
             yield
         finally:
@@ -293,8 +294,11 @@ def create_app(settings: Settings | None = None, factory: Callable[[Settings], M
     async def healthz(st=Depends(state)):
         e: Engine = st.engine
         w: Worker = st.worker
+        worker_health = w.health()
+        task = st.worker_task
+        worker_health["status"] = "disabled" if task is None else "stopped" if task.done() else "running"
         return {
-            "status": "ok",
+            "status": "degraded" if worker_health["stalled"] or worker_health["status"] == "stopped" else "ok",
             "model": e.name,
             # idle — not in memory (loaded on the next job), loading, ready, error
             "state": e.state,
@@ -303,6 +307,7 @@ def create_app(settings: Settings | None = None, factory: Callable[[Settings], M
             "dim": e.model.dim if e.model else None,
             "error": e.error,
             "queue": st.store.counts(),
+            "worker": worker_health,
             "songs_per_s": round(w.stats.last_rate, 2) if w.stats.last_rate else None,
         }
 

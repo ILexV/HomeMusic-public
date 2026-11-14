@@ -1,9 +1,29 @@
-//! Keyboard and media-key commands. The window and the system session both call these.
+//! Keyboard, media-key and mouse navigation commands.
 
 use std::time::Duration;
 
 pub const VOLUME_STEP: f32 = 0.05;
 const TRAY_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Handle native browser Back before it can reach a seek/volume TouchArea.
+pub fn bind_back_button(window: &slint::Window, mut back: impl FnMut() + 'static) {
+    use slint::winit_030::{winit, EventResult, WinitWindowAccessor};
+
+    window.on_winit_window_event(move |_, event| {
+        let pressed = match event {
+            winit::event::WindowEvent::MouseInput {
+                button: winit::event::MouseButton::Back, state, ..
+            } => *state == winit::event::ElementState::Pressed,
+            winit::event::WindowEvent::KeyboardInput { event, .. }
+                if event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack) =>
+                event.state == winit::event::ElementState::Pressed && !event.repeat,
+            _ => return EventResult::Propagate,
+        };
+        if pressed { back(); }
+        // Consume both edges, even when there is nowhere to go back.
+        EventResult::PreventDefault
+    });
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {

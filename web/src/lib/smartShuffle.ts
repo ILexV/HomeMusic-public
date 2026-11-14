@@ -122,6 +122,7 @@ const asTrack = (r: SmartRecOut, s: Session): ListenTrack => ({
   ref: r.ref,
   nd_song_id: r.owned ? r.nd_song_id : null,
   rec: { label: s.label, session: s.id },
+  explanation: r.explanation,
   title: r.title,
   artist: r.artists?.length ? r.artists.join(', ') : r.artist,
   cover_url: r.cover_url,

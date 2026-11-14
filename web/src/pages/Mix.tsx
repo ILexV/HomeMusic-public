@@ -3,6 +3,7 @@ import { ApiError, api } from '../api/client';
 import type { CatalogArtist, MixMode, MixOut, MixSettingsOut, MixTodayOut, MixTrackOut } from '../api/types';
 import { TrackRow, listenTrack } from '../components/catalog';
 import { Icon } from '../components/Icon';
+import { RecommendationExplanation } from '../components/Recommendations';
 import { Button, Cover, ErrorState, IconButton, PageHeader, ProgressBar, Segmented, SkeletonRows, Spinner, cx } from '../components/ui';
 import { fmtLength, plural } from '../lib/format';
 import { useAsync, useDebounced, useInterval } from '../lib/hooks';
@@ -59,7 +60,7 @@ export function MixCover({ tracks, className, large }: { tracks: readonly MixTra
 export function MixCard() {
   const res = useAsync((s) => api.mixToday(s), []);
   const today = res.data;
-  useInterval(() => res.reload(true), today && (today.building || (today.mix && today.mix.ready < today.mix.total)) ? POLL_MS : null);
+  useInterval(() => res.reload(true), today && (today.building || (today.mix && (today.mix.ready < today.mix.total || today.mix.playlist_status !== 'published'))) ? POLL_MS : null);
   if (!today) return null;
   const { mix, building, onboarding, settings } = today;
 
@@ -127,7 +128,7 @@ export function MixPage({ id }: { id: number }) {
   const building = rebuilding || !!today?.building;
   const current = !!today?.mix && today.mix.id === id;
 
-  useInterval(() => res.reload(true), mix && (building || mix.ready < mix.total) ? (building ? BUILD_POLL_MS : POLL_MS) : null);
+  useInterval(() => res.reload(true), mix && (building || mix.ready < mix.total || mix.playlist_status !== 'published') ? (building ? BUILD_POLL_MS : POLL_MS) : null);
   useEffect(() => {
     if (res.data && !res.data[0] && today?.mix) navigate(`/mix/${today.mix.id}`, { replace: true });
   }, [res.data, today]);
@@ -209,6 +210,13 @@ export function MixPage({ id }: { id: number }) {
               <ProgressBar value={mix.total ? mix.ready / mix.total : 0} />
             </div>
           )}
+          {mix.playlist_status !== 'published' && (
+            <p role="status" className="mt-3 text-sm text-muted">
+              {mix.playlist_status === 'error'
+                ? 'Не удалось обновить плейлист Navidrome. Публикация будет повторена; доступные треки можно слушать здесь.'
+                : 'Микс собран, плейлист ожидает публикации в Navidrome.'}
+            </p>
+          )}
           {!current && <div className="mt-2 text-xs text-dim">Это прежний микс: сегодня уже собран новый</div>}
         </div>
       </div>
@@ -219,7 +227,10 @@ export function MixPage({ id }: { id: number }) {
 
       <section aria-label="Песни микса" className="pt-2">
         {tracks.map((t) => (
-          <TrackRow key={`${t.position}:${t.ref}`} track={t} link={false} onPlay={oldApp ? () => playOld(t) : undefined} queue={tracks} />
+          <div key={`${t.position}:${t.ref}`}>
+            <TrackRow track={t} link={false} onPlay={oldApp ? () => playOld(t) : undefined} queue={tracks} />
+            <div className="px-4"><RecommendationExplanation context={context} refId={t.ref} songId={t.nd_song_id} reasons={t.explanation} /></div>
+          </div>
         ))}
         {!tracks.length && <p className="px-4 py-6 text-center text-muted">В миксе пока нет песен</p>}
       </section>

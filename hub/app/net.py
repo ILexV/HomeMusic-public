@@ -12,6 +12,7 @@ from collections import deque
 import httpx
 
 from app.config import get_settings
+from app.external import PublicAsyncTransport
 
 log = logging.getLogger(__name__)
 
@@ -161,14 +162,13 @@ def make_client(
     proxy_hosts: set[str] | None = None,
     http2: bool = True,
 ) -> httpx.AsyncClient:
-    """AsyncClient with HTTP/2, redirects and the outbound proxy for configured hosts."""
+    """Public-Internet client; redirects and DNS/peer validation apply on every connection."""
     s = get_settings()
     mounts: dict[str, httpx.AsyncHTTPTransport] = {}
     hosts = proxy_hosts if proxy_hosts is not None else s.proxy_hosts
     if s.outbound_proxy and hosts:
-        transport = httpx.AsyncHTTPTransport(proxy=s.outbound_proxy, http2=http2)
         for h in hosts:
-            mounts[f"all://{h}"] = transport
+            mounts[f"all://{h}"] = PublicAsyncTransport(proxy=s.outbound_proxy, http2=http2)
     h = {"User-Agent": DEFAULT_UA}
     h.update(headers or {})
     return httpx.AsyncClient(
@@ -176,6 +176,8 @@ def make_client(
         timeout=httpx.Timeout(timeout, connect=15),
         follow_redirects=True,
         http2=http2,
+        transport=PublicAsyncTransport(http2=http2),
+        trust_env=False,
         mounts=mounts or None,
     )
 

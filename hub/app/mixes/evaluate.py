@@ -237,8 +237,13 @@ def main(argv=None) -> int:
     with readonly_db(args.db) as connection:
         snapshot = read_snapshot(connection, user_id=args.user_id, until=args.until,
                                  excluded_user_ids=frozenset(args.exclude_user_id))
+        from app.matching.replay_quality import observed_quality
+        observed = (observed_quality(connection, user_id=args.user_id, until=args.until,
+                                     available_at=args.mode == "available-at")
+                    if args.user_id not in args.exclude_user_id else None)
     result = evaluate(snapshot, until=args.until, timezone=args.timezone, model=args.model, seed=args.seed,
                       mode=args.mode)
+    result["observed_quality"] = observed
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
                            encoding="utf-8")
     return 0

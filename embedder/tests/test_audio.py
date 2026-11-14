@@ -54,3 +54,49 @@ def test_library_path_stays_inside(tmp_path, path, ok):
     else:
         with pytest.raises(audio.AudioError):
             audio.library_path(tmp_path, path)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_hung_subprocess_is_terminated_killed_and_reaped(monkeypatch, cancel):
+    import asyncio
+
+    class Child:
+        returncode = None
+
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+            self.terminated = self.killed = self.waited = False
+
+        async def communicate(self):
+            self.started.set()
+            await self.stopped.wait()
+            return b"", b""
+
+        def terminate(self):
+            self.terminated = True  # emulate a process ignoring SIGTERM
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            self.stopped.set()
+
+        async def wait(self):
+            self.waited = True
+            await self.stopped.wait()
+
+    child = Child()
+
+    async def spawn(*args, **kwargs):
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(audio, "PROCESS_TIMEOUT_SECONDS", 60 if cancel else 0.01)
+    monkeypatch.setattr(audio, "PROCESS_TERMINATE_SECONDS", 0.01)
+    task = asyncio.create_task(audio._run("ffmpeg"))
+    await child.started.wait()
+    if cancel:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else audio.AudioError):
+        await task
+    assert child.terminated and child.killed and child.waited

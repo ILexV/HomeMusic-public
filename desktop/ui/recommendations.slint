@@ -1,0 +1,133 @@
+import { ComboBox, CheckBox } from "std-widgets.slint";
+import { Theme, EqButton, ScrollPort } from "theme.slint";
+
+export struct RecommendationRow { key: string, title: string, detail: string, flag: bool }
+
+export component RecommendationsPanel inherits Rectangle {
+    in-out property <int> page: 0;
+    in-out property <int> energy;
+    in-out property <int> vocals;
+    in-out property <int> discovery;
+    in-out property <int> days: 1;
+    in-out property <int> period;
+    in-out property <bool> unseen;
+    in-out property <int> target;
+    in property <[string]> targets;
+    in property <string> status;
+    in property <string> wave-status;
+    in property <string> quality;
+    in property <string> explanation;
+    in property <[RecommendationRow]> pauses;
+    in property <[RecommendationRow]> releases;
+    in property <bool> busy;
+    in property <bool> wave-active;
+    in property <bool> recording-reported;
+    callback wrong-recording();
+    callback undo-recording();
+    callback retry-recording();
+    callback refresh();
+    callback start-wave();
+    callback apply-wave();
+    callback load-wave();
+    callback target-changed();
+    callback pause-track(string);
+    callback undo-pause(string);
+    callback explain();
+    callback open-release(string);
+    callback seen-release(string, bool);
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 14px; spacing: 10px;
+        Text { text: "Рекомендации"; color: Theme.text; font-size: 20px; }
+        HorizontalLayout {
+            spacing: 6px;
+            for label[index] in ["Волна", "Качество", "Ограничения", "Релизы"] : EqButton {
+                label: label; active: root.page == index;
+                clicked => { root.page = index; root.refresh(); }
+            }
+        }
+        Text { text: root.status; color: Theme.orange; wrap: word-wrap; }
+        if root.page == 0 : Rectangle {
+            vertical-stretch: 1;
+            ScrollPort {
+                VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "Настроение сессии (не меняет постоянный вкус)"; color: Theme.text; wrap: word-wrap; }
+                    ComboBox { model: ["Любая энергия", "Спокойнее", "Энергичнее"]; current-index <=> root.energy; }
+                    ComboBox { model: ["Любой вокал", "С вокалом", "Инструментальное"]; current-index <=> root.vocals; }
+                    ComboBox { model: ["Баланс знакомого и нового", "Больше знакомого", "Больше открытий"]; current-index <=> root.discovery; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        EqButton { label: "Новая волна"; enabled: !root.busy; clicked => { root.start-wave(); } }
+                        EqButton { label: "Применить к текущей"; enabled: !root.busy && root.wave-active; clicked => { root.apply-wave(); } }
+                    }
+                    EqButton { label: "Показать настройки текущей волны"; enabled: root.wave-active; clicked => { root.load-wave(); } }
+                    Text { text: "Текущая песня не перезапускается. Новая волна по умолчанию нейтральна; здесь можно явно выбрать настройки перед запуском."; color: Theme.dim; wrap: word-wrap; }
+                    Text { text: root.wave-status; color: Theme.muted; wrap: word-wrap; }
+                    Text { text: "Песня для действий"; color: Theme.text; }
+                    ComboBox { model: root.targets; current-index <=> root.target; selected(value) => { root.target-changed(); } }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        EqButton { label: "Не сегодня"; enabled: !root.busy; clicked => { root.pause-track("today"); } }
+                        EqButton { label: "На 7 дней"; enabled: !root.busy; clicked => { root.pause-track("week"); } }
+                        EqButton { label: "Реже артиста"; enabled: !root.busy; clicked => { root.pause-track("less_artist"); } }
+                    }
+                    Text { text: "Не сегодня — до местной полуночи сервера; реже артиста — 30 дней. Только рекомендации, без дизлайка. Ручной запуск разрешён. Отмена в «Ограничениях»."; color: Theme.dim; wrap: word-wrap; }
+                    EqButton { label: "Почему эта песня?"; enabled: !root.busy; clicked => { root.explain(); } }
+                    Text { text: root.explanation; color: Theme.text; wrap: word-wrap; }
+                    Text { text: "Неверный файл текущей песни — не дизлайк. Подтверждение остановит эту запись, не изменяя вкус."; color: Theme.dim; wrap: word-wrap; }
+                    EqButton { label: "Не та версия текущей записи"; enabled: !root.busy; clicked => { root.wrong-recording(); } }
+                    if root.recording-reported : HorizontalLayout {
+                        spacing: 6px;
+                        EqButton { label: "Другая запись"; enabled: !root.busy; clicked => { root.retry-recording(); } }
+                        EqButton { label: "Отменить сообщение"; enabled: !root.busy; clicked => { root.undo-recording(); } }
+                    }
+                }
+            }
+        }
+        if root.page == 1 : VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                ComboBox { model: ["7 дней", "30 дней", "90 дней"]; current-index <=> root.days; selected(value) => { root.refresh(); } }
+                EqButton { label: "Обновить"; enabled: !root.busy; clicked => { root.refresh(); } }
+            }
+            Rectangle { vertical-stretch: 1; ScrollPort { Text { text: root.quality; color: Theme.text; wrap: word-wrap; } } }
+        }
+        if root.page == 2 : VerticalLayout {
+            spacing: 10px;
+            EqButton { label: "Обновить ограничения"; enabled: !root.busy; clicked => { root.refresh(); } }
+            Rectangle { vertical-stretch: 1; ScrollPort {
+                for row in root.pauses : Rectangle {
+                    min-height: 88px;
+                    VerticalLayout { padding: 6px; spacing: 4px;
+                        Text { text: row.title; color: Theme.text; wrap: word-wrap; }
+                        Text { text: row.detail; color: Theme.dim; wrap: word-wrap; }
+                        EqButton { label: "Отменить ограничение"; enabled: !root.busy; clicked => { root.undo-pause(row.key); } }
+                    }
+                }
+            } }
+        }
+        if root.page == 3 : VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                ComboBox { model: ["Последние 7 дней", "Последние 30 дней"]; current-index <=> root.period; selected(value) => { root.refresh(); } }
+                CheckBox { text: "Непросмотренные"; checked <=> root.unseen; toggled => { root.refresh(); } }
+                EqButton { label: "Обновить"; enabled: !root.busy; clicked => { root.refresh(); } }
+            }
+            Text { text: "Новые релизы выбранных вами исполнителей. Открытие не добавляет лайк и ничего не скачивает."; color: Theme.dim; wrap: word-wrap; }
+            Rectangle { vertical-stretch: 1; ScrollPort {
+                for row in root.releases : Rectangle {
+                    min-height: 104px;
+                    VerticalLayout { padding: 6px; spacing: 5px;
+                        Text { text: row.title; color: Theme.text; wrap: word-wrap; }
+                        Text { text: row.detail; color: Theme.dim; wrap: word-wrap; }
+                        HorizontalLayout { spacing: 6px;
+                            EqButton { label: "Открыть альбом"; enabled: !root.busy; clicked => { root.open-release(row.key); } }
+                            EqButton { label: row.flag ? "Не просмотрен" : "Просмотрен"; enabled: !root.busy; clicked => { root.seen-release(row.key, !row.flag); } }
+                        }
+                    }
+                }
+            } }
+        }
+    }
+}

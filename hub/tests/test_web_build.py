@@ -35,10 +35,11 @@ def test_web_build_none_without_build_or_meta(tmp_path):
 def test_healthz_reports_web_build(tmp_path, monkeypatch):
     (tmp_path / "index.html").write_text(INDEX.format(id="b1"), encoding="utf-8")
 
-    async def nd_ok():
-        return True
+    async def nd_must_not_be_called():
+        raise AssertionError("liveness must not contact upstream")
 
-    monkeypatch.setattr(system, "_navidrome_ok", nd_ok)
+    monkeypatch.setattr(system, "_navidrome_ok", nd_must_not_be_called)
+    monkeypatch.setattr(system.health_checks, "navidrome_cached", None)
     monkeypatch.setattr(system, "get_settings", lambda: SimpleNamespace(static_dir=tmp_path))
     out = asyncio.run(system.healthz())
-    assert out.ok and out.navidrome and out.web_build == "b1"
+    assert out.ok and out.navidrome is None and out.web_build == "b1"

@@ -60,6 +60,15 @@ def compare(snapshot: TasteSnapshot, candidates: list[build.Cand], *, now: datet
     b = {r["key"] for r in summaries["v2"]["ranking"]}
     return {"schema": 1, "snapshot_time": utc(now).isoformat(), "timezone": timezone,
             "candidate_count": len(candidates), "profiles": summaries,
+            "policy_versions": {"baseline": "v1", "candidate": "v2"},
+            "outcome_comparison": {
+                "provenance": "frozen candidate pool; no counterfactual playback",
+                "since": None, "until": utc(now).isoformat(), "sample_size": 0,
+                "completion_rate": None, "early_skip_rate": None, "playable_full_recording_rate": None,
+                "unknown_candidates": len(candidates),
+                "limitations": ["Shadow ranking is not exposure: completion, early skips and full recording availability are unknown.",
+                                "Observed account outcomes with N and date windows are reported by /api/recommendations/quality.",
+                                "Neither ranking overlap nor historical observations establish causal policy improvement."]},
             "diff": {"added": sorted(b - a), "removed": sorted(a - b), "overlap": len(a & b)},
             "sound": None, "facets": None,
             "limitations": ["local v1 baseline is not the enriched online v1 profile",

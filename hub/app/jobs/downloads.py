@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import unicodedata
 from datetime import date
 from pathlib import Path
@@ -28,7 +29,7 @@ from app.db import session_scope
 from app.events import bus
 from app.jobs.queue import PermanentError, enqueue, handler, notify, on_final_failure
 from app.library import probe
-from app.library.importer import ImportSpec, cleanup_dir, import_file, staging_dir_for
+from app.library.importer import ImportSpec, cleanup_dir, import_file, library_abs, load_import, prepare_import, staging_dir_for
 from app.library.navidrome import admin_client
 from app.library.owned import find_existing, quiet, star_only
 from app.matching.select import (
@@ -253,12 +254,26 @@ async def handle_download_item(job: Job) -> None:
     item_id = int(job.payload_json["item_id"])
     async with session_scope() as s:
         item = await s.get(DownloadItem, item_id)
-        if item is None or item.status in ("done", "cancelled", "importing"):
+        if item is None or item.status == "cancelled":
             return
         qj = dict(item.query_json or {})
         chosen = item.chosen_candidate_json
         force = item.force
         user_id = item.user_id
+        finished = item.status == "done"
+        recovering = item.status == "importing" or item.track_id is not None
+    journal = get_settings().staging_dir / "dl" / str(item_id) / ".import.json"
+    if finished:
+        if journal.is_file():
+            if ref := (qj.get("meta") or {}).get("track_ref"):
+                from app.listen import forget
+
+                await forget(ref)
+            cleanup_dir(journal.parent)
+        return
+    if recovering or journal.is_file():
+        await resume_import(item_id, journal)
+        return
     q = TrackQuery(**qj["query"])
     meta: dict[str, Any] = dict(qj.get("meta") or {})
 
@@ -293,9 +308,16 @@ async def handle_download_item(job: Job) -> None:
             existing_id = existing.id if existing else None
             linked = bool(existing and existing.nd_song_id)
             other_file = bool(existing and chosen and existing.source_url != chosen.get("page_url"))
+        if existing is not None:
+            from app.recording_feedback import library_candidate, rejected_candidates
+
+            rejected = await rejected_candidates(user_id, meta.get("track_ref"))
+            if rejected:
+                identity = await library_candidate(library_abs(existing.path), nd_song_id=existing.nd_song_id)
+                other_file = other_file or identity in rejected
         if other_file:
-            # the user picked another file of a song the library has (an uncensored re-upload of a censored copy):
-            # it goes next to the old one as a new version (PLAN 8.6), and ♥ moves over to it
+            # A different user-picked file, or a recording the user rejected, needs a new version (PLAN 8.6).
+            # Keep the old file for other users, and move this user's ♥ to the replacement.
             force = True
             qj["replaces"] = existing_id
             await update_item(item_id, query_json=qj)
@@ -337,7 +359,7 @@ async def handle_download_item(job: Job) -> None:
             from app.listen import listened_candidate
 
             # the file the user has just listened to (GET /api/listen) goes first: they get what they heard
-            heard = await listened_candidate(meta.get("track_ref"))
+            heard = await listened_candidate(meta.get("track_ref"), user_id=user_id)
             if heard and meta and (not guard or trusted_original(heard, mcfg)):
                 ok, last_reason = await try_candidates(item_id, user_id, q, meta, [heard], stage, force)
                 if ok:
@@ -378,7 +400,9 @@ async def handle_download_item(job: Job) -> None:
                         return
                     last_reason = reason or last_reason
     finally:
-        cleanup_dir(stage)
+        # A failed DB commit may have already moved the file. Its intent must survive the retry.
+        if sys.exc_info()[0] is None and not (stage / ".import.json").exists():
+            cleanup_dir(stage)
 
     if chosen:
         await update_item(item_id, status="needs_review", error=f"Файл не подошёл ({last_reason})")
@@ -437,7 +461,13 @@ async def try_candidates(item_id: int, user_id: int, q: TrackQuery, meta: dict[s
     to the imported track's warnings."""
     pcfg = get_settings().cfg
     last_reason = ""
+    from app.recording_feedback import rejected_candidates
+
+    rejected = await rejected_candidates(user_id, meta.get("track_ref") or "")
     for cand in cands:
+        if (cand.provider, cand.provider_id) in rejected:
+            last_reason = "Файл отмечен как неверная запись"
+            continue
         provider = svc.providers.get(cand.provider)
         if provider is None:
             continue
@@ -464,6 +494,11 @@ async def try_candidates(item_id: int, user_id: int, q: TrackQuery, meta: dict[s
                                       pcfg.postcheck.silence_warn_s)
         if not check.ok:
             last_reason = f"{cand.provider}: {check.reason}"
+            path.unlink(missing_ok=True)
+            continue
+        rejected = await rejected_candidates(user_id, meta.get("track_ref"))
+        if (cand.provider, cand.provider_id) in rejected:
+            last_reason = "Файл отмечен как неверная запись"
             path.unlink(missing_ok=True)
             continue
         await import_downloaded(item_id, user_id, q, meta, cand, path, check, force, warning=warning)
@@ -507,17 +542,58 @@ async def import_downloaded(item_id: int, user_id: int, q: TrackQuery, meta: dic
         added_by=user_id,
         force=force,
     )
+    journal = staging_dir_for("dl", item_id) / ".import.json"
+    await asyncio.to_thread(prepare_import, journal, path, spec)
     await update_item(item_id, status="importing")
+    await resume_import(item_id, journal)
+
+
+async def resume_import(item_id: int, journal: Path) -> None:
+    """Commit the track, download link and scan intent together; replay filesystem work from its journal."""
+    prepared = await asyncio.to_thread(load_import, journal) if journal.is_file() else None
     async with session_scope() as s:
-        track = await import_file(s, path, spec)
-        track_id = track.id
-    await update_item(item_id, track_id=track_id, warnings=spec.warnings, error=None)
+        item = await s.get(DownloadItem, item_id)
+        if item is None or item.status == "cancelled":
+            return
+        track = await s.get(Track, item.track_id) if item.track_id else None
+        if track is None and prepared:
+            path, spec = prepared
+            track = await import_file(s, path, spec, journal=journal)
+            item.warnings = spec.warnings
+        if track is None:
+            # Old (pre-journal) interrupted imports may already have committed their Track row.
+            qj = item.query_json or {}
+            q, meta = qj.get("query") or {}, qj.get("meta") or {}
+            candidate = item.chosen_candidate_json or {}
+            existing = await find_existing(s, artist=q.get("artist", ""), title=q.get("title", ""),
+                                           duration_s=q.get("duration_s"), isrc=q.get("isrc"),
+                                           deezer_track_id=meta.get("deezer_track_id"))
+            if existing and existing.source_url == candidate.get("page_url") and not item.force:
+                track = existing
+        if track is None:
+            # There is no reliable way to attribute a legacy orphan file to this download.
+            missing = True
+        else:
+            missing = False
+            item.track_id, item.progress, item.error = track.id, 1, None
+            if item.status != "done":
+                item.status = "importing"
+                await enqueue_scan(s)
+            await s.flush()
+            track_id, user_id = track.id, item.user_id
+            ref = ((item.query_json or {}).get("meta") or {}).get("track_ref")
+            links = (await item_links(s, [item]))[item.id]
+    if missing:
+        await update_item(item_id, status="needs_review", error="Прерванный импорт без журнала: проверьте библиотеку")
+        return
+    notify()
+    bus.publish(user_id, "download", item_out(item, links=links).model_dump(mode="json"))
     bus.publish(user_id, "library", {"kind": "imported", "track_id": track_id})
-    if meta.get("track_ref"):
+    if ref:
         from app.listen import forget
 
-        await forget(meta["track_ref"])  # from now on listening plays the library file
-    await after_import(user_id, linked=False)
+        await forget(ref)
+    cleanup_dir(journal.parent)
 
 
 async def after_import(user_id: int, linked: bool) -> None:
@@ -531,7 +607,18 @@ async def after_import(user_id: int, linked: bool) -> None:
 
 @on_final_failure("download_item")
 async def _download_failed(job: Job, exc: Exception) -> None:
-    await update_item(int(job.payload_json["item_id"]), status="failed", error=f"{exc}"[:500])
+    item_id = int(job.payload_json["item_id"])
+    async with session_scope() as s:
+        item = await s.get(DownloadItem, item_id)
+        if item is None or item.status in ("done", "cancelled"):
+            return
+        if item.track_id:
+            # A notification/cache error after the import commit is not a failed download.
+            item.status = "importing"
+            await enqueue_scan(s)
+            notify()
+            return
+    await update_item(item_id, status="failed", error=f"{exc}"[:500])
     async with session_scope() as s:
         await process_playlist_adds(s)
 

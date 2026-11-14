@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from threading import Event
 
 import pytest
 import respx
@@ -48,7 +49,6 @@ async def test_library_and_preview_are_embedded_and_compared(client, previews):
     for key in ("nd:a440", "nd:a440q", "nd:c2000", "dz:450"):
         st = await status(client, key)
         assert st["status"] == "done" and st["has_vector"], st
-    assert client.model.audio_calls == [4]  # one batch
     assert (await status(client, "nd:a440"))["seconds"] == pytest.approx(1.0, abs=0.01)  # clip_s from the middle
 
     r = await client.post("/similarity", json={
@@ -161,6 +161,48 @@ async def test_model_load_failure_keeps_items_and_shows_in_healthz(settings, lib
         assert st["status"] == "queued" and "CUDA out of memory" in st["error"]
         h = (await c.get("/healthz")).json()
         assert h["state"] == "error" and "CUDA out of memory" in h["error"] and h["queue"]["queued"] == 1
+
+
+async def test_text_preferences_do_not_wait_for_entire_cpu_audio_batch(client, monkeypatch):
+    await embed(client, {"key": "nd:known", "path": f"{LIB}/a440.wav"})
+    await drain(client)
+    await embed(client, {"key": "nd:first", "path": f"{LIB}/a440.wav"},
+                {"key": "nd:second", "path": f"{LIB}/c2000.wav"})
+    entered, first_release, second_release = Event(), Event(), Event()
+    original = client.model.embed_audio
+    calls = 0
+
+    def slow_audio(wavs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert first_release.wait(5)
+        else:
+            assert second_release.wait(5)
+        return original(wavs)
+
+    monkeypatch.setattr(client.model, "embed_audio", slow_audio)
+    batch = asyncio.create_task(client.app.state.worker.step())
+    text = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        text = asyncio.create_task(client.post("/text", json={"text": "calm piano", "keys": ["nd:known"]}))
+        await asyncio.sleep(0)  # Let the request acquire its place in the model lock's FIFO.
+        first_release.set()
+        response = await asyncio.wait_for(text, 2)
+        assert response.status_code == 200
+        assert [r["key"] for r in response.json()["results"]] == ["nd:known"]
+        assert not batch.done()  # The second song is still blocked, but the interactive result is available.
+    finally:
+        first_release.set()
+        second_release.set()
+        await batch
+        if text is not None and not text.done():
+            text.cancel()
+            await asyncio.gather(text, return_exceptions=True)
+    assert (await status(client, "nd:first"))["status"] == "done"
+    assert (await status(client, "nd:second"))["status"] == "done"
 
 
 async def test_text_finds_nearest_keys_with_filters(client):

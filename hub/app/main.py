@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
 
     from app import listen
     from app.housekeeping import scheduler_loop
+    from app.health import register_background
     from app.jobs.downloads import playlist_adds_loop
     from app.jobs.queue import WorkerPool, recover_stale
     from app.mixes import smart, wave
@@ -60,12 +61,15 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(scrobbles_loop(), name="scrobbles"))
         tasks.append(asyncio.create_task(schedule_loop(), name="mixes"))
         tasks.append(asyncio.create_task(playlist_adds_loop(), name="playlist-adds"))
+    register_background([*pool.tasks, *tasks], expected=s.cfg.jobs.workers + 4, disabled=s.disable_background)
     log.info("hub started")
     try:
         yield
     finally:
+        register_background([], expected=1)
         for t in tasks:
             t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await pool.stop()
         await listen.reset()
         await wave.reset()
@@ -79,6 +83,7 @@ def create_app() -> FastAPI:
         admin,
         auth,
         catalog,
+        download_pages,
         downloads,
         events,
         imports,
@@ -91,6 +96,10 @@ def create_app() -> FastAPI:
         playlists,
         playback,
         plays,
+        recommendations,
+        recommendation_pauses,
+        recording_feedback,
+        releases,
         search,
         smart_shuffle,
         smart_playlists,
@@ -101,9 +110,15 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="HomeMusic Hub", version="0.1.0", lifespan=lifespan, docs_url="/api/docs",
                   openapi_url="/api/openapi.json", redoc_url=None)
+    from app.upload_ingress import UploadBodyLimitMiddleware
+
+    app.add_middleware(UploadBodyLimitMiddleware)
+    app.include_router(download_pages.router)
+    app.include_router(recording_feedback.router)
     for r in (auth.router, search.router, catalog.router, downloads.router, listen.router, library.router, medialib.router,
               uploads.router, playlists.router, plays.router, mixes.router, wave.router, smart_shuffle.router, imports.router, events.router, system.router, admin.router,
-              insights.router, lyrics.router, smart_playlists.router, playback.router):
+              insights.router, lyrics.router, smart_playlists.router, playback.router,
+              recommendations.router, recommendation_pauses.router, releases.router):
         app.include_router(r)
     try:
         from app.api import assistant

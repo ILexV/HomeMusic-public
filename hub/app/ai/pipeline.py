@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import listen
 from app.api.schemas import (
     AssistantConfirmIn,
     AssistantRowOut,
@@ -31,7 +32,7 @@ from app.library.owned import annotate_tracks, find_existing
 from app.matching.normalize import has_cyrillic, normalize_title
 from app.matching.select import classify_scores, match_catalog
 from app.models import AiUsage, AssistantTask, Job, Track, User
-from app.providers.base import Candidate, TrackQuery
+from app.providers.base import Candidate, TrackQuery, file_ref
 from app.services import svc
 
 log = logging.getLogger(__name__)
@@ -353,6 +354,8 @@ async def confirm_task(s: AsyncSession, user: User, task: AssistantTask, body: A
     res = task.resolution_json or {}
     rows = {r["index"]: AssistantRowOut(**r) for r in res.get("rows", [])}
     cands = res.get("candidates", {})
+    # Stored resolution candidates, not candidate JSON supplied by the confirming client.
+    await listen.remember_files([Candidate(**candidate) for options in cands.values() for candidate in options])
 
     items: list[DownloadTrackIn] = []
     for r_in in sorted(body.rows, key=lambda r: r.index):
@@ -360,7 +363,7 @@ async def confirm_task(s: AsyncSession, user: User, task: AssistantTask, body: A
         if row is None or not r_in.selected:
             continue
         ch = r_in.choice
-        if ch is None or (ch.kind in ("catalog", "candidate") and not (ch.ref or ch.candidate)):
+        if ch is None or (ch.kind in ("catalog", "candidate") and not (ch.ref or ch.file_ref)):
             pick = row.best
             if pick is None:
                 continue
@@ -378,9 +381,11 @@ async def confirm_task(s: AsyncSession, user: User, task: AssistantTask, body: A
             if lib:
                 items.append(DownloadTrackIn(artist=lib.artist, title=lib.title, duration_s=lib.duration_s,
                                              isrc=lib.isrc))
-        elif ch.kind == "candidate" and ch.candidate:
-            items.append(DownloadTrackIn(artist=ch.candidate.artist, title=ch.candidate.title,
-                                         duration_s=ch.candidate.duration_s, candidate=ch.candidate))
+        elif ch.kind == "candidate" and ch.file_ref:
+            if not listen.is_file_ref(ch.file_ref) or (candidate := await listen.file_candidate(ch.file_ref)) is None:
+                raise HTTPException(404, "Файл не найден: повторите поиск")
+            items.append(DownloadTrackIn(artist=candidate.artist, title=candidate.title,
+                                         duration_s=candidate.duration_s, file_ref=ch.file_ref))
         elif ch.kind == "catalog" and ch.ref:
             opt = next((o for o in row.options if o.ref == ch.ref), None)
             if opt is not None:
@@ -412,4 +417,5 @@ def _item_from_option(opt: TrackOut, cands: list[dict]) -> DownloadTrackIn:
                                isrc=opt.isrc, explicit=opt.explicit, catalog_ref=opt.ref)
     # hitmoz file confirmed by the user
     cand = next((Candidate(**c) for c in cands if c.get("provider_id") == opt.id), None)
-    return DownloadTrackIn(artist=opt.artist, title=opt.title, duration_s=opt.duration_s, candidate=cand)
+    return DownloadTrackIn(artist=opt.artist, title=opt.title, duration_s=opt.duration_s,
+                           file_ref=file_ref(cand.provider, cand.provider_id) if cand else None)

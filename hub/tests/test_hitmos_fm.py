@@ -85,7 +85,8 @@ async def test_search_and_fetch(provider, tmp_path):
     assert c.enriched and not res[0].enriched
     progress: list[float] = []
     path = await provider.fetch(c, tmp_path, on_progress=progress.append)
-    assert path.name == "hitmos_fm_9355210.mp3" and path.read_bytes()[:3] == b"ID3"
+    assert path.parent == tmp_path and path.name.startswith("audio_") and path.suffix == ".mp3"
+    assert path.read_bytes()[:3] == b"ID3"
     assert progress[-1] == 1.0 and not list(tmp_path.glob("*.part"))
 
 
@@ -104,3 +105,14 @@ async def test_unavailable(provider):
     with pytest.raises(ProviderUnavailable):
         await provider.search(TrackQuery(artist="a", title="b"))
     assert (await provider.health())["ok"] is False
+
+
+@respx.mock
+async def test_provider_id_cannot_choose_download_path(provider, tmp_path):
+    respx.get(DL).mock(return_value=httpx.Response(200, content=MP3, headers={"Content-Type": "audio/mpeg"}))
+    candidate = parse_search(fx("search_kino.html"), BASE)[0].model_copy(update={"provider_id": "../../outside"})
+    first = await provider.fetch(candidate, tmp_path)
+    second = await provider.fetch(candidate, tmp_path)
+    assert first.parent == second.parent == tmp_path and first != second
+    assert first.name.startswith("audio_") and second.name.startswith("audio_")
+    assert first.read_bytes() == second.read_bytes() == MP3

@@ -100,6 +100,17 @@ class Worker:
         self.wake = asyncio.Event()
         self.stats = Stats()
         self._sem = asyncio.Semaphore(settings.downloads)
+        self.activity: dict[str, float] = {}
+        self.last_progress = time.monotonic()
+
+    def health(self) -> dict:
+        now = time.monotonic()
+        active = {name: round(now - since, 1) for name, since in self.activity.items()}
+        phase = "loading" if self.engine.state == "loading" else "embedding" if "embedding" in active else "preparing" if active else "idle"
+        # Model loading has its own state; a quiet unloaded worker is not a stuck batch.
+        stalled = phase not in {"idle", "loading"} and now - self.last_progress > 900
+        return {"phase": phase, "active_seconds": active, "stalled": stalled,
+                "seconds_since_progress": round(now - self.last_progress, 1) if active else None}
 
     async def _prepare_one(self, it: Item) -> np.ndarray | None:
         async with self._sem:
@@ -121,22 +132,42 @@ class Worker:
 
     async def prepare(self, items: list[Item]) -> Prepared:
         t = time.monotonic()
-        wavs = await asyncio.gather(*(self._prepare_one(it) for it in items))
-        ok = [(it, w) for it, w in zip(items, wavs, strict=True) if w is not None]
-        return Prepared([it for it, _ in ok], [w for _, w in ok], time.monotonic() - t)
+        self.activity["preparing"] = t
+        self.last_progress = t
+        try:
+            wavs = await asyncio.gather(*(self._prepare_one(it) for it in items))
+            ok = [(it, w) for it, w in zip(items, wavs, strict=True) if w is not None]
+            return Prepared([it for it, _ in ok], [w for _, w in ok], time.monotonic() - t)
+        finally:
+            self.activity.pop("preparing", None)
+            self.last_progress = time.monotonic()
 
     async def embed(self, p: Prepared) -> None:
         if not p.items:
             return
         t = time.monotonic()
+        self.activity["embedding"] = t
+        self.last_progress = t
         try:
-            vecs = await self.engine.run(lambda m, w: m.embed_audio(w), p.wavs)
+            model = await self.engine.ensure()
+            if model.device == "cpu":
+                # A CPU batch can take minutes. Release the model between songs so interactive
+                # text preferences do not wait behind the entire background audio batch.
+                vecs = np.empty((len(p.wavs), model.dim), dtype=np.float32)
+                for i, wav in enumerate(p.wavs):
+                    vecs[i] = (await self.engine.run(lambda m, w: m.embed_audio(w), [wav]))[0]
+                    self.last_progress = time.monotonic()
+            else:
+                vecs = await self.engine.run(lambda m, w: m.embed_audio(w), p.wavs)
         except Exception as e:
             # out of GPU memory and the like: the batch is retried later; the queue goes on
             log.exception("embedding a batch of %d failed", len(p.items))
             for it in p.items:
                 self._fail(it.key, f"model: {type(e).__name__}: {e}", retry=True)
             return
+        finally:
+            self.activity.pop("embedding", None)
+            self.last_progress = time.monotonic()
         dt = time.monotonic() - t
         for it, w, v in zip(p.items, p.wavs, vecs, strict=True):
             self.store.finish(it.key, v, self.engine.name, len(w) / self.sr)
@@ -185,6 +216,7 @@ class Worker:
             except asyncio.CancelledError:
                 if pending:
                     pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
                 raise
             except Exception:
                 log.exception("worker loop")

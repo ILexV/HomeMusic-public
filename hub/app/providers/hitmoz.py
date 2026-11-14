@@ -21,7 +21,7 @@ from selectolax.lexbor import LexborNode as Node
 
 from app.config import HitmozCfg
 from app.net import RETRY_STATUSES, RateLimiter, make_client, request_with_backoff
-from app.providers.base import Candidate, ProviderError, ProviderUnavailable, StreamSource, TrackQuery
+from app.providers.base import Candidate, ProviderError, ProviderUnavailable, StreamSource, TrackQuery, staging_path
 
 log = logging.getLogger(__name__)
 
@@ -437,7 +437,7 @@ async def download_audio(
         dest.parent.mkdir(parents=True, exist_ok=True)
         size = 0
         buf = bytearray()
-        f = await asyncio.to_thread(open, part, "wb")
+        f = await asyncio.to_thread(open, part, "xb")
         try:
             async for chunk in resp.aiter_bytes(64 * 1024):
                 buf += chunk
@@ -627,6 +627,8 @@ class HitmozProvider:
 
     async def enrich(self, c: Candidate) -> Candidate:
         """Track page: full h1 title (version, Explicit/Clean), best `/get/music/` link and bitrate."""
+        if not re.fullmatch(r"[0-9]+", c.provider_id):
+            raise ProviderError("hitmoz: неверный идентификатор трека")
         html, base = await self.fetch_page(f"/song/{c.provider_id}")
         d = parse_track_page(html, base)
         if not d["full_title"] and not d["options"]:
@@ -654,7 +656,7 @@ class HitmozProvider:
         return c.model_copy(update=update)
 
     async def fetch(self, c: Candidate, dest_dir: Path, on_progress: ProgressCb | None = None) -> Path:
-        """Download the 320 kbps `/get/music/` file (302 -> CDN) to `dest_dir/hitmoz_<id>.mp3`."""
+        """Download the 320 kbps `/get/music/` file (302 -> CDN) to a server-generated staging name."""
         if not _is_full_download(c.download_url):
             c = await self.enrich(c)
         if not _is_full_download(c.download_url):
@@ -663,7 +665,7 @@ class HitmozProvider:
         url = c.download_url
         if url.startswith("/"):
             url = (await self.base_url()) + url
-        dest = Path(dest_dir) / f"hitmoz_{c.provider_id}.mp3"
+        dest = staging_path(dest_dir, ".mp3")
         async with self.download_sem:
             return await download_audio(
                 self.client,

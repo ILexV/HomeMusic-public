@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.limits import MAX_IMAGES, reserve_message, validate_message_text
+from app.ai.limits import reserve_message, validate_message_text
 from app.ai.pipeline import confirm_task, task_dir, task_out
 from app.api.schemas import AssistantConfirmIn, AssistantTaskOut, AssistantTextIn
 from app.auth import current_user
@@ -17,10 +17,10 @@ from app.db import get_session
 from app.events import bus
 from app.jobs.queue import enqueue, notify
 from app.models import AssistantChat, AssistantTask, User, utcnow
+from app.upload_ingress import ASSISTANT_LIMITS, bounded_form
 
 router = APIRouter(prefix="/api/assistant", tags=["assistant"])
 
-MAX_IMAGE_MB = 15
 IMAGE_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/heic": "heic"}
 
 
@@ -30,19 +30,15 @@ async def create_task(request: Request, user: User = Depends(current_user), s: A
     images: list[tuple[bytes, str]] = []
     body: AssistantTextIn | None = None
     if ctype.startswith("multipart/form-data"):
-        form = await request.form()
-        files = [f for f in form.getlist("images") if hasattr(f, "read")]
-        if len(files) > MAX_IMAGES:
-            raise HTTPException(400, f"В одном сообщении не больше {MAX_IMAGES} фотографий")
-        body = AssistantTextIn(url=form.get("url") or None, text=form.get("text") or None)
-        for value in (body.text, body.url):
-            if value:
-                validate_message_text(value)
-        for f in files:
-            data = await f.read()
-            if len(data) > MAX_IMAGE_MB * 1024 * 1024:
-                raise HTTPException(413, f"Картинка больше {MAX_IMAGE_MB} МБ")
-            images.append((data, IMAGE_EXT.get(getattr(f, "content_type", "") or "", "png")))
+        async with bounded_form(request, ASSISTANT_LIMITS) as form:
+            files = [f for f in form.getlist("images") if hasattr(f, "read")]
+            body = AssistantTextIn(url=form.get("url") or None, text=form.get("text") or None)
+            for value in (body.text, body.url):
+                if value:
+                    validate_message_text(value)
+            for f in files:
+                data = await f.read()
+                images.append((data, IMAGE_EXT.get(getattr(f, "content_type", "") or "", "png")))
     else:
         body = AssistantTextIn.model_validate(await request.json())
         for value in (body.text, body.url):
@@ -211,28 +207,24 @@ async def chat(request: Request, user: User = Depends(current_user), s: AsyncSes
 
     images: list[tuple[bytes, str]] = []
     if request.headers.get("content-type", "").startswith("multipart/form-data"):
-        form = await request.form()
-        try:
-            raw_messages = form.get("messages")
-            if not isinstance(raw_messages, str):
-                raise ValueError("messages field is missing")
-            raw_chat = form.get("chat_id")
-            body = ChatIn(messages=json.loads(raw_messages), chat_id=int(raw_chat) if isinstance(raw_chat, str) and raw_chat else None)
-        except Exception as e:
-            raise HTTPException(400, "Некорректная история чата") from e
-        if body.messages:
-            validate_message_text(body.messages[-1].content)
-        files = [f for f in form.getlist("images") if hasattr(f, "read")]
-        if len(files) > MAX_IMAGES:
-            raise HTTPException(400, f"В одном сообщении не больше {MAX_IMAGES} фотографий")
-        for f in files:
-            data = await f.read()
-            if len(data) > MAX_IMAGE_MB * 1024 * 1024:
-                raise HTTPException(413, f"Картинка больше {MAX_IMAGE_MB} МБ")
-            mime = getattr(f, "content_type", "") or ""
-            if mime not in IMAGE_EXT:
-                raise HTTPException(400, "Поддерживаются PNG, JPEG, WebP и HEIC")
-            images.append((data, mime))
+        async with bounded_form(request, ASSISTANT_LIMITS) as form:
+            try:
+                raw_messages = form.get("messages")
+                if not isinstance(raw_messages, str):
+                    raise ValueError("messages field is missing")
+                raw_chat = form.get("chat_id")
+                body = ChatIn(messages=json.loads(raw_messages), chat_id=int(raw_chat) if isinstance(raw_chat, str) and raw_chat else None)
+            except Exception as e:
+                raise HTTPException(400, "Некорректная история чата") from e
+            if body.messages:
+                validate_message_text(body.messages[-1].content)
+            files = [f for f in form.getlist("images") if hasattr(f, "read")]
+            for f in files:
+                data = await f.read()
+                mime = getattr(f, "content_type", "") or ""
+                if mime not in IMAGE_EXT:
+                    raise HTTPException(400, "Поддерживаются PNG, JPEG, WebP и HEIC")
+                images.append((data, mime))
     else:
         body = ChatIn.model_validate(await request.json())
     if not body.messages:

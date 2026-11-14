@@ -28,6 +28,7 @@ pub fn open_album(
     *hub.album_preview.borrow_mut() = Some(AlbumPreview {
         id: id.to_string(),
         cover_id: cover_id.to_string(),
+        catalog_ref: String::new(),
         tracks: Vec::new(),
     });
     ui.set_album_title(title.into());
@@ -36,6 +37,7 @@ pub fn open_album(
     ui.set_album_total(String::new().into());
     ui.set_album_error(String::new().into());
     ui.set_album_note(String::new().into());
+    ui.set_album_can_download(false);
     ui.set_album_busy(true);
     ui.set_album_open(true);
     let cover = request_cover(hub, cover_id);

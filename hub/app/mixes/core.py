@@ -50,6 +50,7 @@ SYNC_DELAY_S = 20  # downloads coming in one after another ask for one sync
 CHECK_EVERY_S = 300
 LISTENED_S = 30
 FAILED = ("failed", "needs_review", "cancelled")
+_sync_lock = asyncio.Lock()
 
 
 # --- settings ---------------------------------------------------------------------------------------------------
@@ -160,7 +161,12 @@ async def build_for(user_id: int) -> Mix | None:
     async with session_scope() as s:
         mix = await save(s, user, built)
         mix_id = mix.id
-    await sync(mix_id)
+        await enqueue_sync(s, mix_id, delay_s=0)
+    try:
+        await sync(mix_id)
+    except Exception:
+        # The local mix is already committed; its durable sync job retries publication, not the build.
+        log.warning("mix %s: publication deferred", mix_id, exc_info=True)
     await close_previous(user_id, mix_id)
     log.info("mix %s of user %s: %s songs, %s", mix_id, user_id, len(built.active), built.stats)
     async with session_scope() as s:
@@ -213,12 +219,16 @@ async def queue_download(s: AsyncSession, mix: Mix, it: MixItem) -> None:
 
 @handler("mix_sync")
 async def handle_sync(job: Job) -> None:
-    await sync(int(job.payload_json["mix_id"]))
+    await sync(int(job.payload_json["mix_id"]), schedule=False)
 
 
-async def sync(mix_id: int) -> None:
-    """Songs that downloaded get their library ids, failed ones give their place to the reserve, the library's
-    lacking ones are downloaded; the playlist gets what is in the library, in the mix's order."""
+async def sync(mix_id: int, *, schedule: bool = True) -> None:
+    async with _sync_lock:
+        await _sync(mix_id, schedule=schedule)
+
+
+async def _sync(mix_id: int, *, schedule: bool) -> None:
+    """Commit the local composition and outbox before any Navidrome write."""
     async with session_scope() as s:
         mix = await s.get(Mix, mix_id)
         if mix is None or mix.status != "active":
@@ -254,39 +264,85 @@ async def sync(mix_id: int) -> None:
         songs = [i.nd_song_id for i in sorted(items, key=lambda i: i.position) if i.state == "active" and i.nd_song_id]
         user = await s.get(User, mix.user_id)
         settings = await settings_of(s, mix.user_id)
-        if user is not None and songs != (mix.stats_json or {}).get("playlist_songs"):
-            pid = await write_playlist(user, settings.nd_playlist_id, songs, mix)
-            if pid:
-                settings.nd_playlist_id = mix.nd_playlist_id = pid
-                mix.stats_json = {**(mix.stats_json or {}), "playlist_songs": songs}
+        publish = user is not None and (
+            songs != (mix.stats_json or {}).get("playlist_songs")
+            or (mix.stats_json or {}).get("playlist_status") in ("pending", "error"))
+        playlist_id = settings.nd_playlist_id
+        if publish:
+            mix.stats_json = {**(mix.stats_json or {}), "playlist_status": "pending", "playlist_error": None,
+                              "playlist_desired_songs": songs}
+            if schedule:
+                await enqueue_sync(s, mix_id, delay_s=0)
     # the light copies for a metered network (app.light), made now so a tap finds them ready
     from app import listen
 
     listen.warm_light([f"nd:{song}" for song in songs])
     notify()
+    if not publish:
+        return
+    try:
+        pid = await write_playlist(user, playlist_id, songs, mix)
+    except Exception as exc:
+        async with session_scope() as s:
+            current = await s.get(Mix, mix_id)
+            if current is not None:
+                current.stats_json = {**(current.stats_json or {}), "playlist_status": "error",
+                                      "playlist_error": str(exc)[:500]}
+        raise
+    async with session_scope() as s:
+        current = await s.get(Mix, mix_id)
+        if current is not None:
+            current.nd_playlist_id = pid
+            current.stats_json = {**(current.stats_json or {}), "playlist_songs": songs,
+                                  "playlist_status": "published", "playlist_error": None}
 
 
-async def write_playlist(user: User, playlist_id: str | None, songs: list[str], mix: Mix) -> str | None:
-    """«Микс дня» of the user gets these songs (created once; its id stays). None: Navidrome did not answer."""
+async def write_playlist(user: User, playlist_id: str | None, songs: list[str], mix: Mix) -> str:
+    """Publish a committed mix. A lost create response is reconciled by its durable, unique temporary name."""
     from app.auth import user_navidrome
 
     nd = user_navidrome(user)
     comment = f"{mix.title}. {mix.description}".strip(". ")
+    marker = f"{PLAYLIST_NAME} [HomeMusic:{user.id}]"
     try:
-        if playlist_id:
-            known = {p.get("id") for p in await nd.get_playlists()}
-            if playlist_id not in known:
-                playlist_id = None  # deleted in the app: a new one
+        playlists = await nd.get_playlists()
+        known = {p.get("id") for p in playlists}
+        if playlist_id not in known:
+            playlist_id = None
         if not playlist_id:
-            playlist_id = (await nd.create_playlist(PLAYLIST_NAME)).get("id")
-        if not playlist_id:
-            return None
+            matching = [p["id"] for p in playlists if p.get("name") == marker and p.get("id")]
+            if len(matching) > 1:
+                raise RuntimeError("Найдено несколько плейлистов незавершённой публикации")
+            if matching:
+                playlist_id = matching[0]
+            else:
+                async with session_scope() as s:
+                    pending = (await s.execute(select(Mix.id).where(
+                        Mix.user_id == user.id,
+                        func.json_extract(Mix.stats_json, "$.playlist_creating") == True,
+                    ).limit(1))).scalar_one_or_none()
+                    if pending is not None:
+                        raise RuntimeError("Создание плейлиста не подтверждено; ожидается сверка с Navidrome")
+                    current = await s.get(Mix, mix.id)
+                    current.stats_json = {**(current.stats_json or {}), "playlist_creating": True}
+                # The intent was committed. If this response is lost, never blindly create a second playlist.
+                playlist_id = (await nd.create_playlist(marker)).get("id")
+                if not playlist_id:
+                    raise RuntimeError("Navidrome не подтвердил создание плейлиста")
+        # Save the remote identity before changing songs/name; every later operation can safely be repeated.
+        async with session_scope() as s:
+            settings = await settings_of(s, user.id)
+            settings.nd_playlist_id = playlist_id
+            current = await s.get(Mix, mix.id)
+            current.nd_playlist_id = playlist_id
+            pending_mixes = (await s.execute(select(Mix).where(
+                Mix.user_id == user.id, func.json_extract(Mix.stats_json, "$.playlist_creating") == True,
+            ))).scalars()
+            for pending_mix in pending_mixes:
+                pending_mix.stats_json = {**(pending_mix.stats_json or {}), "playlist_creating": False}
         await nd.set_playlist_songs(playlist_id, songs)
-        await nd.update_playlist(playlist_id, comment=comment[:500])
+        await nd.update_playlist(playlist_id, name=PLAYLIST_NAME, comment=comment[:500])
         return playlist_id
-    except Exception as e:
-        log.warning("mix %s: playlist not written: %r", mix.id, e)
-        return None
     finally:
         await nd.aclose()
 

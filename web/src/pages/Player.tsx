@@ -4,6 +4,8 @@ import { LikeButton } from '../components/LikeButton';
 import { TrackMenuButton } from '../components/TrackMenu';
 import { Button, Cover, Empty, IconButton, Spinner, cx } from '../components/ui';
 import { PlaybackDevices } from '../components/PlaybackDevices';
+import { RecommendationExplanation, RecordingFeedback, TemporaryTrackActions } from '../components/Recommendations';
+import { WavePreferenceControls } from '../components/WavePreferences';
 import { fmtDuration, providerLabel } from '../lib/format';
 import {
   cycleRepeat,
@@ -203,6 +205,17 @@ export function PlayerPage() {
           </Button>
         </div>
       )}
+      <div className="px-6 pt-3">
+        {(onWave || track.rec || context.startsWith('mix:')) && (
+          <RecommendationExplanation key={`${context}:${track.ref}:${track.rec?.session ?? ''}`}
+            context={track.rec ? `smart:${track.rec.session}` : context} refId={track.ref}
+            songId={info?.nd_song_id ?? track.nd_song_id} reasons={track.explanation} />
+        )}
+        <TemporaryTrackActions key={track.ref} refId={track.ref} songId={info?.nd_song_id ?? track.nd_song_id} />
+        <RecordingFeedback key={`recording:${track.ref}`} refId={track.ref} binding={info?.kind === 'full' ? info.recording_binding : null} />
+        <Link to="/recommendations" className="inline-block py-2 text-sm text-accent">Качество и источники</Link>
+      </div>
+      {onWave && <WavePreferenceControls />}
 
       <Queue queue={queue} index={index} onWave={onWave} />
     </div>

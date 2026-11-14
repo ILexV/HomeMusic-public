@@ -27,6 +27,7 @@ from app.library.owned import annotate_tracks
 from app.mixes import core
 from app.mixes.build import GENERATOR_TITLES, MODE_TITLES
 from app.models import Job, Mix, MixItem, Track, User
+from app.recommendations import stored_reasons
 from app.services import svc
 
 router = APIRouter(tags=["mixes"])
@@ -49,11 +50,14 @@ async def mix_out(s: AsyncSession, mix: Mix, user_id: int) -> MixOut:
         out.append(MixTrackOut(**d, position=i.position, generator=i.generator,
                                generator_title=GENERATOR_TITLES.get(i.generator, i.generator),
                                generators=list((f.get("generators") or {}).keys()), familiar=i.familiar,
-                               score=i.score, sim=f.get("sim")))
+                               score=i.score, sim=f.get("sim"), explanation=stored_reasons(f)))
     return MixOut(id=mix.id, title=mix.title, description=mix.description, mode=mix.mode,  # type: ignore[arg-type]
                   mode_title=MODE_TITLES.get(mix.mode, mix.mode), created_at=mix.created_at,
                   nd_playlist_id=mix.nd_playlist_id, ready=sum(1 for t in out if t.nd_song_id), total=len(out),
-                  tracks=out, generators=(mix.stats_json or {}).get("generators") or {})
+                  tracks=out, generators=(mix.stats_json or {}).get("generators") or {},
+                  playlist_status=(mix.stats_json or {}).get("playlist_status",
+                                                              "published" if mix.nd_playlist_id else "pending"),
+                  playlist_error=(mix.stats_json or {}).get("playlist_error"))
 
 
 async def settings_out(s: AsyncSession, user_id: int) -> MixSettingsOut:

@@ -165,6 +165,8 @@ fn safe_wave(wave: &WaveLive) -> WaveLive {
         id: wave.id.clone(),
         personal: wave.personal,
         origin: wave.origin.clone(),
+        preferences: wave.preferences.clone(),
+        notice: wave.notice.clone(),
         ..WaveLive::default()
     }
 }
@@ -172,7 +174,7 @@ fn safe_wave(wave: &WaveLive) -> WaveLive {
 fn same_wave(left: Option<&WaveLive>, right: Option<&WaveLive>) -> bool {
     match (left, right) {
         (None, None) => true,
-        (Some(left), Some(right)) => left.id == right.id && left.personal == right.personal && left.origin == right.origin,
+        (Some(left), Some(right)) => left.id == right.id && left.personal == right.personal && left.origin == right.origin && left.preferences == right.preferences,
         _ => false,
     }
 }
@@ -222,7 +224,7 @@ fn encode(
         "items": items, "index": queue.index(),
         "modes": queue.modes_snapshot(),
         "position_s": usable_position(position_s, queue.current()), "album_id": album_id,
-        "wave": wave.map(|wave| json!({"id": wave.id, "personal": wave.personal, "origin": wave.origin})),
+        "wave": wave.map(|wave| json!({"id": wave.id, "personal": wave.personal, "origin": wave.origin, "preferences": wave.preferences, "notice": wave.notice})),
     })).map_err(|_| "Не удалось подготовить очередь к сохранению".into())
 }
 
@@ -267,6 +269,8 @@ fn decode(bytes: &[u8], account: &str) -> Option<SavedPlayback> {
                     id,
                     personal: wave.get("personal")?.as_bool()?,
                     origin: wave.get("origin")?.as_str()?.to_owned(),
+                    preferences: wave.get("preferences").cloned().unwrap_or_else(crate::hub::neutral_preferences),
+                    notice: wave.get("notice").and_then(Value::as_str).unwrap_or("").into(),
                     ..WaveLive::default()
                 })
             }
@@ -371,6 +375,8 @@ mod tests {
         let wave = WaveLive {
             id: "wave-1".into(), personal: true, origin: "home".into(),
             pending: vec![json!({"private": "telemetry"})], asking: true,
+            preferences: json!({"energy": "calm", "vocals": "any", "discovery": "new"}),
+            ..WaveLive::default()
         };
         assert!(store.record(&queue, &state(PlaybackPhase::Playing, 37.5), "album-1", Some(&wave), false).unwrap());
         let mut reopened = fixture.store(&config);

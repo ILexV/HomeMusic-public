@@ -4,6 +4,9 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.models import Base
+import app.recommendation_models  # register recommendation policy metadata
+import app.release_models  # register account-scoped release read marks
+import app.recording_models  # register recording feedback independently of taste events
 
 config = context.config
 if config.config_file_name is not None and config.attributes.get("configure_logger", True):

@@ -17,6 +17,8 @@ import httpx
 import pytest
 import respx
 
+from app import listen
+from app.providers.base import Candidate
 from tests.support import FakeDeezer, FakeProvider, app_client
 
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
@@ -324,7 +326,9 @@ async def test_picked_reupload_gets_catalog_tags(env):
     cand = {"provider": "yt_reupload", "provider_id": "r1", "artist": "кино", "title": "группа крови",
             "duration_s": 4, "page_url": "https://yt.test/watch?v=r1",
             "extra": {"reupload": True, "uncensored": True, "original_title": "группа крови – кино (без цензуры)"}}
-    item = await download_one(env["client"], {"artist": "кино", "title": "группа крови", "candidate": cand})
+    await listen.remember_files([Candidate(**cand)])
+    item = await download_one(env["client"], {"artist": "кино", "title": "группа крови",
+                                            "file_ref": "file:yt_reupload:r1"})
     assert item["status"] == "done", item
     files = [f.relative_to(env["music"] / "library").as_posix() for f in (env["music"] / "library").rglob("*.mp3")]
     assert files == ["Кино/1988 - Группа крови/1-01 - Группа крови.mp3"]
@@ -342,8 +346,8 @@ async def test_liked_uncensored_file_goes_next_to_the_owned_censored_copy_and_ta
     cand = {"provider": "yt_reupload", "provider_id": "r1", "artist": "кино", "title": "группа крови",
             "duration_s": 4, "page_url": "https://yt.test/watch?v=r1",
             "extra": {"reupload": True, "uncensored": True}}
-    r = await c.post("/api/downloads", json={"items": [{"artist": "кино", "title": "группа крови",
-                                                        "candidate": cand}], "star": True})
+    await listen.remember_files([Candidate(**cand)])
+    r = await c.post("/api/downloads", json={"track_refs": ["file:yt_reupload:r1"], "star": True})
     assert r.status_code == 200, r.text
     assert r.json()["already_owned"] == 0
     await drain_jobs()
@@ -359,8 +363,7 @@ async def test_liked_uncensored_file_goes_next_to_the_owned_censored_copy_and_ta
     assert r.json()["tracks"][0]["nd_song_id"] == "nd1"
 
     # ♥ on the same file again: already in the library, nothing downloaded
-    r = await c.post("/api/downloads", json={"items": [{"artist": "кино", "title": "группа крови",
-                                                        "candidate": cand}], "star": True})
+    r = await c.post("/api/downloads", json={"track_refs": ["file:yt_reupload:r1"], "star": True})
     assert r.json()["already_owned"] == 1
     await drain_jobs()
     assert reups.fetched == 1 and stars == ["nd1"]
