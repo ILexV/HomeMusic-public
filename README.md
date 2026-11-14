@@ -75,7 +75,7 @@ API Хаба — [hub/API.md](hub/API.md).
 
 ### Сборка на Linux
 
-Нужны актуальный stable Rust (edition 2021) и libmpv с client API не ниже 2.0. На Debian и Ubuntu это пакеты `libmpv-dev` и `pkg-config`. Сборка спрашивает путь у pkg-config (имя `mpv`) и не записывает каталог этой машины в репозиторий.
+Нужны Rust 1.100.0 (edition 2021) и libmpv с client API не ниже 2.0. Версия Rust закреплена в `desktop/rust-toolchain.toml`: rustup автоматически выбирает её при запуске Cargo из `desktop/` и устанавливает недостающие компоненты, включая цель Windows GNU. На Debian и Ubuntu нужны пакеты `libmpv-dev` и `pkg-config`. Сборка спрашивает путь у pkg-config (имя `mpv`) и не записывает каталог этой машины в репозиторий.
 
 ```
 cd desktop
@@ -98,6 +98,18 @@ cargo test -- --test-threads=1
 В установщик входят `HomeMusic.exe`, `libmpv-2.dll`, `vulkan-1.dll` и уведомления о лицензиях; личный `config.toml`, пароли и кэш не включаются. Отдельный **`desktop/dist/windows/HomeMusic.exe`** остаётся переносимым вариантом, но ему нужны обе DLL рядом. Эта сборка libmpv загружает Vulkan как обычную библиотеку: без `vulkan-1.dll` Windows программу не запустит. Окно без консоли; подключение задаётся через интерфейс.
 
 Кросс-сборка из Linux (цель `x86_64-pc-windows-gnu`, линкер MinGW, статическая CRT) ищет импорт `libmpv.dll.a` в `MPV_LIB_DIR` или в `desktop/windows/lib`. Каталоги `desktop/windows/` и `desktop/dist/` в git не входят: туда кладут SDK и набор файлов, который переносят на компьютер.
+
+Из корня проекта, если MinGW доступен в `PATH`:
+
+```sh
+cd desktop
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo build --locked --release --target x86_64-pc-windows-gnu
+cp target/x86_64-pc-windows-gnu/release/homemusic-desktop.exe dist/windows/HomeMusic.exe
+cd ..
+```
 
 После кросс-сборки и копирования exe в `desktop/dist/windows` установщик собирается через NSIS:
 
