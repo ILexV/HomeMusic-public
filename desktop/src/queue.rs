@@ -25,7 +25,7 @@ fn next_revision() -> u64 {
 pub struct Item {
     pub id: String,
     pub path: String,
-    /// Catalog ref for a Hub stream. Empty for a library song or a local file.
+    /// Stable Hub ref, retained alongside a library ID for catalog tracks.
     /// The stream URL is built at play time and is not stored here.
     pub listen_ref: String,
     pub title: String,

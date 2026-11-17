@@ -1855,7 +1855,7 @@ fn catalog_track(hit: hub::CatalogHit) -> Option<queue::Item> {
         return None;
     }
     let id = if hit.owned { hit.nd_song_id } else { String::new() };
-    let listen_ref = if id.is_empty() { hit.reference } else { String::new() };
+    let listen_ref = hit.reference;
     if id.is_empty() && listen_ref.is_empty() {
         return None;
     }
@@ -2831,11 +2831,23 @@ fn item_target(
     if let Some(path) = hub.offline.local_path(item) {
         return Some((path, String::new()));
     }
-    if !item.id.is_empty() {
-        Some((navidrome::stream_url(config, &item.id), String::new()))
-    } else if !item.listen_ref.is_empty() {
-        let url = hub.hub.listen_url(&item.listen_ref, full_only);
-        let cookie = hub.hub.session_token();
+    stream_target(item, config, &hub.hub, full_only)
+}
+
+fn stream_target(
+    item: &queue::Item,
+    config: &navidrome::ServerConfig,
+    hub: &hub::Hub,
+    full_only: bool,
+) -> Option<(String, String)> {
+    // A catalog identity survives cleanup of yesterday's mix; its library ID may not.
+    // The Hub serves the library copy while it exists and resolves a source otherwise.
+    if !item.id.is_empty() && (item.listen_ref.is_empty() || item.listen_ref.starts_with("nd:")) {
+        return Some((navidrome::stream_url(config, &item.id), String::new()));
+    }
+    if !item.listen_ref.is_empty() {
+        let url = hub.listen_url(&item.listen_ref, full_only);
+        let cookie = hub.session_token();
         if url.is_empty() || cookie.is_empty() {
             return None;
         }
@@ -3110,7 +3122,7 @@ mod tests {
         assert!(decode_cover(br#"{"status":"failed"}"#).is_none());
     }
 
-    fn tone_wav(seconds: f32) -> Vec<u8> {
+    pub(super) fn tone_wav(seconds: f32) -> Vec<u8> {
         let rate = 44_100u32;
         let samples = (rate as f32 * seconds) as u32;
         let data_bytes = samples * 2;
@@ -3199,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_listening_uses_library_ids_or_stream_refs_even_during_download() {
+    fn catalog_listening_keeps_refs_even_for_downloaded_tracks() {
         let hits = hub::parse_search(&serde_json::json!({
             "tracks": [
                 {"ref": "dz:1", "title": "Remote", "owned": false},
@@ -3215,7 +3227,7 @@ mod tests {
         assert_eq!(items.next().unwrap().listen_ref, "dz:2");
         let library = items.next().unwrap();
         assert_eq!(library.id, "nd3");
-        assert!(library.listen_ref.is_empty());
+        assert_eq!(library.listen_ref, "dz:3");
         assert_eq!(items.next().unwrap().listen_ref, "dz:4");
     }
 }

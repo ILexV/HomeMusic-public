@@ -1149,6 +1149,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn catalog_queue_plays_after_its_library_file_was_removed() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Instant;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "no catalog stream request");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" { break; }
+                request.push_str(&line);
+            }
+            let allowed = request.starts_with("GET /api/listen/stream?ref=dz%3A2190239&full=1 ")
+                && request.to_ascii_lowercase().contains("cookie: hm_session=test-session\r\n");
+            let (status, body) = if allowed {
+                ("200 OK", crate::tests::tone_wav(2.0))
+            } else {
+                ("404 Not Found", Vec::new())
+            };
+            write!(socket, "HTTP/1.1 {status}\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(&body).unwrap();
+        });
+        let config = crate::navidrome::ServerConfig {
+            server: base.clone(), hub: base, user: "test".into(), password: "test".into(), loaded: true,
+        };
+        let hub = Hub::from_config(&config);
+        hub.set_cookie("test-session".into());
+        let mut item = crate::queue::Item::file("", "Diamond Baby");
+        item.id = "removed-library-id".into();
+        item.listen_ref = "dz:2190239".into();
+        let (target, cookie) = crate::stream_target(&item, &config, &hub, true).unwrap();
+        let mut player = crate::player::Player::open(crate::player::PlayerOptions { null_audio: true });
+        player.load_cookie(&target, &cookie).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            player.take_natural_end();
+            let state = player.snapshot();
+            if state.playing && state.position_s > 0.05 {
+                assert!(state.duration_s > 1.9);
+                break;
+            }
+            assert_ne!(state.phase, crate::player::PlaybackPhase::Error);
+            assert!(Instant::now() < deadline, "catalog track did not play");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        player.stop();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn wave_response_preserves_preference_and_verified_reserve_status() {
         let batch = parse_wave(&serde_json::json!({
             "session_id": "s", "tracks": [], "pending": true,
