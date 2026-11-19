@@ -26,6 +26,7 @@ from app.catalog.models import CatalogTrack, split_ref
 from app.library.owned import quiet
 from app.matching.normalize import fingerprint, normalize_artist
 from app.mixes.embedder import song_key
+from app.mixes.taste_snapshot import PLAYBACK_KINDS, TasteEvent, playback_attempts
 from app.models import Dislike, DownloadItem, MixSettings, Track, User, utcnow
 from app.plays import Ids, user_events
 
@@ -214,38 +215,40 @@ async def build_profile(s: AsyncSession, user: User, now: datetime | None = None
         raise ValueError("online taste model must be v1 or v2")
     p = Profile(user_id=user.id, now=now)
     b = _Builder(s, p)
-    from app.favorites import reconcile, snapshot
+    from app.favorites import AliasIndex, reconcile, snapshot
 
     # An explicitly supplied successful snapshot is useful for isolated callers/tests.
     # Ordinary profile reads use the local ledger and never reinterpret network errors as unstars.
     if starred is not None:
         await reconcile(s, user, {"song": starred}, now=now)
-    favorites = await snapshot(s, user.id, now)
+    favorites = await snapshot(s, user.id, now, available_only=True)
     late_skips: list[tuple[TasteTrack, float, float]] = []  # skips after 30 s without the length in the event
 
-    events = await user_events(s, user.id, HISTORY_DAYS, now=now)
-    await b.ids.prime([(e.ref, e.nd_song_id) for e in events if e.target_type == "track"] +
+    events = [TasteEvent.from_row(e) for e in await user_events(s, user.id, HISTORY_DAYS, kinds=PLAYBACK_KINDS, now=now)
+              if e.received_at <= now]
+    await b.ids.prime([(e.ref, e.nd_song_id) for e in events] +
                       [(x.ref, x.nd_id) for x in favorites.values() if x.target_type == "track"])
-    for e in events:
-        if e.target_type != "track" or e.kind not in ("start", "skip", "finish"):
-            continue  # the `dislikes` table is the truth
+    for attempt in playback_attempts(events, AliasIndex(events).key):
+        # Merely creating a TasteTrack marks it familiar in v1 and last_played imposes a rest period.
+        if not (e := attempt.outcome):
+            continue
         t = await b.track(e.ref, e.nd_song_id)
         if t is None:
             continue
         d = decay(e.ts, now)
         t.last_event = max(t.last_event or e.ts, e.ts)
-        if e.kind in ("start", "skip", "finish"):
-            t.last_played = max(t.last_played or e.ts, e.ts)
+        t.last_played = max(t.last_played or e.ts, e.ts)
+        seconds = e.seconds
         if e.kind == "finish":
             t.score += W_FINISH * d
-        elif e.kind == "skip" and e.position_s is not None and e.position_s < EARLY_SKIP_S:
+        elif e.early_skip:
             t.score += W_SKIP * d
-        elif e.kind == "skip" and e.position_s is not None:
+        elif e.kind == "skip" and seconds is not None:
             if e.duration_s:
-                t.score += skip_weight(e.position_s, e.duration_s) * d
+                t.score += skip_weight(seconds, e.duration_s) * d
             else:
-                late_skips.append((t, e.position_s, d))
-        if e.kind == "finish" or (e.kind == "skip" and (e.position_s or 0) >= EARLY_SKIP_S):
+                late_skips.append((t, seconds, d))
+        if e.kind == "finish" or (e.kind == "skip" and seconds is not None and seconds >= EARLY_SKIP_S):
             p.artist_listens[t.key] = p.artist_listens.get(t.key, 0) + 1  # per track for now, per artist below
 
     for state in favorites.values():
@@ -263,7 +266,8 @@ async def build_profile(s: AsyncSession, user: User, now: datetime | None = None
         b._index(t)
 
     rows = (await s.execute(select(DownloadItem, Track).join(Track, Track.id == DownloadItem.track_id)
-                            .where(DownloadItem.user_id == user.id, DownloadItem.status == "done"))).all()
+                            .where(DownloadItem.user_id == user.id, DownloadItem.status == "done",
+                                   DownloadItem.created_at <= now))).all()
     for item, tr in rows:
         if quiet(item.query_json):
             continue
@@ -273,7 +277,7 @@ async def build_profile(s: AsyncSession, user: User, now: datetime | None = None
         t.downloaded = True  # no weight of its own (M4)
         t.last_event = max(filter(None, [t.last_event, item.created_at]), default=None)
 
-    for d in (await s.execute(select(Dislike).where(Dislike.user_id == user.id))).scalars():
+    for d in (await s.execute(select(Dislike).where(Dislike.user_id == user.id, Dislike.created_at <= now))).scalars():
         if d.artist_ref:
             p.disliked_artist_refs.add(d.artist_ref)
             if d.artist:

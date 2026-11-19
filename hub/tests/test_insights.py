@@ -142,6 +142,19 @@ def attempt(uid, at, ref=None, nd=None, *, end="finish", heard_ms=40_000, positi
                **common)]
 
 
+def test_launch_skips_use_heard_seconds_and_bad_playback_is_neutral():
+    from app.insights import launches
+
+    skipped = attempt(1, NOW, "dz:1", end="skip", heard_ms=10_000, position=170)
+    failed = attempt(1, NOW + timedelta(hours=1), "dz:2", end="skip", heard_ms=2_000, position=2)
+    failed.append(pe(1, "error", failed[-1].ts, "dz:2", device_id="dev1", playback_id=failed[0].playback_id))
+    rows = skipped + failed
+    first, second = launches.attempts_of(rows, launches.Aliases(rows))
+    assert first.early_skip_at == 10 and not first.late_skip
+    assert second.early_skip_at is None and not second.late_skip and not second.finished
+    assert second.listened_ms == 2_000  # Heard time remains real, even when there is no taste outcome.
+
+
 async def add(*rows) -> None:
     from app.db import session_scope
 

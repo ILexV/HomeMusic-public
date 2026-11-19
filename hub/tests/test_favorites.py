@@ -203,15 +203,17 @@ async def test_v1_profile_counts_one_server_and_legacy_like_and_neutral_unlike(l
     async with session_scope() as s:
         at = utcnow() - timedelta(minutes=1)
         await record(s, user.id, FavoriteTarget(ref="dz:1", target_data={"artist": "A", "title": "T"}),
-                     True, ts=at, event_id="server")
+                     True, ts=at, received_at=at, event_id="server")
         await record_events(s, user.id, [dict(event_id="legacy", ts=at + timedelta(seconds=1),
-                                            kind="like", ref="dz:1", client="pwa")])
+                                            kind="like", ref="dz:1", client="pwa")], now=at + timedelta(seconds=1))
         p = await build_profile(s, user, now=at + timedelta(seconds=2))
         assert p.tracks["dz:1"].liked and p.tracks["dz:1"].score == pytest.approx(1, abs=.001)
-        await record(s, user.id, FavoriteTarget(ref="dz:1"), False, ts=at + timedelta(seconds=3))
+        await record(s, user.id, FavoriteTarget(ref="dz:1"), False, ts=at + timedelta(seconds=3),
+                     received_at=at + timedelta(seconds=3))
         p = await build_profile(s, user, now=at + timedelta(seconds=4))
         assert "dz:1" not in p.tracks
-        await record(s, user.id, FavoriteTarget(ref="dz:1"), True, ts=at + timedelta(seconds=5))
+        await record(s, user.id, FavoriteTarget(ref="dz:1"), True, ts=at + timedelta(seconds=5),
+                     received_at=at + timedelta(seconds=5))
         p = await build_profile(s, user, now=at + timedelta(seconds=6))
         assert p.tracks["dz:1"].score == pytest.approx(1, abs=.001)
 

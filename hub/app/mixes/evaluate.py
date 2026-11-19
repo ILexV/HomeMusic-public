@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.favorites import AliasIndex
 from app.mixes.taste_math import (
     EXPERIMENTS,
     V2Profile,
@@ -26,7 +27,7 @@ from app.mixes.taste_math import (
     recommended,
     visible_events,
 )
-from app.mixes.taste_snapshot import TasteEvent, TasteSnapshot, utc
+from app.mixes.taste_snapshot import TasteEvent, TasteSnapshot, playback_attempts, utc
 
 
 def parse_time(value: str) -> datetime:
@@ -130,16 +131,18 @@ def bootstrap_days(rows: list[dict], *, seed: int, samples: int = 300) -> dict:
 def outcomes(snapshot, *, until, timezone, model, mode):
     rows = []
     zone = ZoneInfo(timezone)
-    for e in visible_events(snapshot, utc(until), mode):
-        if e.target_type != "track" or not recommended(e.context):
+    visible = visible_events(snapshot, utc(until), mode)
+    attempts = playback_attempts(visible, AliasIndex(visible).key)
+    for attempt in attempts:
+        e = attempt.outcome
+        if not e or not recommended(attempt.context) or not (e.kind == "finish" or e.early_skip):
             continue
-        if e.kind != "finish" and not (e.kind == "skip" and e.position_s is not None and e.position_s < 30):
-            continue
-        # Never train on the outcome being evaluated, nor on future/same-ts outcomes.
-        at = e.ts - timedelta(microseconds=1)
+        # The prediction precedes the attempt, not just its terminal: likes, late uploads and other
+        # plays during the track cannot inform a choice already made.
+        at = attempt.first.ts - timedelta(microseconds=1)
         past = replace(snapshot, subjects=(), metadata=(), downloads=(), dislikes=(), picked_artists=())
         p = profile_for(past, until=at, timezone=timezone, model=model, mode=mode)
-        t = p.find(ref=e.ref, nd_song_id=e.nd_song_id)
+        t = p.find(ref=attempt.first.ref, nd_song_id=attempt.first.nd_song_id)
         rows.append({"event_id": e.event_id, "label": int(e.kind == "finish"),
                      "score": t.score if t else 0.0,
                      "day": e.ts.replace(tzinfo=UTC).astimezone(zone).date().isoformat()})

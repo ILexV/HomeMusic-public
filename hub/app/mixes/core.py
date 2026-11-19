@@ -27,6 +27,7 @@ from app.db import session_scope
 from app.jobs.queue import PRIORITY_IMPORT, enqueue, handler, notify
 from app.library.owned import ACTIVE_STATUSES, quiet
 from app.mixes import build as builder
+from app.mixes import recent_offers
 from app.mixes.taste import build_profile
 from app.models import (
     DownloadBatch,
@@ -127,26 +128,32 @@ async def build_for(user_id: int) -> Mix | None:
             async with session_scope() as s:
                 shadow_snapshot = await load_snapshot(s, user.id, now=shadow_now)
         except Exception:
+            if cfg.taste_model == "v2":
+                raise  # this snapshot is the live profile input; do not query it a second time
             shadow_error = "snapshot_failed"
             log.warning("mix shadow snapshot failed", exc_info=True)
-    async with session_scope() as s:
-        profile = await build_profile(s, user, model=cfg.taste_model)
+    if shadow_snapshot is not None and cfg.taste_model == "v2":
+        from app.mixes.taste_math import calculate_profile
+        profile = calculate_profile(shadow_snapshot, now=shadow_now, timezone=get_settings().timezone)
+    else:
+        async with session_scope() as s:
+            profile = await build_profile(s, user, model=cfg.taste_model, now=shadow_now)
     if profile.empty:
         log.info("mix: user %s has no history and no picked artists yet", user_id)
         return None
-    pool = []
-    built = await builder.build(profile, mode, shadow_pool=pool) if shadow_snapshot is not None else await builder.build(profile, mode)
+    built = await builder.build(profile, mode, capture_replay=shadow_snapshot is not None)
     if cfg.taste_shadow:
-        if shadow_snapshot is not None:
+        if shadow_snapshot is not None and built.replay is not None:
             try:
-                from app.mixes.shadow import compare, sound_diff
-                built.stats["taste_shadow"] = compare(shadow_snapshot, pool, now=shadow_now,
-                                                      timezone=get_settings().timezone, cfg=cfg)
-                built.stats["taste_shadow"]["active_seed_keys"] = built.stats.get("seed_keys", [])[:100]
-                built.stats["taste_shadow"]["pool_complete"] = built.stats.get("candidates", 0) == len(pool)
+                from app.mixes.shadow import compare, profiles_for, sound_diff
+                timezone = get_settings().timezone
+                profiles = profiles_for(shadow_snapshot, profile, timezone)
+                report = compare(shadow_snapshot, built.replay, profiles, active_model=built.stats["taste_model"],
+                                 timezone=timezone, cfg=cfg, mode=mode)
+                report["active_seed_keys"] = built.stats.get("seed_keys", [])[:100]
+                built.stats["taste_shadow"] = report
                 try:
-                    await sound_diff(built.stats["taste_shadow"], shadow_snapshot, pool, now=shadow_now,
-                                     timezone=get_settings().timezone, cfg=cfg, mode=mode)
+                    await sound_diff(report, built.replay, profiles, cfg=cfg)
                 except Exception:
                     built.stats["taste_shadow"]["sound_status"] = "unavailable"
                     log.warning("mix shadow sound comparison failed", exc_info=True)
@@ -182,10 +189,12 @@ async def save(s: AsyncSession, user: User, built: builder.Built) -> Mix:
     s.add(mix)
     await s.flush()
     for pos, c in enumerate(built.active + built.reserve):
-        s.add(MixItem(mix_id=mix.id, position=pos, state="active" if pos < len(built.active) else "reserve",
-                      familiar=c.familiar, ref=c.track.ref if c.track.source == "dz" else None,
-                      nd_song_id=c.nd_song_id, track_id=c.library_track_id, generator=c.generator,
-                      score=round(c.score, 4), features_json=c.features()))
+        item = MixItem(mix_id=mix.id, position=pos, state="active" if pos < len(built.active) else "reserve",
+                       familiar=c.familiar, ref=c.track.ref if c.track.source == "dz" else None,
+                       nd_song_id=c.nd_song_id, track_id=c.library_track_id, generator=c.generator,
+                       score=round(c.score, 4), features_json=c.features())
+        recent_offers.mark_ready(item, mix.created_at)
+        s.add(item)
     await s.flush()
     return mix
 
@@ -257,8 +266,11 @@ async def _sync(mix_id: int, *, schedule: bool) -> None:
                 continue
             reserve.remove(sub)
             sub.state, it.position, sub.position = "active", sub.position, it.position
+        now = utcnow()
         for it in items:
             if it.state == "active":
+                # First playable hand-out: a completed download or an already-ready reserve promoted today.
+                recent_offers.mark_ready(it, now)
                 await queue_download(s, mix, it)
         await s.flush()
         songs = [i.nd_song_id for i in sorted(items, key=lambda i: i.position) if i.state == "active" and i.nd_song_id]

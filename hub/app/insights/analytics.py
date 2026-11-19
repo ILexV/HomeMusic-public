@@ -16,7 +16,7 @@ from app.insights.waves_view import NOT_RECORDED, seed_kind
 from app.library.owned import quiet
 from app.mixes.build import GENERATOR_TITLES
 from app.mixes.taste import artist_key
-from app.mixes.taste_math import _heard
+from app.mixes.taste_snapshot import PLAYBACK_KINDS
 from app.mixes.wave import generator_title
 from app.models import DownloadItem, User
 
@@ -130,9 +130,9 @@ async def listening(s: AsyncSession, user: User, start: date, end: date, timezon
     downloads = sum(not quiet(i.query_json) for i in (await s.execute(select(DownloadItem).where(
         DownloadItem.user_id == user.id, DownloadItem.status == "done", DownloadItem.created_at >= begin,
         DownloadItem.created_at < stop))).scalars())
-    plays = [r for r in h.rows if r.kind in launches.PLAY_KINDS and r.target_type == "track" and inside(r.ts)]
+    plays = [r for r in h.rows if r.kind in PLAYBACK_KINDS and r.target_type == "track" and inside(r.ts)]
     totals = {"counted_listens": sum(inside(a.counted_at) for a in h.attempts),
-              "heard_events": sum(_heard(r, r.duration_s) for r in plays),
+              "heard_events": sum(inside(a.heard_outcome_at) for a in h.attempts),
               "starts": sum(a.started for a in in_period), "finished": sum(a.finished for a in in_period),
               "early_skips": sum(a.early_skip_at is not None for a in in_period),
               "late_skips": sum(a.late_skip for a in in_period),

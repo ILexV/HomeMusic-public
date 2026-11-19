@@ -1,8 +1,9 @@
 """Explicit inputs to taste math; local batch loading has no network or write side effects."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from collections.abc import Callable, Hashable, Iterable
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 
@@ -36,6 +37,99 @@ class TasteEvent:
     client: str = "pwa"
     received_at: datetime | None = None
     id: int = 0
+    playback_id: str | None = None
+    device_id: str | None = None
+    listened_ms: int | None = None
+
+    @classmethod
+    def from_row(cls, row) -> TasteEvent:
+        return cls(**{k: getattr(row, k) for k in cls.__dataclass_fields__})
+
+    @property
+    def seconds(self) -> float | None:
+        """Cumulative listening, not the seek cursor. Only legacy rows use position."""
+        if self.listened_ms is not None:
+            return self.listened_ms / 1000
+        return None if self.playback_id else self.position_s
+
+    @property
+    def early_skip(self) -> bool:
+        return self.kind == "skip" and self.seconds is not None and self.seconds < 30
+
+
+PLAYBACK_KINDS = ("start", "progress", "skip", "finish", "interrupted", "error")
+
+
+@dataclass(frozen=True)
+class PlaybackAttempt:
+    first: TasteEvent
+    start: TasteEvent | None
+    terminal: TasteEvent | None  # first decisive terminal; error/interrupted override finish/skip
+    context: str | None
+    events: list[TasteEvent]
+
+    @property
+    def outcome(self) -> TasteEvent | None:
+        return self.terminal if self.terminal and self.terminal.kind in ("finish", "skip") else None
+
+
+def playback_attempts(events: Iterable[TasteEvent], track_key: Callable[[TasteEvent], Hashable]) -> list[PlaybackAttempt]:
+    """Fold only the playback journal visible at the caller's cut. Explicit actions are independent.
+
+    Modern retries share a device/attempt id. Without that identity a start may pair with a terminal on
+    the same stream, but distinct standalone scrobbles/terminals aren't evidence of a single play.
+    """
+    groups = []
+    identified, legacy = {}, {}
+    seen = set()
+    for e in sorted((x for x in events if x.kind in PLAYBACK_KINDS and (x.target_type or "track") == "track"),
+                    key=lambda x: (x.ts, x.id or 0)):
+        if (e.user_id, e.event_id) in seen:
+            continue
+        seen.add((e.user_id, e.event_id))
+        if e.playback_id:
+            identity = (e.user_id, e.device_id or e.client, e.playback_id)
+            rows = identified.get(identity)
+            if rows is None:
+                identified[identity] = rows = []
+                groups.append(rows)
+        else:
+            stream = (e.user_id, e.client, track_key(e), e.context)
+            rows = legacy.get(stream)
+            if rows:
+                prev = rows[-1]
+                # Old journals occasionally sent a skip after failure, or retried a paired terminal.
+                failure_tail = (e.kind in ("error", "interrupted") or prev.kind in ("error", "interrupted")) \
+                    and e.ts - prev.ts <= timedelta(minutes=5)
+                retry = rows[0].kind == "start" and (e.kind, e.ts, e.position_s) == (prev.kind, prev.ts, prev.position_s)
+                if not retry and (e.kind == "start" or e.ts - rows[0].ts > timedelta(hours=6) or
+                                  (prev.kind not in ("start", "progress") and not failure_tail)):
+                    rows = None
+            if not rows:
+                legacy[stream] = rows = []
+                groups.append(rows)
+        rows.append(e)
+
+    attempts = []
+    for rows in groups:
+        by_kind = {}
+        for e in rows:
+            by_kind.setdefault(e.kind, e)
+        terminal = next((by_kind[k] for k in ("error", "interrupted", "finish", "skip") if k in by_kind), None)
+        contexts = {e.context for e in rows if e.context}
+        context = next(iter(contexts)) if len(contexts) == 1 else None
+        if terminal:
+            measured = max((e.listened_ms for e in rows if e.listened_ms is not None), default=None)
+            duration = terminal.duration_s or next((e.duration_s for e in rows if e.duration_s), None)
+            terminal = replace(terminal, listened_ms=measured, duration_s=duration, context=context)
+        attempts.append(PlaybackAttempt(rows[0], by_kind.get("start"), terminal, context, rows))
+    return attempts
+
+
+def playback_evidence(attempts: Iterable[PlaybackAttempt]) -> list[TasteEvent]:
+    """One start (zero weight) and at most one eligible outcome per attempt, in event order."""
+    return sorted((e for a in attempts for e in (a.start, a.outcome) if e is not None),
+                  key=lambda e: (e.ts, e.id or 0))
 
 
 @dataclass(frozen=True)
@@ -104,7 +198,7 @@ async def load_snapshot(session, user_id: int, *, now: datetime) -> TasteSnapsho
     now = utc(now)
     rows = list((await session.execute(select(PlayEvent).where(
         PlayEvent.user_id == user_id, PlayEvent.superseded_scrobble.is_(False), PlayEvent.ts <= now,
-        PlayEvent.kind.not_in(("progress", "interrupted", "error")),
+        PlayEvent.received_at <= now,
         or_(PlayEvent.ts >= calendar_cutoff(now),
             PlayEvent.kind.in_(("like", "unlike", "dislike", "undislike")))))).scalars())
     subjects = [Subject(x.target_type, tuple(x.aliases or ()), x.ref, x.nd_id, x.data or {})
@@ -159,7 +253,6 @@ async def load_snapshot(session, user_id: int, *, now: datetime) -> TasteSnapsho
             f"dz:{album.deezer_album_id}" if album and album.deezer_album_id else None,
             None))  # Album.uid is a Hub id, not a verified Navidrome album id.
     settings = await session.get(MixSettings, user_id)
-    fields = TasteEvent.__dataclass_fields__
-    events = tuple(TasteEvent(**{k: getattr(x, k) for k in fields}) for x in rows)
+    events = tuple(TasteEvent.from_row(x) for x in rows)
     return TasteSnapshot(user_id, events, tuple(subjects), tuple(metadata), tuple(downloads), dislikes,
                          tuple(settings.artists_json or ()) if settings else ())

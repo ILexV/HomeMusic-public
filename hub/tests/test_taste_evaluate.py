@@ -164,20 +164,79 @@ async def test_online_v2_adapter_loads_batches_without_network_or_writes(db_file
         await dispose()
 
 
+async def test_registered_attempt_is_one_signal_across_profiles_quality_and_replay(hub_env, db_file):
+    from sqlalchemy import select
+
+    from app.db import dispose, init_engine, session_scope
+    from app.mixes.taste import build_profile
+    from app.models import PlayEvent, Track, User
+    from app.plays import record_events
+    from app.recommendations import summarize
+
+    init_engine(db_file)
+    cut = NOW + timedelta(minutes=1)
+    late = cut + timedelta(minutes=1)
+    try:
+        async with session_scope() as s:
+            user = User(nd_username="listener", nd_password_enc="unused")
+            s.add_all([user, Track(uid="track", path="song.mp3", nd_song_id="song", artist="A", title="Song",
+                                   duration_s=200, fingerprint="a|song")])
+            await s.flush()
+            uid = user.id
+            def row(eid, kind, offset, **extra):
+                return dict(event_id=eid, ts=NOW + timedelta(seconds=offset), kind=kind, nd_song_id="song",
+                            context="wave:test", duration_s=200, client="pwa", **extra)
+            ids = {"device_id": "phone", "playback_id": "attempt"}
+            first = [row("start", "start", 0, listened_ms=0, **ids),
+                     row("like", "like", 3),  # independent explicit decision after the prediction
+                     row("progress", "progress", 9, position_s=100, listened_ms=10000, **ids),
+                     row("skip", "skip", 10, position_s=100, **ids),
+                     row("retry", "skip", 11, position_s=100, **ids)]
+            assert (await record_events(s, uid, first, now=cut)).accepted == len(first)
+            # Delayed error happened during the attempt but wasn't known at the first cut.
+            assert (await record_events(s, uid, [row("failed", "error", 8, listened_ms=9000, **ids)],
+                                        now=late)).accepted == 1
+        async with session_scope() as s:
+            user = await s.get(User, uid)
+            rows = list((await s.scalars(select(PlayEvent).where(PlayEvent.user_id == uid))).all())
+            for model in ("v1", "v2"):
+                before = (await build_profile(s, user, now=cut, model=model, timezone="UTC")).find(nd_song_id="song")
+                after = (await build_profile(s, user, now=late, model=model, timezone="UTC")).find(nd_song_id="song")
+                assert before.liked and before.score == pytest.approx(0, abs=.001)
+                assert after.liked and after.score == pytest.approx(1, abs=.001)
+            good = summarize(uid, rows, [], now=cut, days=1)
+            bad = summarize(uid, rows, [], now=late, days=1)
+            assert (good["attempts"], good["early_skips"], good["eligible_plays"]) == (1, 1, 1)
+            assert (bad["attempts"], bad["playback_errors"], bad["eligible_plays"]) == (1, 1, 0)
+        with readonly_db(db_file) as c:
+            snap = read_snapshot(c, user_id=uid, until=late)
+        for model in ("v1", "v2"):
+            kwargs = dict(timezone="UTC", model=model, mode="available-at")
+            prediction, = outcomes(snap, until=cut, **kwargs)
+            assert (prediction["event_id"], prediction["label"], prediction["score"]) == ("skip", 0, 0)
+            assert outcomes(snap, until=late, **kwargs) == []
+    finally:
+        await dispose()
+
+
 def test_observed_replay_keeps_unknown_policy_audio_and_adjacent_sample_sizes(db_file):
     from app.matching.replay_quality import observed_quality
     seed_db(db_file, [
         ev("complete", context="wave:missing", at=NOW - timedelta(days=1)),
         ev("previous", "skip", context="wave:missing", at=NOW - timedelta(days=35), position_s=4),
+        ev("arrived-this-period", context="wave:missing", at=NOW - timedelta(days=34),
+           received_at=NOW - timedelta(days=3)),
         ev("not-yet-received", context="wave:missing", at=NOW - timedelta(days=2),
            received_at=NOW + timedelta(days=1)),
         replace(ev("other-account", context="wave:missing"), user_id=2),
     ])
     with readonly_db(db_file) as connection:
         report = observed_quality(connection, user_id=1, until=NOW)
+        occurred = observed_quality(connection, user_id=1, until=NOW, available_at=False)
     assert report["eligible_plays"] == 1 and report["completion_rate"] == 1
     assert report["comparison"]["previous"]["eligible_plays"] == 1
     assert report["comparison"]["previous"]["early_skip_rate"] == 1
+    assert occurred["comparison"]["previous"]["eligible_plays"] == 2
     assert report["policy_cohorts"][0]["policy_version"] == "unknown"
     assert report["recordings"]["observations"] == 0 and report["recordings"]["rate"] is None
     assert report["unavailable_events"] == 1

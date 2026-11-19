@@ -17,14 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.listening_summary import listened_threshold_ms
 from app.mixes.taste_math import _heard
+from app.mixes.taste_snapshot import PLAYBACK_KINDS, PlaybackAttempt, TasteEvent, playback_attempts
 from app.models import Mix, MixItem, PlayEvent, WaveItem, WaveSession
 
-PLAY_KINDS = ("start", "progress", "interrupted", "error", "skip", "finish")
 MARK_KINDS = ("like", "unlike", "dislike", "undislike")
 LAUNCH_GAP = timedelta(minutes=30)
 MARK_TAIL = timedelta(minutes=5)  # a like right after the list ended still belongs to it
 PLAYLIST_SHARE = .6  # an old `playlist` launch is a mix's when this share of its tracks are the mix's songs
-EARLY_SKIP_S = 30
 SOURCES = {"mix", "wave", "smart", "playlist", "album", "artist", "liked", "search", "queue", "continuous", "library", "other"}
 SELF_SELECTED = {"album", "playlist", "search", "artist", "liked", "library"}  # «прижившаяся рекомендация»
 NOT_USER = ("favorite:bootstrap", "favorite:reconcile")
@@ -96,6 +95,7 @@ class Attempt:
     measured: bool = False
     counted_at: datetime | None = None  # a counted listen (measured threshold, or a scrobble)
     heard_at: datetime | None = None  # counted_at; without measurements — by the events (finish, skip ≥ 30 s)
+    heard_outcome_at: datetime | None = None  # Eligible terminal, distinct from a measured checkpoint.
     started: bool = False
     finished: bool = False
     early_skip_at: float | None = None
@@ -160,18 +160,18 @@ def mark_stats(marks: list[PlayEvent]) -> dict[str, int]:
     return {"likes": sum(m.kind == "like" for m in marks), "dislikes": sum(m.kind == "dislike" for m in marks)}
 
 
-def _attempt(events: list[PlayEvent], aliases: Aliases, grouped: bool) -> Attempt:
+def _attempt(group: PlaybackAttempt, events: list[PlayEvent], aliases: Aliases) -> Attempt:
     ref = next((e.ref for e in events if e.ref), None)
     nd = next((e.nd_song_id for e in events if e.nd_song_id), None)
     first = events[0]
     a = Attempt(events, aliases.key(ref, nd), ref, nd, aliases.of(ref, nd), first.ts, first.client, first.device_id,
-                next((e.context for e in events if e.context), None),
+                group.context,
                 next((e.launch_id for e in events if e.launch_id), None),
                 next((e.launch_origin for e in events if e.launch_origin), None))
     duration = next((e.duration_s for e in reversed(events) if e.duration_s), None) or next(
         ((e.track_metadata or {}).get("duration_s") for e in events if (e.track_metadata or {}).get("duration_s")),
         None)
-    if grouped and any(e.listened_ms is not None for e in events):  # measured only by a playback, as the summary
+    if first.playback_id and first.device_id and any(e.listened_ms is not None for e in events):
         a.measured = True
         threshold, previous = listened_threshold_ms(duration), 0
         for e in events:
@@ -183,17 +183,17 @@ def _attempt(events: list[PlayEvent], aliases: Aliases, grouped: bool) -> Attemp
             if previous < threshold <= current and a.counted_at is None:
                 a.counted_at = e.ts
             previous = current
-    for e in events:
-        a.started |= e.kind == "start"
-        if e.kind == "finish":
-            a.finished = True
-        elif e.kind == "skip":
-            if e.position_s is not None and e.position_s < EARLY_SKIP_S:
-                a.early_skip_at = e.position_s
-            else:
-                a.late_skip = True
-        if not a.measured and a.heard_at is None and _heard(e, e.duration_s or duration):
-            a.heard_at = e.ts
+    a.started = group.start is not None
+    if outcome := group.outcome:
+        a.finished = outcome.kind == "finish"
+        if outcome.early_skip:
+            a.early_skip_at = outcome.seconds
+        elif outcome.kind == "skip" and outcome.seconds is not None:
+            a.late_skip = True
+        if _heard(outcome, outcome.duration_s or duration):
+            a.heard_outcome_at = outcome.ts
+            if not a.measured:
+                a.heard_at = outcome.ts
     if a.client == "navidrome" and not a.measured and a.finished:
         a.scrobble, a.counted_at, a.heard_at, a.finished = True, first.ts, first.ts, False
     if a.measured:
@@ -203,26 +203,9 @@ def _attempt(events: list[PlayEvent], aliases: Aliases, grouped: bool) -> Attemp
 
 def attempts_of(rows: list[PlayEvent], aliases: Aliases) -> list[Attempt]:
     """`rows` — the user's playback events in `(ts, id)` order."""
-    groups: dict[tuple[str, str], list[PlayEvent]] = {}
-    legacy: list[list[PlayEvent]] = []
-    open_: dict[tuple[str, str], list[PlayEvent]] = {}
-    for r in rows:
-        if r.playback_id and r.device_id:
-            groups.setdefault((r.device_id, r.playback_id), []).append(r)
-            continue
-        stream = (r.client, aliases.key(r.ref, r.nd_song_id))
-        if r.kind == "start":
-            open_[stream] = [r]
-            legacy.append(open_[stream])
-        elif (current := open_.get(stream)) is not None:
-            current.append(r)
-            if r.kind in ("skip", "finish"):
-                del open_[stream]
-        else:
-            legacy.append([r])
-    out = [*(_attempt(events, aliases, True) for events in groups.values()),
-           *(_attempt(events, aliases, False) for events in legacy)]
-    return sorted(out, key=lambda a: (a.started_at, a.events[0].id))
+    by_id = {r.event_id: r for r in rows}
+    groups = playback_attempts((TasteEvent.from_row(r) for r in rows), lambda e: aliases.key(e.ref, e.nd_song_id))
+    return [_attempt(group, [by_id[e.event_id] for e in group.events], aliases) for group in groups]
 
 
 @dataclass
@@ -258,9 +241,9 @@ class History:
 async def load(s: AsyncSession, user_id: int, now: datetime) -> History:
     rows = [r for r in (await s.execute(select(PlayEvent).where(
         PlayEvent.user_id == user_id, PlayEvent.ts <= now, PlayEvent.superseded_scrobble.is_(False),
-        PlayEvent.kind.in_((*PLAY_KINDS, *MARK_KINDS))).order_by(PlayEvent.ts, PlayEvent.id))).scalars()
+        PlayEvent.kind.in_((*PLAYBACK_KINDS, *MARK_KINDS))).order_by(PlayEvent.ts, PlayEvent.id))).scalars()
         if not test_traffic(r.client)]
-    plays = [r for r in rows if r.kind in PLAY_KINDS and r.target_type == "track"]
+    plays = [r for r in rows if r.kind in PLAYBACK_KINDS and r.target_type == "track"]
     marks = [r for r in rows if r.kind in MARK_KINDS and r.context not in NOT_USER and not r.reverts_event_id and
              (r.target_data or {}).get("provenance") != "import"]
     aliases = Aliases(plays)

@@ -303,6 +303,66 @@ async def test_v2_session_weights_like_unlike_late_skip_and_restart_idempotence(
     assert rt.state.positive_weights["dz:1"] == pytest.approx(saturation(2.4))
     assert not rt.state.neg and not rt.state.skips
 
+@pytest.mark.parametrize("model", ["v1", "v2"])
+async def test_wave_retracts_only_failed_attempt_after_restart(model, monkeypatch):
+    download, gather = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(wave, "_download", download)
+    monkeypatch.setattr(wave, "_gather", gather)
+    rt = wave.Runtime(1, "normal", wave.State(taste_model=model), profile=vp() if model == "v2" else profile())
+    rt.state.out["dz:1"] = cand(1)
+    ids = dict(playback_id="playing", device_id="phone")
+    batch = [signal("start", "start", listened_ms=0, **ids), signal("liked", "like"),
+             signal("ten", "progress", position=100, listened_ms=10000, **ids),
+             signal("skip", "skip", position=100, **ids), signal("retry", "skip", position=100, **ids)]
+    await wave.learn("s", rt, batch)
+    assert rt.state.pos == rt.state.neg == ["dz:1"]
+    assert list(rt.state.skips.values()) == [1] and rt.state.started == 1
+    rt.state = wave.State.load(rt.state.dump())
+    await wave.learn("s", rt, [signal("late-error", "error", listened_ms=10000, **ids)])
+    assert rt.state.pos == ["dz:1"] and not rt.state.neg and not rt.state.skips
+    assert rt.state.played[0].kind == "error"
+    if model == "v2":
+        assert rt.state.positive_weights == {"dz:1": 1}
+    await wave.learn("s", rt, batch)
+    assert not rt.state.neg and rt.state.started == 1
+    # A terminal and a failure already in the same batch trigger neither radio nor download.
+    rt.state.out["dz:2"] = cand(2)
+    ids["playback_id"] = "other"
+    await wave.learn("s", rt, [signal("end", "finish", "dz:2", listened_ms=120000, **ids),
+                               signal("interrupted", "interrupted", "dz:2", listened_ms=120000, **ids)])
+    assert "dz:2" not in rt.state.pos and rt.state.radios == ["dz:1"]
+    assert "dz:2" in rt.state.out and rt.state.started == 1
+    # Even when an inferred, terminal-only start was already applied, a late error restores the handout.
+    rt.state.out["dz:3"] = cand(3)
+    ids["playback_id"] = "orphan"
+    await wave.learn("s", rt, [signal("orphan-skip", "skip", "dz:3", listened_ms=1000, **ids)])
+    assert rt.state.started == 2 and "dz:3" not in rt.state.out
+    rt.state = wave.State.load(rt.state.dump())
+    await wave.learn("s", rt, [signal("orphan-error", "error", "dz:3", listened_ms=1000, **ids)])
+    assert rt.state.started == 1 and "dz:3" in rt.state.out and not rt.state.neg and not rt.state.skips
+    download.assert_not_awaited()
+
+
+@pytest.mark.parametrize("model", ["v1", "v2"])
+async def test_old_wave_signals_are_upgraded_using_saved_journal(model, monkeypatch):
+    monkeypatch.setattr(wave, "_gather", AsyncMock())
+    rt = wave.Runtime(1, "normal", wave.State(taste_model=model), profile=vp() if model == "v2" else profile())
+    rt.state.out["dz:1"] = cand(1)
+    skipped = signal("old", "skip", position=100)
+    await wave.learn("s", rt, [skipped])
+    old = rt.state.dump()
+    if model == "v1":
+        old.pop("signals")  # v1 saved only the aggregate and the applied event ids
+    else:
+        for field in ("playback_id", "device_id", "listened_ms"):
+            old["signals"]["old"].pop(field)  # v2 kept the raw cursor but not the measurement
+    rt.state = wave.State.load(old)
+    skipped.playback_id, skipped.device_id, skipped.listened_ms = "attempt", "phone", 10000
+    await wave.learn("s", rt, [skipped])
+    assert rt.state.neg == ["dz:1"] and list(rt.state.skips.values()) == [1]
+    assert not rt.state.pos and rt.state.started == 1
+
+
 
 async def test_v2_compensation_chains_and_other_users_do_not_add_session_weight(monkeypatch):
     async def no_io(*a, **kw):

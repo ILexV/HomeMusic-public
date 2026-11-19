@@ -277,8 +277,9 @@ keep the start of their continuous series; unlike is neutral. Events duplicated 
 contribution. State is permanent; the current v1 profile still uses its calendar scoring window. Artist actions
 through all `/api/dislikes` routes, including deletion by id, are journaled too.
 
-`finish` — the track played to its end by itself, or the user left it after ≥ 90 % of its length; `skip` — left
-earlier (next, another track, the player closed); a skip «before 30 s» is `skip` with `position_s < 30`. Pause and
+`finish` — the track reached natural EOF, or the user manually left after listening for ≥ 90 % of its duration;
+`skip` — a manual departure earlier. An early skip is determined by `listened_ms < 30000` when measured;
+only legacy attempts without measured time fall back to `position_s < 30`. A seek is not listening. Pause and
 seeking are no events. `dislike`/`undislike` events also set/clear the track's row of `/api/dislikes` (`source` `app`
 for `app/…` clients). Every hour the Hub adds the user's Navidrome scrobbles (other clients) as `finish` with client
 `navidrome`; one within 5 min + the track's length of an app/PWA `start`/`skip`/`finish` of the same song is the same
@@ -440,6 +441,10 @@ preferences, never a fresh catalog/profile guess.
 Cohorts use only the policy version saved with the recommendation decision (`unknown` stays unknown).
 `comparison.limitations` explicitly warns that this is observational, not a randomized A/B result.
 Shadow/replay do not fabricate listening outcomes for an alternative policy.
+With `mixes.taste_shadow` enabled, the mix build's `taste_shadow.selection` replays final ordering
+using captured per-account weights, temporary restrictions and recent offers. Only the active model
+reuses the actual build's audio; the alternative without audio and the optional cross-model sound
+comparison are labelled separately. `incomplete_pool` means no exact selection replay was attempted.
 
 `recordings` includes `metric_version`, `since`, `until`, `observations`, `known`, `full`, `not_full`, `unknown`,
 `rate`, `provenance[]`, `limitations[]`. The rate denominator is only verified full files or confirmed previews;

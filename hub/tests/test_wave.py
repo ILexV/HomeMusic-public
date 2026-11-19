@@ -173,7 +173,9 @@ def test_a_refill_takes_the_next_seeds_round_and_round() -> None:
 def event(kind: str, ref: str, position: float | None = None):
     from app.models import PlayEvent
 
-    return PlayEvent(kind=kind, ref=ref, position_s=position)
+    at = datetime.now(UTC).replace(tzinfo=None)
+    return PlayEvent(user_id=1, event_id=uuid.uuid4().hex, ts=at, received_at=at, client="pwa", target_type="track",
+                     kind=kind, ref=ref, position_s=position)
 
 
 async def test_typed_subject_and_compensation_do_not_alias_a_track_in_v1_session():

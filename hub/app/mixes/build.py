@@ -21,9 +21,9 @@ import logging
 import math
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from itertools import batched
+from itertools import batched, islice
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -33,7 +33,7 @@ from app.catalog.models import CatalogTrack, split_ref
 from app.config import get_settings
 from app.db import session_scope
 from app.matching.normalize import fingerprint, normalize_artist, split_version, version_kind
-from app.mixes import embedder, sources
+from app.mixes import embedder, recent_offers, sources
 from app.mixes.resolve import resolve_hits
 from app.mixes.taste import Profile, TasteTrack, artist_key
 from app.mixes.taste_math import V2Profile
@@ -76,6 +76,7 @@ class Cand:
     parts: dict[str, Any] | None = None
     known: dict[str, Any] | None = None
     explanation: list[str] = field(default_factory=list)
+    recent_offer_penalty: float = 0.0
 
     @property
     def key(self) -> str:
@@ -109,6 +110,21 @@ class GenResult:
     seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class ReplayCandidate:
+    candidate: Cand
+    blocked: bool
+    multiplier: float
+
+
+@dataclass(frozen=True)
+class ReplayInputs:
+    candidates: tuple[ReplayCandidate, ...]  # original merge order, before filtering
+    total: int
+    weights: dict[str, float]
+    vectors: dict[str, list[float]]  # actual coordinates used by order(), including its missing-vector fallback
+
+
 @dataclass
 class Built:
     active: list[Cand]
@@ -116,6 +132,7 @@ class Built:
     title: str
     description: str
     stats: dict[str, Any]
+    replay: ReplayInputs | None = None
 
 
 Gen = Callable[[], Awaitable[list[CatalogTrack]]]
@@ -461,8 +478,8 @@ def apply_score(c: Cand, weights: dict[str, float], profile: Profile | None, mul
     """Store the exact ranked inputs; reducing priority must also demote negative scores."""
     c.parts = score_parts(c, weights, profile)
     raw = c.parts["total"]
-    c.score = raw * multiplier if raw >= 0 else raw / multiplier
-    c.parts.update(temporary_multiplier=multiplier, total=c.score)
+    c.score = (raw * multiplier if raw >= 0 else raw / multiplier) - c.recent_offer_penalty
+    c.parts.update(temporary_multiplier=multiplier, recent_offer_penalty=c.recent_offer_penalty, total=c.score)
 
 
 def known_of(c: Cand, p: Profile) -> dict[str, Any] | None:
@@ -755,7 +772,7 @@ def local_now(now: datetime | None = None) -> datetime:
 
 
 async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
-                shadow_pool: list[Cand] | None = None) -> Built:
+                *, capture_replay: bool = False) -> Built:
     cfg = get_settings().cfg.mixes
     from app.recommendation_policy import load_policy
     from app.recommendations import adapted_weights, explain_candidate
@@ -777,12 +794,9 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
     results = await run_generators(gens if gens is not None else generators(p, seeds))
     cands = merge(results)
     await link_library(cands)
-    if shadow_pool is not None:
-        try:
-            from copy import deepcopy
-            shadow_pool.extend(deepcopy(list(cands.values())[:500]))
-        except Exception:
-            shadow_pool.append(None)  # comparison reports failure without affecting the build
+    offered = await recent_offers.load(p.user_id, now=p.now)
+    for c in cands.values():
+        c.recent_offer_penalty = recent_offers.penalty(offered, c.track.ref, c.nd_song_id)
     rejected = dict.fromkeys(REJECT_REASONS, 0)
     kept = []
     for c in cands.values():
@@ -813,7 +827,13 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
     stats["familiar"] = sum(c.familiar for c in active)
     title, description = await name_mix(p.user_id, active, local_now(p.now), stats)
     stats["build_seconds"] = round(time.monotonic() - t0, 1)
-    return Built(active=active, reserve=reserve, title=title, description=description, stats=stats)
+    replay = None
+    if capture_replay:
+        captured = tuple(ReplayCandidate(replace(c, familiar=False, score=0, parts=None, known=None, explanation=[]),
+                                         policy.blocked(c), policy.multiplier(c))
+                         for c in islice(cands.values(), 500))
+        replay = ReplayInputs(captured, len(cands), dict(weights), vectors)
+    return Built(active=active, reserve=reserve, title=title, description=description, stats=stats, replay=replay)
 
 
 __all__ = ["GENERATOR_TITLES", "MODES", "MODE_TITLES", "Built", "Cand", "GenResult", "build", "local_now"]

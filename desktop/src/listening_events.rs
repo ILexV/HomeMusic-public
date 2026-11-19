@@ -87,9 +87,11 @@ impl State {
     }
 
     pub fn depart(&mut self, snapshot: &PlaybackState, item: &Item, hub: &HubState, natural: bool) {
-        if !self.attempt.as_ref().is_some_and(|a| a.item == *item && !a.terminal) { return; }
+        let Some(a) = &self.attempt else { return };
+        if a.item != *item || a.terminal { return; }
         self.observe(snapshot);
-        self.emit(departure_kind(snapshot, natural), Some(snapshot), hub);
+        let listened_ms = self.attempt.as_ref().unwrap().listened_ms;
+        self.emit(departure_kind(snapshot, natural, listened_ms), Some(snapshot), hub);
     }
 
     pub fn tick(&mut self, snapshot: &PlaybackState, queue: &Queue, hub: &HubState) {
@@ -139,9 +141,9 @@ impl State {
     }
 }
 
-fn departure_kind(snapshot: &PlaybackState, natural: bool) -> &'static str {
+fn departure_kind(snapshot: &PlaybackState, natural: bool, listened_ms: u64) -> &'static str {
     if snapshot.phase == PlaybackPhase::Error { "error" }
-    else if natural || snapshot.duration_s > 0.5 && snapshot.position_s >= snapshot.duration_s * 0.9 { "finish" }
+    else if natural || snapshot.duration_s > 0.5 && listened_ms as f64 >= f64::from(snapshot.duration_s) * 900.0 { "finish" }
     else { "skip" }
 }
 fn listened_delta(previous: &PlaybackState, current: &PlaybackState, elapsed: Duration) -> u64 {
@@ -160,10 +162,11 @@ mod tests {
         PlaybackState { phase, position_s, duration_s: 100.0, seekable: true, playing: phase == PlaybackPhase::Playing, volume: 1.0 }
     }
     #[test]
-    fn errors_never_become_skips_even_near_end() {
-        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Error, 99.0), false), "error");
-        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Playing, 10.0), false), "skip");
-        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Playing, 99.0), false), "finish");
+    fn departures_use_heard_time_not_seek_position() {
+        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Error, 99.0), false, 99_000), "error");
+        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Playing, 99.0), false, 10_000), "skip");
+        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Playing, 99.0), false, 90_000), "finish");
+        assert_eq!(departure_kind(&snapshot(PlaybackPhase::Playing, 100.0), true, 28_000), "finish");
     }
     #[test]
     fn seeking_and_buffering_do_not_inflate_listening() {

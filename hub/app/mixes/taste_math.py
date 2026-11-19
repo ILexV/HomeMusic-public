@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from app.favorites import AliasIndex, State, fold
 from app.mixes.embedder import GeometryProfile
 from app.mixes.taste import Profile, TasteTrack, artist_key, skip_weight
-from app.mixes.taste_snapshot import Subject, TasteEvent, TasteSnapshot, calendar_cutoff, utc
+from app.mixes.taste_snapshot import Subject, TasteEvent, TasteSnapshot, calendar_cutoff, playback_attempts, playback_evidence, utc
 
 MIN_WEIGHT = .01
 EXPERIMENTS = ("P1", "P2", "P3", "P4", "P5")
@@ -68,6 +68,7 @@ class Contribution:
     position_s: float | None = None
     duration_s: float | None = None
     note: str | None = None
+    effective_seconds: float | None = None  # input to the skip curve, distinct from the seek cursor
 
 
 @dataclass
@@ -165,9 +166,10 @@ def _event_subject(e: TasteEvent) -> bool:
 
 
 def _heard(e: TasteEvent, duration: float | None) -> bool:
+    seconds = e.seconds
     if e.kind == "finish":
-        return e.position_s is None or e.position_s >= 30 or bool(duration and e.position_s >= duration)
-    return e.kind == "skip" and (e.position_s or 0) >= 30
+        return seconds is None or seconds >= 30 or bool(duration and seconds >= duration)
+    return e.kind == "skip" and seconds is not None and seconds >= 30
 
 
 def _real_actions(events, subjects, index):
@@ -188,7 +190,7 @@ def _real_actions(events, subjects, index):
 
 
 def calculate_profile(snapshot: TasteSnapshot, *, now: datetime, timezone: str,
-                      mode: Literal["occurred-at", "available-at"] = "occurred-at",
+                      mode: Literal["occurred-at", "available-at"] = "available-at",
                       trace: Trace | None = None) -> V2Profile:
     """Online M4 only. Offline hypotheses are deliberately exposed by a different function. `trace` (the admin's
     breakdown) only observes: the profile is the same with and without it."""
@@ -277,14 +279,21 @@ def _calculate(snapshot, *, now, timezone, mode, experiment, version="v2", trace
         return t
 
     heard_by_day, actions_by_day = defaultdict(set), defaultdict(set)
-    for e in events:
-        if e.ts < cutoff or e.target_type != "track":
+    attempts = playback_attempts(events, index.key)
+    playback = playback_evidence(a for a in attempts if version == "v2" or a.outcome)
+    prediction_at = {a.outcome.event_id: a.first.ts - timedelta(microseconds=1)
+                     for a in attempts if a.outcome} if experiment == "P3" else {}
+    for e in playback:
+        if e.ts < cutoff:
             continue
         t = get_track(e.ref, e.nd_song_id)
         if t and _heard(e, e.duration_s or t.duration_s):
             heard_by_day[e.ts.replace(tzinfo=UTC).astimezone(zone).date()].add(t.key)
     for e in _real_actions(events, subjects, index):
         if e.ts >= cutoff:
+            # Keep the object of an explicit action even after an unlike/undislike removes its weight.
+            if e.target_type == "track":
+                get_track(e.ref, e.nd_song_id)
             actions_by_day[e.ts.replace(tzinfo=UTC).astimezone(zone).date()].add(index.key(e))
     counts = {d: len(heard_by_day[d]) + len(actions_by_day[d]) for d in heard_by_day.keys() | actions_by_day.keys()}
     clock = p.clock = ActiveClock.from_counts(counts, timezone)
@@ -301,8 +310,8 @@ def _calculate(snapshot, *, now, timezone, mode, experiment, version="v2", trace
             t.last_positive, t.positive_age = at, clock.age(at)
 
     previous_skip = None
-    for e in events:
-        if e.ts < cutoff or e.target_type != "track" or e.kind not in ("start", "finish", "skip"):
+    for e in playback:
+        if e.ts < cutoff:
             continue
         t = get_track(e.ref, e.nd_song_id)
         if not t:
@@ -315,29 +324,30 @@ def _calculate(snapshot, *, now, timezone, mode, experiment, version="v2", trace
             if t.artist:
                 a = artist_key(t.artist)
                 p.artist_listens[a] = p.artist_listens.get(a, 0) + 1
-        base = 2.0 if e.kind == "finish" else skip_weight(e.position_s or 0, e.duration_s or t.duration_s)
+        seconds = e.seconds
+        base = 2.0 if e.kind == "finish" else skip_weight(seconds or 0, e.duration_s or t.duration_s)
         if e.kind == "start":
             base = 0.0
-        early = e.kind == "skip" and e.position_s is not None and e.position_s < 30
+        early = e.early_skip
         if early:
             base = -1.0
-            if experiment == "P1" and (e.position_s or 0) < 3 and self_selected(e.context) and previous_skip and \
+            if experiment == "P1" and seconds < 3 and self_selected(e.context) and previous_skip and \
                     self_selected(previous_skip.context) and e.context == previous_skip.context and \
-                    (previous_skip.position_s or 0) < 3 and (e.ts - previous_skip.ts).total_seconds() <= 20:
+                    previous_skip.seconds < 3 and (e.ts - previous_skip.ts).total_seconds() <= 20:
                 base = 0.0
             elif experiment == "P2" and self_selected(e.context):
                 base = -.5
             elif experiment == "P3":
                 # P3's threshold is the pre-decision M4 score, never the final cut's
                 # decayed score or future likes. This extra work is offline only.
-                prior = replace(snapshot, events=tuple(x for x in events if x.ts < e.ts),
-                                downloads=(), dislikes=(), picked_artists=())
-                before = calculate_profile(prior, now=e.ts, timezone=timezone, mode=mode)
+                at = prediction_at[e.event_id]
+                prior = replace(snapshot, subjects=(), metadata=(), downloads=(), dislikes=(), picked_artists=())
+                before = calculate_profile(prior, now=at, timezone=timezone, mode=mode)
                 familiar = before.find(ref=e.ref, nd_song_id=e.nd_song_id)
                 if familiar and familiar.score >= 4:
                     base = -.5
             elif experiment == "P4":
-                base = -max(0.0, min(1.0, (30 - e.position_s) / 20))
+                base = -max(0.0, min(1.0, (30 - seconds) / 20))
         if e.kind == "finish" and experiment == "P5" and recommended(e.context):
             base *= .75
         if e.kind in ("skip", "finish"):
@@ -355,7 +365,7 @@ def _calculate(snapshot, *, now, timezone, mode, experiment, version="v2", trace
                 note = None if w else "w < 0.01"
             trace.add(t.key, Contribution(e.kind, e.ts, e.event_id, "P" if base > 0 else "N" if base < 0 else "0",
                                           base, clock.age(e.ts), w, abs(base) * w, e.context, e.client,
-                                          e.position_s, e.duration_s or t.duration_s, note))
+                                          e.position_s, e.duration_s or t.duration_s, note, seconds))
 
     for st in state.values():
         if not st.liked or st.target_type != "track":

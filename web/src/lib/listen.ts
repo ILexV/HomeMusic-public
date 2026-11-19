@@ -291,7 +291,7 @@ function reportStart() {
   checkpoint();
 }
 
-/** The current track is left (`ended`: it played to its end): `finish` or `skip` by where the player was. */
+/** A manual departure uses time heard, not the seek position. Natural EOF still counts as a finish. */
 function reportEnd(ended = false, failed = false, interrupted = false) {
   const p = played;
   if (p?.started) accrue(p);
@@ -299,7 +299,7 @@ function reportEnd(ended = false, failed = false, interrupted = false) {
   if (!p || (!p.started && !failed) || state.track?.ref !== p.ref || state.info?.kind === 'preview') return;
   const duration = state.duration || state.track.duration_s || 0;
   const position = ended ? duration : state.position;
-  const kind = interrupted ? 'interrupted' : failed ? 'error' : ended || (duration > 0 && position >= duration * FINISH_SHARE) ? 'finish' : 'skip';
+  const kind = interrupted ? 'interrupted' : failed ? 'error' : ended || (duration > 0 && p.listenedMs >= duration * 1000 * FINISH_SHARE) ? 'finish' : 'skip';
   const persisted = playEvent(kind, { ref: p.ref, nd_song_id: p.ndSongId }, { position_s: position, duration_s: duration || null, context: p.context, playback_id: p.playbackId, device_id: deviceId, listened_ms: Math.round(p.listenedMs), track_metadata: metadata(), account: p.account, launch_id: p.launch.id, launch_origin: p.launch.origin });
   if (persisted) try { localStorage.removeItem(OPEN_PLAY_KEY); } catch (e) { console.error('Could not close listening checkpoint', e); }
 }

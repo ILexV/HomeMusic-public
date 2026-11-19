@@ -1208,6 +1208,7 @@ class InsightsContribution(BaseModel):
     context: str | None = None
     client: str | None = None
     position_s: float | None = None
+    effective_seconds: float | None = None  # Actual evidence used by the profile, not the raw seek position.
     duration_s: float | None = None
     note: str | None = None
 

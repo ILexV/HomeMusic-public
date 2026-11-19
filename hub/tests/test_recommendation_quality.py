@@ -16,6 +16,7 @@ def event(kind, *, attempt="a", ref="dz:1", at=None, user=1, context="mix:1", **
     n = next(IDS)
     return PlayEvent(id=n, user_id=user, event_id=f"e{n}", ts=at or NOW - timedelta(hours=1),
                      kind=kind, ref=ref, client="pwa", target_type="track", context=context,
+                     received_at=kw.pop("received_at", at or NOW - timedelta(hours=1)),
                      playback_id=attempt, device_id="dev" if attempt else None,
                      superseded_scrobble=False, **kw)
 

@@ -64,15 +64,16 @@ async def facets(p: Profile) -> tuple[list[dict] | None, Any]:
 def heard_event(c: Contribution) -> bool:
     """The profile's `heard30` rule (finish, skip ≥ 30 s) over a recorded contribution."""
     if c.kind == "finish":
-        return c.position_s is None or c.position_s >= 30 or bool(c.duration_s and c.position_s >= c.duration_s)
-    return c.kind == "skip" and (c.position_s or 0) >= 30
+        return c.effective_seconds is None or c.effective_seconds >= 30 or bool(
+            c.duration_s and c.effective_seconds >= c.duration_s)
+    return c.kind == "skip" and c.effective_seconds is not None and c.effective_seconds >= 30
 
 
 def counters(contribs: list[Contribution]) -> dict[str, int]:
     return {"starts": sum(c.kind == "start" for c in contribs),
             "finishes": sum(c.kind == "finish" for c in contribs),
-            "early_skips": sum(c.kind == "skip" and c.position_s is not None and c.position_s < 30 for c in contribs),
-            "late_skips": sum(c.kind == "skip" and (c.position_s is None or c.position_s >= 30) for c in contribs),
+            "early_skips": sum(c.kind == "skip" and c.effective_seconds is not None and c.effective_seconds < 30 for c in contribs),
+            "late_skips": sum(c.kind == "skip" and c.effective_seconds is not None and c.effective_seconds >= 30 for c in contribs),
             "plays": sum(heard_event(c) for c in contribs)}
 
 

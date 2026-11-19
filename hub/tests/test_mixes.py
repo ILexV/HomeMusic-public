@@ -147,7 +147,7 @@ async def add_event(user: int, kind: str, *, nd: str | None = None, ref: str | N
 
     async with session_scope() as s:
         s.add(PlayEvent(user_id=user, event_id=uuid.uuid4().hex, ts=at or NOW, kind=kind, ref=ref, nd_song_id=nd,
-                        position_s=position, client="app/1.5.0"))
+                        position_s=position, received_at=at or NOW, client="app/1.5.0"))
 
 
 def new_track(n: int) -> CatalogTrack:
@@ -275,7 +275,7 @@ async def test_skip_after_30_s_takes_the_length_of_the_event(env) -> None:
     await add_track(1)  # the file says 200 s, the player said 130 s: the event wins
     async with session_scope() as s:
         s.add(PlayEvent(user_id=me, event_id="e1", ts=NOW, kind="skip", nd_song_id="nd1", position_s=80,
-                        duration_s=130, client="app/1.6.0"))
+                        duration_s=130, client="app/1.6.0", received_at=NOW))
         await s.flush()
         p = await build_profile(s, await s.get(User, me), now=NOW, starred=[])
 
@@ -661,7 +661,7 @@ async def test_schedule_builds_once_a_day_after_the_hour(env) -> None:
 async def test_v2_shadow_does_not_repeat_build_services(env, monkeypatch, shadow):
     from app.config import get_settings
     from app.db import session_scope
-    from app.mixes import build, core
+    from app.mixes import build, core, taste_snapshot
     from app.models import DownloadItem, Job
 
     cfg = get_settings().cfg.mixes
@@ -669,17 +669,18 @@ async def test_v2_shadow_does_not_repeat_build_services(env, monkeypatch, shadow
     monkeypatch.setattr(cfg, "taste_shadow", shadow)
     await history(env["admin"])
     fake_generators(monkeypatch, [new_track(5000 + i) for i in range(10)])
-    calls = {name: 0 for name in ("run_generators", "sound", "name_mix")}
-    for name in calls:
-        original = getattr(build, name)
+    services = {"run_generators": build, "sound": build, "name_mix": build, "load_snapshot": taste_snapshot}
+    calls = dict.fromkeys(services, 0)
+    for name, module in services.items():
+        original = getattr(module, name)
 
         async def counted(*args, _name=name, _original=original, **kwargs):
             calls[_name] += 1
             return await _original(*args, **kwargs)
 
-        monkeypatch.setattr(build, name, counted)
+        monkeypatch.setattr(module, name, counted)
     mix = await core.build_for(env["admin"])
-    assert mix is not None and calls == {"run_generators": 1, "sound": 1, "name_mix": 1}
+    assert mix is not None and calls == dict.fromkeys(services, 1)
     if shadow:
         assert mix.stats_json["taste_shadow"]["active_seed_keys"] == mix.stats_json["seed_keys"]
     else:

@@ -97,6 +97,19 @@ test('audio failure after start closes the same attempt without a later skip', a
   assert.equal(h.events[0].playback_id, h.events.find(e => e.kind === 'error').playback_id);
 });
 
+test('jumping to the last seconds and pressing Next reports a skip, not a finish', async () => {
+  const { listen, h } = tab();
+  listen.listenAll(tracks, { context: 'wave:session', shuffle: false });
+  await setImmediate();
+  h.audio.dispatchEvent(new Event('playing'));
+  h.audio.currentTime = 175;
+  h.audio.dispatchEvent(new Event('timeupdate'));
+  listen.next();
+  const end = h.events.find(e => e.kind === 'skip' || e.kind === 'finish');
+  assert.equal(end.position_s, 175);
+  assert.equal(end.kind, 'skip');
+});
+
 test('decoder promise rejection and resolver failure record errors, not skips', async () => {
   for (const options of [{ rejectPlay: true }, { rejectResolve: true }]) {
     const { listen, h } = tab(options);

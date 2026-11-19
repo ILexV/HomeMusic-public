@@ -28,6 +28,7 @@ import math
 import random
 import time
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -44,17 +45,15 @@ from app.db import session_scope
 from app.jobs.queue import enqueue, notify
 from app.library.owned import ACTIVE_STATUSES
 from app.matching.normalize import fingerprint
-from app.mixes import build, embedder, sources
+from app.mixes import build, embedder, recent_offers, sources
 from app.mixes.resolve import catalog_track, library_track
-from app.mixes.taste import EARLY_SKIP_S, Profile, TasteTrack, artist_key, build_profile, skip_weight
+from app.mixes.taste import Profile, TasteTrack, artist_key, build_profile, skip_weight
 from app.mixes.taste_math import V2Profile, saturation
-from app.mixes.taste_snapshot import TasteEvent
+from app.mixes.taste_snapshot import Subject, TasteEvent, playback_attempts
 from app.models import DownloadBatch, DownloadItem, PlayEvent, Track, User, WaveItem, WaveSession, utcnow
 from app.services import svc
 
 log = logging.getLogger(__name__)
-
-PLAY_KINDS = ("start", "skip", "finish")
 
 BATCH = 5
 HISTORY_MAX = 50
@@ -483,102 +482,81 @@ def _weighted_center(weights: dict[str, float], vectors: dict[str, list[float]])
     return [x / norm for x in center] if norm > 1e-12 else None
 
 
-def _session_weights(st: State, profile: V2Profile) -> None:
-    from app.favorites import fold
-    from app.mixes.taste_snapshot import Subject
+@dataclass
+class _Signals:
+    positive: dict[str, float] = field(default_factory=dict)
+    negative: list[str] = field(default_factory=list)
+    skips: Counter = field(default_factory=Counter)
+    seeds: dict[str, str] = field(default_factory=dict)  # effective finish/like event ids, not raw terminals
+    endings: dict[str, TasteEvent] = field(default_factory=dict)
+    started: dict[str, bool] = field(default_factory=dict)  # handed key -> explicit start, or only inferred from an outcome
 
-    events, by_id, positives, negative, skips = [], {}, {}, [], {}
-    for eid, data in sorted(st.signals.items(), key=lambda x: (x[1]["ts"], x[0])):
+
+def _signals(st: State, profile: Profile | None) -> _Signals:
+    from app.favorites import fold
+
+    v2 = isinstance(profile, V2Profile)
+    result = _Signals()
+    events, by_id = [], {}
+    for eid, data in sorted(st.signals.items(), key=lambda x: (x[1]["ts"], x[1].get("id") or 0, x[0])):
         values = {k: data[k] for k in TasteEvent.__dataclass_fields__ if k in data}
         values["ts"] = datetime.fromisoformat(values["ts"])
         values["received_at"] = datetime.fromisoformat(values["received_at"])
         e = TasteEvent(**values)
-        t = profile.find(ref=e.ref, nd_song_id=e.nd_song_id)
+        t = profile.find(ref=e.ref, nd_song_id=e.nd_song_id) if v2 else None
         key = t.key if t else data["key"]
         events.append(e)
         by_id[eid] = key, data["artist"]
-        if e.reverts_event_id:
+    for attempt in playback_attempts(events, lambda e: by_id[e.event_id][0]):
+        if attempt.start or attempt.outcome:
+            handed = st.signals[attempt.first.event_id]["key"]
+            result.started[handed] = result.started.get(handed, False) or attempt.start is not None
+        if end := attempt.terminal:
+            result.endings[st.signals[end.event_id]["key"]] = end
+        if not (e := attempt.outcome):
             continue
+        key, artist = by_id[e.event_id]
         if e.kind == "finish":
-            positives[key] = positives.get(key, 0) + 2
-        elif e.kind == "skip" and e.position_s is not None:
-            if e.position_s < EARLY_SKIP_S:
-                negative.append(key)
-                skips[data["artist"]] = skips.get(data["artist"], 0) + 1
-            else:
-                positives[key] = positives.get(key, 0) + skip_weight(e.position_s, e.duration_s or data.get("length"))
+            result.positive[key] = result.positive.get(key, 0) + 2
+            result.seeds[e.event_id] = e.kind
+        elif e.early_skip:
+            result.negative.append(key)
+            result.skips[artist] += 1
+        elif v2 and e.seconds is not None:
+            duration = e.duration_s or st.signals[e.event_id].get("length")
+            result.positive[key] = result.positive.get(key, 0) + skip_weight(e.seconds, duration)
     subjects = [Subject(x.target_type, tuple(x.aliases), x.ref, x.nd_id, x.data or {})
-                for x in profile.favorite_states.values()]
+                for x in profile.favorite_states.values()] if v2 else []
     for state in fold(events, subjects).values():
         if not state.liked:
             continue
         key, _ = by_id[state.event.event_id]
-        current = profile.find(ref=state.ref, nd_song_id=state.nd_id)
+        current = profile.find(ref=state.ref, nd_song_id=state.nd_id) if v2 else None
         # A fresh global unlike removes only the session like, never finish/late-skip evidence.
-        journalled = any(x.target_type == "track" and
+        journalled = v2 and any(x.target_type == "track" and
                          ((state.ref and x.ref == state.ref) or (state.nd_id and x.nd_id == state.nd_id))
                          for x in profile.favorite_states.values())
         if not journalled or (current and current.liked):
-            positives[key] = positives.get(key, 0) + 1
+            result.positive[key] = result.positive.get(key, 0) + 1
+            result.seeds[state.event.event_id] = "like"
     explicit = {}
     for e in events:
         if e.kind in ("dislike", "undislike"):
             explicit[by_id[e.event_id][0]] = e
     for key, e in explicit.items():
         if e.kind == "dislike":
-            negative.append(key)
-            artist = by_id[e.event_id][1]
-            skips[artist] = skips.get(artist, 0) + 1
-    st.positive_weights = {key: saturation(value) for key, value in positives.items() if value > 0}
+            result.negative.append(key)
+            result.skips[by_id[e.event_id][1]] += 1
+    return result
+
+
+def _session_weights(st: State, profile: V2Profile, result: _Signals | None = None) -> None:
+    result = result or _signals(st, profile)
+    st.positive_weights = {key: saturation(value) for key, value in result.positive.items() if value > 0}
     st.pos = list(st.positive_weights)[-SIGNALS_MAX:]
     st.positive_weights = {key: st.positive_weights[key] for key in st.pos}
-    st.neg = list(dict.fromkeys(reversed(negative)))[:SIGNALS_MAX]
-    st.skips = skips
-
-
-async def _learn_v2(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
-    st, liked = rt.state, []
-    assert isinstance(rt.profile, V2Profile)
-    for e in events:
-        if e.user_id != rt.user_id or not e.event_id or e.event_id in st.seen:
-            continue
-        # Future/delayed events remain unconsumed until their occurrence time arrives.
-        if e.ts > utcnow() or (e.client or "").lower().endswith("-debug"):
-            continue
-        st.seen.add(e.event_id)
-        if (e.target_type or "track") != "track":
-            continue
-        matched = _match(st, e.ref, e.nd_song_id)
-        if matched is None:
-            old = next((d for d in reversed(list(st.signals.values())) if
-                        (e.ref and d.get("ref") == e.ref) or
-                        (e.nd_song_id and d.get("nd_song_id") == e.nd_song_id)), None)
-            if old is None:
-                continue
-            matched = "signal", Played(old["ref"], old.get("nd_song_id"), old["key"], old["artist"],
-                                        bool(old.get("familiar")), track=old.get("track"))
-        x = matched[1]
-        if isinstance(x, build.Cand):
-            x = _start(st, x) if e.kind in PLAY_KINDS else _as_played(x)
-        if e.kind in ("skip", "finish"):
-            x.kind, x.position_s = e.kind, e.position_s
-        values = {k: getattr(e, k) for k in TasteEvent.__dataclass_fields__}
-        values["ts"], values["received_at"] = e.ts.isoformat(), e.received_at.isoformat()
-        st.signals[e.event_id] = {**values, "key": x.key, "artist": x.artist,
-                                  "length": (x.track or {}).get("duration_s"), "track": x.track,
-                                  "familiar": x.familiar}
-        if e.kind in ("finish", "like") and not e.reverts_event_id:
-            liked.append(x)
-            if e.kind == "finish":
-                await _download(sid, rt, x)
-    _session_weights(st, rt.profile)
-    radios = []
-    for x in liked:
-        if x.ref not in st.radios and x.track:
-            st.radios.append(x.ref)
-            track = CatalogTrack.model_validate(x.track)
-            radios.append((SESSION_RADIO, lambda track=track: radio_of(track)))
-    await _gather(sid, rt, radios, lambda: False)
+    st.neg = list(dict.fromkeys(reversed(result.negative)))[:SIGNALS_MAX]
+    st.skips = dict(result.skips)
 
 
 def value(c: build.Cand, st: State, vectors: dict[str, list[float]], pos: list[float] | None,
@@ -597,7 +575,7 @@ def value(c: build.Cand, st: State, vectors: dict[str, list[float]], pos: list[f
     v += parts.get("session_preferences", {}).get("contribution", 0.0)
     multiplier = parts.get("pause_multiplier", 1.0)
     # A soft restriction must also lower a negative score, never make it more attractive.
-    return v * multiplier if v >= 0 else v / multiplier
+    return (v * multiplier if v >= 0 else v / multiplier) - c.recent_offer_penalty
 
 
 def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: int = BATCH,
@@ -740,47 +718,127 @@ def _as_played(c: build.Cand) -> Played:
                   track=c.track.model_dump(mode="json"))
 
 
+def _update_v1_signals(st: State, before: _Signals, after: _Signals) -> None:
+    # Apply only journal changes: an older saved session or a Smart hide/accept can also own signals.
+    for artist in before.skips.keys() | after.skips.keys():
+        n = st.skips.get(artist, 0) + after.skips[artist] - before.skips[artist]
+        if n > 0:
+            st.skips[artist] = n
+        else:
+            st.skips.pop(artist, None)
+    for current, old, new in ((st.pos, before.positive, after.positive), (st.neg, before.negative, after.negative)):
+        removed = set(old).difference(new)
+        current[:] = [k for k in current if k not in removed]
+        for key in new:
+            if key not in old:
+                _signal(current, key)
+
+
 async def learn(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
-    """What the session's events say: starts, early skips, likes, tracks played to the end."""
-    if rt.state.taste_model == "v2":
-        await _learn_v2(sid, rt, events)
-        return
-    st = rt.state
-    liked: list[Played] = []
+    """Resolve the session journal before learning or launching a radio/download, including late failure rows."""
+    st, now = rt.state, utcnow()
+    before = _signals(st, rt.profile)
+    changed = False
+    # Once per handed song, not a copy of the catalog snapshot for every progress checkpoint.
+    tracks = {d["key"]: d for d in st.signals.values() if d.get("track")}
+    by_ref = {d.get("handed_ref") or d["ref"]: d for d in tracks.values()}
+    by_nd = {d.get("handed_nd") or d["nd_song_id"]: d for d in tracks.values() if d.get("handed_nd") or d.get("nd_song_id")}
+    by_attempt = {(d.get("device_id"), d["playback_id"]): d["key"] for d in st.signals.values() if d.get("playback_id")}
     for e in events:
-        if e.event_id and e.event_id in st.seen:
+        if e.user_id != rt.user_id or not e.event_id or (e.target_type or "track") != "track" or \
+                e.ts > now or (e.received_at and e.received_at > now) or \
+                e.client in ("qa", "import") or (e.client or "").lower().endswith("-debug"):
             continue
-        if e.event_id:
-            st.seen.add(e.event_id)
-        if (e.target_type or "track") != "track" or e.reverts_event_id:
-            continue  # Typed subjects and causal rollbacks are journal data, not a track playback signal.
-        m = _match(st, e.ref, e.nd_song_id)
-        if m is None:
+        seen = e.event_id in st.seen
+        saved = st.signals.get(e.event_id)
+        if saved is not None and "listened_ms" in saved:
             continue
-        x = m[1]
-        if isinstance(x, build.Cand):  # handed out: it starts now (a ♥ of a track ahead doesn't start it)
-            x = _start(st, x) if e.kind in PLAY_KINDS else _as_played(x)
-        if e.kind in ("skip", "finish"):
-            x.kind, x.position_s = e.kind, e.position_s
-        if (e.kind == "skip" and (e.position_s or 0) < EARLY_SKIP_S) or e.kind == "dislike":
-            st.skips[x.artist] = st.skips.get(x.artist, 0) + 1
-            _signal(st.neg, x.key)
-            if x.key in st.pos:
-                st.pos.remove(x.key)
-        elif e.kind in ("finish", "like"):
-            _signal(st.pos, x.key)
-            if x.key in st.neg:
-                st.neg.remove(x.key)
-            liked.append(x)
-            if e.kind == "finish":
-                await _download(sid, rt, x)
-    radios: list[tuple[str, build.Gen]] = []
-    for x in liked:
-        if x.ref in st.radios or not x.track:
+        # Enrich old v2 signals from the journal on first read; until then their seconds remain legacy.
+        if saved is not None:
+            saved.update(playback_id=e.playback_id, device_id=e.device_id, listened_ms=e.listened_ms)
+            changed = True
             continue
-        st.radios.append(x.ref)
-        t = CatalogTrack.model_validate(x.track)
-        radios.append((SESSION_RADIO, lambda t=t: radio_of(t)))
+        match = _match(st, e.ref, e.nd_song_id)
+        if match:
+            x = match[1]
+            if isinstance(x, build.Cand):
+                x = _as_played(x)
+        else:
+            data = by_ref.get(e.ref) if e.ref else None
+            data = data or (by_nd.get(e.nd_song_id) if e.nd_song_id else None)
+            if data is None and e.playback_id:
+                data = tracks.get(by_attempt.get((e.device_id, e.playback_id)))
+            if data is None:
+                continue
+            x = Played(data.get("handed_ref") or data["ref"], data.get("handed_nd") or data.get("nd_song_id"),
+                       data["key"], data["artist"],
+                       bool(data.get("familiar")), track=data["track"])
+        # V1 used to persist only totals. Adopt previously applied events without adding those totals again.
+        if seen and st.taste_model == "v1" and not e.reverts_event_id:
+            if e.kind == "dislike" or (e.kind == "skip" and (e.position_s or 0) < 30):
+                before.negative.append(x.key)
+                before.skips[x.artist] += 1
+            if e.kind in ("like", "finish"):
+                before.positive[x.key] = 1
+                before.seeds[e.event_id] = e.kind
+        st.seen.add(e.event_id)
+        data = {k: getattr(e, k) for k in TasteEvent.__dataclass_fields__}
+        data.update(ts=e.ts.isoformat(), received_at=(e.received_at or e.ts).isoformat(), key=x.key,
+                    handed_ref=x.ref, handed_nd=x.nd_song_id, artist=x.artist, familiar=x.familiar,
+                    length=(x.track or {}).get("duration_s"))
+        if e.playback_id:
+            by_attempt[e.device_id, e.playback_id] = x.key
+        if x.key not in tracks and x.track:
+            data["track"] = x.track
+            tracks[x.key] = by_ref[x.ref] = data
+            if x.nd_song_id:
+                by_nd[x.nd_song_id] = data
+        st.signals[e.event_id] = data
+        changed = True
+    after = _signals(st, rt.profile) if changed else before
+    if isinstance(rt.profile, V2Profile):
+        _session_weights(st, rt.profile, after)
+    elif changed:
+        _update_v1_signals(st, before, after)
+    if not changed:
+        return
+    # A terminal without a start is common in older clients. Only count it after classifying the whole
+    # attempt; keep the handed candidate so a later failure can undo an inferred (never an explicit) start.
+    out = {c.key: c for c in st.out.values()}
+    for key, explicit in after.started.items():
+        if (c := out.get(key)) is not None:
+            _start(st, c)
+            if not explicit:
+                tracks[key]["inferred_candidate"] = cand_json(c)
+        if explicit and key in tracks:
+            tracks[key].pop("inferred_candidate", None)
+    for key in before.started.keys() - after.started.keys():
+        if data := tracks.get(key, {}).pop("inferred_candidate", None):
+            c = cand_of(data)
+            st.out[c.track.ref] = c
+            st.played = [x for x in st.played if x.key != key]
+            st.heard.discard(fp_of(c))
+            st.started -= 1
+            st.started_familiar -= c.familiar
+    for x in st.played:
+        if end := after.endings.get(x.key):
+            x.kind, x.position_s = end.kind, end.position_s
+    radios = []
+    for eid, kind in after.seeds.items():
+        if eid in before.seeds:
+            continue
+        data = tracks.get(st.signals[eid]["key"])
+        if not data:
+            continue
+        ref = data.get("handed_ref") or data["ref"]
+        if kind == "finish":
+            x = Played(ref, data.get("handed_nd") or data.get("nd_song_id"), data["key"], data["artist"],
+                       bool(data.get("familiar")), track=data["track"])
+            await _download(sid, rt, x)
+        if ref not in st.radios:
+            st.radios.append(ref)
+            t = CatalogTrack.model_validate(data["track"])
+            radios.append((SESSION_RADIO, lambda t=t: radio_of(t)))
     await _gather(sid, rt, radios, lambda: False)
 
 
@@ -1181,8 +1239,12 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
     vectors = await _vectors(rt)
     source_weights = await recommendations.adapted_weights(rt.user_id, weights())
     candidates = [*st.out.values(), *st.pool.values()]
+    offered = await recent_offers.load(rt.user_id, now=utcnow(), exclude_session=sid)
     for c in candidates:
         c.parts = build.score_parts(c, source_weights, rt.profile)
+        c.recent_offer_penalty = (0.0 if "seed" in c.gens else
+                                  recent_offers.penalty(offered, c.track.ref, c.nd_song_id))
+        c.parts["recent_offer_penalty"] = c.recent_offer_penalty
         c.score = c.parts["total"]
         c.known = build.known_of(c, rt.profile)
         c.parts["pause_multiplier"] = policy.multiplier(c)

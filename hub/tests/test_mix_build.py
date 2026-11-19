@@ -332,3 +332,57 @@ async def test_build_counts_why_candidates_were_dropped_and_keeps_score_parts(db
             f["profile"] is None
     own = next(c for c in built.active if c.track.ref == "dz:0").features()["profile"]
     assert own == {"key": "dz:0", "s": 2.0, "positive": None, "negative": None, "artist_score": 2.0, "familiar": True}
+
+
+@pytest.mark.parametrize("model", ["v1", "v2"])
+async def test_shadow_replays_live_active_and_reserve_with_adapted_policy(db, monkeypatch, model):
+    from app import recommendation_policy, recommendations
+    from app.mixes.shadow import compare, profiles_for
+    from app.mixes.taste_math import V2Profile
+    from app.mixes.taste_snapshot import TasteSnapshot
+
+    cfg = b.get_settings().cfg.mixes
+    monkeypatch.setattr(cfg, "size", 2)
+    monkeypatch.setattr(cfg, "reserve", 4)
+    p = Profile(1, NOW) if model == "v1" else V2Profile(1, NOW, maturity=1)
+    # Only the active (online) profile knows this track; do not silently rebuild it from the local snapshot.
+    p.disliked_ids.add("dz:9")
+    snapshot = TasteSnapshot(1)
+    weights = {"favorites": 1.25, "stash": .6}
+    calls = []
+
+    async def adapted(user_id, base):
+        calls.append("weights")
+        return weights
+
+    async def policy(user_id):
+        calls.append("policy")
+        return recommendation_policy.Policy({"ref:dz:1"}, {artist_key("Muted")})
+
+    async def sound(profile, candidates, stats):
+        calls.append("sound")
+        for c in candidates:
+            c.sim = {"dz:6": .95, "dz:3": -.5}.get(c.key, 0.0)
+        return {c.key: [float(i % 2), float(1 - i % 2)] for i, c in enumerate(candidates)}
+
+    monkeypatch.setattr(recommendations, "adapted_weights", adapted)
+    monkeypatch.setattr(recommendation_policy, "load_policy", policy)
+    monkeypatch.setattr(b, "sound", sound)
+    built = await b.build(p, "discover", gens(favorites=[tr(1), tr(2, "Muted"), tr(3), tr(4), tr(9)],
+                                               stash=[tr(n) for n in range(5, 9)]), capture_replay=True)
+    report = compare(snapshot, built.replay, profiles_for(snapshot, p, "UTC"), active_model=model,
+                     mode="discover", timezone="UTC", cfg=cfg)
+    assert calls == ["weights", "policy", "sound"]
+    assert report["source_weights"] == weights != cfg.weights and report["pool_complete"]
+    replay = report["selection"]["models"][model]
+    assert replay["active"] == [c.key for c in built.active]
+    assert replay["reserve"] == [c.key for c in built.reserve] and len(replay["reserve"]) == 4
+    assert "dz:6" in replay["active"]
+    for name, summary in report["profiles"].items():
+        rows = {r["key"]: r for r in summary["candidate_decisions"]}
+        assert rows["dz:1"]["rejection_reason"] == "temporary_pause"
+        assert rows["dz:9"]["kept"] == (name != model)
+        assert rows["dz:2"]["contributions"]["temporary_multiplier"] == .25
+        assert rows["dz:2"]["contributions"]["generator_weights"] == {"favorites": 1.25}
+        selection = report["selection"]["models"][name]
+        assert "dz:1" not in selection["active"] + selection["reserve"]

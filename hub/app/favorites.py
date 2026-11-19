@@ -236,10 +236,12 @@ def fold(events: Iterable[PlayEvent], subjects: Iterable[FavoriteSubject] = (),
     return out
 
 
-async def snapshot(s: AsyncSession, user_id: int, now: datetime | None = None):
+async def snapshot(s: AsyncSession, user_id: int, now: datetime | None = None, *, available_only: bool = False):
     now = now or utcnow()
     q = select(PlayEvent).where(PlayEvent.user_id == user_id, PlayEvent.kind.in_(("like", "unlike")))
     q = q.where(PlayEvent.ts <= now)
+    if available_only:
+        q = q.where(PlayEvent.received_at <= now)
     events = list((await s.execute(q)).scalars())
     subjects = list((await s.execute(select(FavoriteSubject))).scalars())
     partial = [(e.ref, e.nd_song_id) for e in events if e.target_type == "track" and not (e.ref and e.nd_song_id)]
@@ -296,7 +298,8 @@ def analyze_liked_track(user_id: int, subject: FavoriteSubject) -> None:
 async def record(s: AsyncSession, user_id: int, target: FavoriteTarget, liked: bool, *,
                  operation: str | None = None, ts: datetime | None = None, client: str = "hub",
                  context: str | None = None, reverts_event_id: str | None = None,
-                 mirror_pending: bool = False, normalize: bool = True, event_id: str | None = None) -> PlayEvent:
+                 mirror_pending: bool = False, normalize: bool = True, event_id: str | None = None,
+                 received_at: datetime | None = None) -> PlayEvent:
     from app.plays import Ids, event_time
 
     target = target.model_copy()
@@ -304,7 +307,7 @@ async def record(s: AsyncSession, user_id: int, target: FavoriteTarget, liked: b
         target.ref, target.nd_song_id = await Ids(s).complete(target.ref, target.nd_song_id)
     row = await remember(s, target)
     eid = event_id or decision_id(operation or uuid.uuid4().hex, target.target_type, row.canonical_key)
-    now = utcnow()
+    now = received_at or utcnow()
     inserted = await s.execute(insert(PlayEvent).values(
         **target.model_dump(), user_id=user_id, event_id=eid, ts=event_time(ts or now, now) if normalize else ts or now,
         kind="like" if liked else "unlike", client=client, context=context, received_at=now,
@@ -489,7 +492,7 @@ async def reconcile(s: AsyncSession, user: User, body: dict, *, now: datetime | 
             continue
         if state is None and target:
             at = min(dates.get(key) or now, now)
-            await record(s, user.id, target, True, ts=at, normalize=False,
+            await record(s, user.id, target, True, ts=at, normalize=False, received_at=now,
                          operation=f"ndbaseline:{key}", client="navidrome", context="favorite:bootstrap")
             changed += 1
         elif state and bool(target) != state.liked and state.nd_id:
@@ -498,7 +501,7 @@ async def reconcile(s: AsyncSession, user: User, body: dict, *, now: datetime | 
             if target and (at is None or at <= state.event.ts):
                 continue  # A pre-existing ND star cannot resurrect a known own unlike.
             at = at if at and state.event.ts < at <= now else now
-            await record(s, user.id, target or target_of(state), bool(target), ts=at, normalize=False,
+            await record(s, user.id, target or target_of(state), bool(target), ts=at, normalize=False, received_at=now,
                          operation=f"ndsync:{state.event.event_id}:{int(bool(target))}", client="navidrome",
                          context="favorite:reconcile")
             changed += 1

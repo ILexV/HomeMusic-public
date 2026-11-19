@@ -18,7 +18,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import engine, session_scope
-from app.insights.launches import Aliases, NOT_USER, PLAY_KINDS, test_traffic
+from app.insights.launches import Aliases, NOT_USER, test_traffic
+from app.mixes.taste_snapshot import PLAYBACK_KINDS, TasteEvent, playback_attempts
 from app.models import Mix, MixItem, PlayEvent, SmartItem, SmartSession, WaveItem, WaveSession, utcnow
 
 LEARNING_DAYS = 90
@@ -86,54 +87,11 @@ def learned_factor(samples: int, completed: int, early_skips: int) -> float:
     return max(.75, min(1.25, 1 + .25 * (completed - early_skips) / (samples + 40)))
 
 
-def _attempts(events: list[PlayEvent], aliases: Aliases) -> list[list[PlayEvent]]:
-    """Deduplicate retries; legacy starts pair only within a bounded client stream."""
-    groups: dict[tuple, list[PlayEvent]] = {}
-    legacy: list[list[PlayEvent]] = []
-    opened: dict[tuple, list[PlayEvent]] = {}
-    seen: set[tuple] = set()
-    legacy_seen: set[tuple] = set()
-    failed: dict[tuple, list[PlayEvent]] = {}
-    for e in sorted(events, key=lambda e: (e.ts, e.id or 0)):
-        signature = (e.user_id, e.event_id) if e.event_id else (
-            e.user_id, e.client, e.ts, e.kind, e.ref, e.nd_song_id, e.position_s, e.listened_ms)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        key = aliases.key(e.ref, e.nd_song_id)
-        if e.playback_id:
-            groups.setdefault((e.user_id, e.device_id or e.client, e.playback_id, key), []).append(e)
-            continue
-        stream = (e.user_id, e.device_id or e.client, key, e.context)
-        semantic = (stream, e.ts, e.kind, e.position_s, e.listened_ms)
-        if semantic in legacy_seen:
-            continue
-        legacy_seen.add(semantic)
-        if e.kind == "start":
-            failed.pop(stream, None)
-        elif e.kind in ("skip", "finish") and stream in failed and \
-                e.ts - failed[stream][-1].ts <= timedelta(minutes=5):
-            failed[stream].append(e)
-            continue
-        current = opened.get(stream)
-        if e.kind == "start" or current is None or e.ts - current[0].ts > timedelta(hours=6):
-            current = [e]
-            legacy.append(current)
-            opened[stream] = current
-        else:
-            current.append(e)
-        if e.kind in ("skip", "finish", "error", "interrupted"):
-            if e.kind == "error":
-                failed[stream] = current
-            opened.pop(stream, None)
-    return sorted([*groups.values(), *legacy], key=lambda rows: (rows[0].ts, rows[0].id or 0))
-
-
 def summarize(user_id: int, events: list[PlayEvent], decisions: list[Decision], *, days: int,
               now: datetime) -> dict[str, Any]:
     """Pure aggregation; safe even if a caller accidentally supplies another account."""
     since = now - timedelta(days=days)
-    events = [e for e in events if e.user_id == user_id and e.ts <= now and
+    events = [e for e in events if e.user_id == user_id and e.ts <= now and (not e.received_at or e.received_at <= now) and
               not e.superseded_scrobble and not test_traffic(e.client) and e.target_type == "track"]
     decisions = [d for d in decisions if d.user_id == user_id and d.at <= now]
     aliases = Aliases([*events, *decisions])
@@ -148,12 +106,12 @@ def summarize(user_id: int, events: list[PlayEvent], decisions: list[Decision], 
     heard: set[str] = set()
     new_plays: dict[str, list[tuple[datetime, str, dict]]] = defaultdict(list)
     legacy = unattributed = 0
-    for rows in _attempts([e for e in events if e.kind in PLAY_KINDS], aliases):
-        first = rows[0]
+    playback = (TasteEvent.from_row(e) for e in events if e.kind in PLAYBACK_KINDS)
+    for attempt in playback_attempts(playback, lambda e: aliases.key(e.ref, e.nd_song_id)):
+        first = attempt.first
         if first.ts < since:
             continue
-        contexts = {e.context for e in rows if e.context}
-        context = next(iter(contexts)) if len(contexts) == 1 else ""
+        context = attempt.context
         if not context or context.partition(":")[0] not in ("mix", "wave", "smart") or ":" not in context:
             continue
         key = aliases.key(first.ref, first.nd_song_id)
@@ -173,22 +131,19 @@ def summarize(user_id: int, events: list[PlayEvent], decisions: list[Decision], 
         cohort = cohorts.setdefault(policy, dict(policy_version=policy, attempts=0, eligible_plays=0,
             completed=0, early_skips=0))
         cohort["attempts"] += 1
-        kinds = {e.kind for e in rows}
-        result["starts"] += "start" in kinds
-        error = "error" in kinds
-        interrupted = "interrupted" in kinds and not error
+        result["starts"] += attempt.start is not None
+        kind = attempt.terminal.kind if attempt.terminal else None
+        error = kind == "error"
+        interrupted = kind == "interrupted"
         result["playback_errors"] += error
         result["interrupted"] += interrupted
         if source:
             source["playback_errors"] += error
-        if error or interrupted or not kinds.intersection(("finish", "skip")):
+        if not (outcome := attempt.outcome):
             continue
         result["eligible_plays"] += 1
-        complete = "finish" in kinds
-        skips = [e for e in rows if e.kind == "skip"]
-        listened = max((e.listened_ms for e in rows if e.listened_ms is not None), default=None)
-        early = not complete and bool(skips) and (listened < 30000 if listened is not None else
-                skips[-1].position_s is not None and skips[-1].position_s < 30)
+        complete = outcome.kind == "finish"
+        early = outcome.early_skip
         result["completed"] += complete
         result["early_skips"] += early
         cohort["eligible_plays"] += 1
@@ -254,7 +209,7 @@ def summarize(user_id: int, events: list[PlayEvent], decisions: list[Decision], 
 async def load_data(s: AsyncSession, user_id: int, now: datetime, days: int):
     rows = list((await s.execute(select(PlayEvent).where(
         PlayEvent.user_id == user_id, PlayEvent.ts >= now - timedelta(days=days, hours=6),
-        PlayEvent.ts <= now, PlayEvent.target_type == "track",
+        PlayEvent.ts <= now, PlayEvent.received_at <= now, PlayEvent.target_type == "track",
         PlayEvent.superseded_scrobble.is_(False)).order_by(PlayEvent.ts, PlayEvent.id))).scalars())
     contexts = {e.context for e in rows if e.context}
     mix_ids = [int(x[4:]) for x in contexts if x.startswith("mix:") and x[4:].isdigit()]

@@ -38,7 +38,7 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
             "context", "position_s", "duration_s", "playback_id", "device_id", "listened_ms", "target_type",
             "superseded_scrobble", "reverts_event_id") if k in row}
         target = json.loads(row["target_data"]) if isinstance(row.get("target_data"), str) else row.get("target_data")
-        events.append(PlayEvent(**fields, ts=at, target_data=target or {}))
+        events.append(PlayEvent(**fields, ts=at, received_at=received if available_at else at, target_data=target or {}))
     decisions = []
     for session_table, item_table, prefix, time_field in (
         ("wave_sessions", "wave_items", "wave", "first_handed_at"),

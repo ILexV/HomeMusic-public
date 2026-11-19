@@ -488,12 +488,14 @@ class MixItem(Base):
     """A song of a mix: one of the 50 (`state` "active") or the reserve that replaces one that did not download."""
 
     __tablename__ = "mix_items"
-    __table_args__ = (Index("ix_mix_items_mix", "mix_id", "state", "position"),)
+    __table_args__ = (Index("ix_mix_items_mix", "mix_id", "state", "position"),
+                      Index("ix_mix_items_mix_offered", "mix_id", "offered_at"))
 
     id: Mapped[int] = mapped_column(primary_key=True)
     mix_id: Mapped[int] = mapped_column(ForeignKey("mixes.id", ondelete="CASCADE"))
     position: Mapped[int] = mapped_column(Integer)  # order in the mix; the reserve after the 50, best first
     state: Mapped[str] = mapped_column(String(16), default="active")  # active/reserve/failed
+    offered_at: Mapped[datetime | None] = mapped_column(DateTime)  # first active and ready, not merely a reserve
     familiar: Mapped[bool] = mapped_column(Boolean, default=False)
     ref: Mapped[str | None] = mapped_column(String(64), index=True)  # catalog track
     nd_song_id: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -535,14 +537,15 @@ class WaveSession(Base):
 
 
 class WaveItem(Base):
-    """A track a wave handed out (INSIGHTS.md 6.4), once per session: analytics only, the wave never reads it."""
+    """A ready track handed out by a wave, once per session: decision analytics and recent-offer memory."""
 
     __tablename__ = "wave_items"
-    __table_args__ = (UniqueConstraint("session_id", "ref", name="uq_wave_items_session_ref"),)
+    __table_args__ = (UniqueConstraint("session_id", "ref", name="uq_wave_items_session_ref"),
+                      Index("ix_wave_items_user_first_handed", "user_id", "first_handed_at"))
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("wave_sessions.id", ondelete="CASCADE"), index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     first_handed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_handed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     handed_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
