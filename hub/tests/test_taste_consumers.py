@@ -2,6 +2,8 @@
 import json
 from collections import Counter
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -172,6 +174,47 @@ async def test_stale_space_discards_partial_similarity_and_all_old_vectors(monke
     assert result == ({} if fail_twice else {c.key: [0, 1]})
     assert c.sim == (None if fail_twice else .2)
     assert (p.geometry.space_id if p.geometry else None) == (None if fail_twice else "new")
+
+
+@pytest.mark.parametrize("consumer", ["mix", "wave"])
+async def test_uncached_catalog_dislike_demotes_similar_tracks_outside_the_library(monkeypatch, respx_mock, consumer):
+    base = "http://embedder.test"
+    monkeypatch.setenv("EMBEDDER_URL", base)
+    monkeypatch.setenv("MIX_POLL_S", "0")
+    monkeypatch.setenv("MIX_EMBED_WAIT_S", "5")
+    preview = "https://preview.example/disliked.mp3"
+    monkeypatch.setattr(build.svc, "deezer", SimpleNamespace(preview_url=AsyncMock(return_value=preview)))
+    monkeypatch.setattr(build, "library_items", AsyncMock(return_value=[]))
+    p, similar, unrelated = vp(), cand(2), cand(3)
+    p.explicit_negative_keys.add("dz:1")
+    queued = respx_mock.post(base + "/embed", json={"items": [{"key": "dz:1", "url": preview}]})
+    queued.respond(json={"queued": 1})
+    missing = {**profile_body(), "facets": [], "negatives": [], "missing": ["dz:1"]}
+    ready = {**missing, "negatives": ["dz:1"], "missing": []}
+    # Candidates already have scores while the disliked preview is still being analyzed.
+    respx_mock.post(base + "/v2/profile").mock(side_effect=[
+        httpx.Response(200, json=row) for row in (missing, missing, ready)])
+
+    def similarity(request):
+        active = "dz:1" in json.loads(request.content)["negatives"]
+        scores = [{"key": c.key, "pos": 0, "neg": neg, "score": -.5 * neg}
+                  for c, neg in [(similar, int(active)), (unrelated, 0)]]
+        return httpx.Response(200, json={**SPACE, "missing": [], "results": scores, "diagnostics": DIAGNOSTICS})
+
+    respx_mock.post(base + "/v2/similarity").mock(side_effect=similarity)
+    respx_mock.post(base + "/v2/vectors").respond(json={**SPACE, "missing": [], "diagnostics": DIAGNOSTICS,
+                                                        "vectors": {similar.key: [1, 0], unrelated.key: [0, 1]}})
+    if consumer == "mix":
+        await build.sound(p, [similar, unrelated], {})
+    else:
+        rt = wave.Runtime(1, "normal", wave.State(taste_model="v2"), profile=p)
+        rt.state.pool.update((c.key, c) for c in (similar, unrelated))
+        for _ in range(2):
+            await wave._vectors(rt)
+            assert similar.score == unrelated.score  # keep handing out music until analysis completes
+        await wave._vectors(rt)
+        assert similar.score < unrelated.score
+    assert queued.call_count == 1 and build.score(similar, {}, p) < build.score(unrelated, {}, p)
 
 
 async def test_old_embedder_or_down_drops_sound_without_raw_fallback(monkeypatch, respx_mock):

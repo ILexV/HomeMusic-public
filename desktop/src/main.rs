@@ -83,8 +83,8 @@ enum HubEvent {
         starred: bool,
     },
     SongDislike {
-        id: String,
-        disliked: bool,
+        track: hub::DislikedTrack,
+        result: Result<Option<hub::DislikedTrack>, String>,
     },
     Download {
         reference: String,
@@ -125,6 +125,7 @@ struct HubState {
     modes: RefCell<std::rc::Weak<queue_modes::State>>,
     marks: RefCell<hub::Marks>,
     pending_reference_stars: RefCell<HashSet<String>>,
+    pending_dislikes: RefCell<Vec<(hub::DislikedTrack, bool)>>,
     hits: RefCell<Vec<hub::CatalogHit>>,
     album_id: RefCell<String>,
     catalog_open: Cell<bool>,
@@ -198,6 +199,7 @@ impl HubState {
             modes: RefCell::new(std::rc::Weak::new()),
             marks: RefCell::new(hub::Marks::default()),
             pending_reference_stars: RefCell::new(HashSet::new()),
+            pending_dislikes: RefCell::new(Vec::new()),
             hits: RefCell::new(Vec::new()),
             album_id: RefCell::new(String::new()),
             catalog_open: Cell::new(false),
@@ -886,8 +888,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(ui) = ui_dislike.upgrade() else {
             return;
         };
-        let item = queue_dislike.borrow().current().cloned();
-        let Some(item) = item else {
+        let queue = queue_dislike.borrow();
+        let Some(item) = queue.current() else {
             remember_note(
                 &ui,
                 &player_dislike.borrow(),
@@ -897,32 +899,37 @@ fn main() -> Result<(), slint::PlatformError> {
             );
             return;
         };
-        if item.id.is_empty() {
+        if item.id.is_empty() && item.listen_ref.is_empty() {
             remember_note(
                 &ui,
                 &player_dislike.borrow(),
                 &hub_dislike,
                 &status_dislike,
-                "Дизлайк только у треков библиотеки",
+                "У трека нет идентификатора библиотеки или ссылки на каталог",
             );
             return;
         }
-        let was = hub_dislike.marks.borrow().disliked.contains(&item.id);
-        {
-            let mut marks = hub_dislike.marks.borrow_mut();
-            if was {
-                marks.disliked.remove(&item.id);
-            } else {
-                marks.disliked.insert(item.id.clone());
-            }
+        if hub_dislike.pending_dislikes.borrow().iter().any(|(t, _)| t.matches(&item.id, &item.listen_ref)) {
+            return;
         }
-        let id = item.id.clone();
+        let marks = hub_dislike.marks.borrow();
+        let existing = marks.disliked.iter().find(|t| t.matches(&item.id, &item.listen_ref));
+        let was = existing.is_some();
+        let track = hub::DislikedTrack {
+            id: if item.id.is_empty() { existing.map(|t| t.id.clone()).unwrap_or_default() } else { item.id.clone() },
+            reference: if item.listen_ref.is_empty() { existing.map(|t| t.reference.clone()).unwrap_or_default() } else { item.listen_ref.clone() },
+        };
+        drop(marks);
+        hub_dislike.pending_dislikes.borrow_mut().push((track.clone(), !was));
         let artist = item.artist.clone();
         let title = item.title.clone();
+        if !was {
+            note_wave_leave(&player_dislike.borrow(), item, &hub_dislike, false);
+        }
+        drop(queue);
         if was {
             paint_track_marks(&ui, &queue_dislike.borrow(), &hub_dislike);
         } else {
-            note_wave_leave(&player_dislike.borrow(), &item, &hub_dislike, false);
             let moved = queue_dislike.borrow_mut().next();
             if moved {
                 jump(
@@ -943,14 +950,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let events = Arc::clone(&hub_dislike.events);
         std::thread::spawn(move || {
             let result = if was {
-                client.undislike_song(&id)
+                client.undislike_song(&track).map(|()| None)
             } else {
-                client.dislike_song(&id, &artist, &title)
+                client.dislike_song(&track, &artist, &title).map(Some)
             };
-            if let Err(message) = result {
-                push_event(&events, HubEvent::SongDislike { id, disliked: was });
-                push_event(&events, HubEvent::Note(message));
-            }
+            push_event(&events, HubEvent::SongDislike { track, result });
         });
     });
 
@@ -1914,7 +1918,12 @@ fn paint_track_marks(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
             !item.listen_ref.is_empty() && marks.refs.contains(&item.listen_ref)
         }
     }));
-    ui.set_disliked(item.is_some_and(|item| !item.id.is_empty() && marks.disliked.contains(&item.id)));
+    ui.set_disliked(item.is_some_and(|item| {
+        hub.pending_dislikes.borrow().iter()
+            .find(|(t, _)| t.matches(&item.id, &item.listen_ref))
+            .map(|(_, disliked)| *disliked)
+            .unwrap_or_else(|| marks.disliked.iter().any(|t| t.matches(&item.id, &item.listen_ref)))
+    }));
     let album_id = hub.album_id.borrow();
     ui.set_album_known(!album_id.is_empty());
     ui.set_album_liked(!album_id.is_empty() && marks.albums.contains(album_id.as_str()));
@@ -2062,12 +2071,15 @@ fn apply_hub_events(
                 }
                 refresh_marks = true;
             }
-            HubEvent::SongDislike { id, disliked } => {
-                let mut marks = hub.marks.borrow_mut();
-                if disliked {
-                    marks.disliked.insert(id);
-                } else {
-                    marks.disliked.remove(&id);
+            HubEvent::SongDislike { track, result } => {
+                hub.pending_dislikes.borrow_mut().retain(|(t, _)| t != &track);
+                match result {
+                    Ok(saved) => {
+                        let mut marks = hub.marks.borrow_mut();
+                        marks.disliked.retain(|t| !t.matches(&track.id, &track.reference));
+                        if let Some(saved) = saved { marks.disliked.push(saved); }
+                    }
+                    Err(message) => *hub.hub_note.borrow_mut() = message,
                 }
                 refresh_marks = true;
             }

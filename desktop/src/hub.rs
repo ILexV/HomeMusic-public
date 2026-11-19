@@ -10,22 +10,29 @@ use serde_json::Value;
 
 const CLIENT: &str = "desktop";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Marks {
     pub songs: HashSet<String>,
     pub albums: HashSet<String>,
     pub refs: HashSet<String>,
-    pub disliked: HashSet<String>,
+    pub disliked: Vec<DislikedTrack>,
 }
 
-impl Default for Marks {
-    fn default() -> Self {
-        Self {
-            songs: HashSet::new(),
-            albums: HashSet::new(),
-            refs: HashSet::new(),
-            disliked: HashSet::new(),
-        }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DislikedTrack {
+    pub id: String,
+    pub reference: String,
+}
+
+impl DislikedTrack {
+    fn from_row(row: &Value) -> Option<Self> {
+        let id = text(row, "nd_song_id");
+        let reference = text(row, "ref");
+        (!id.is_empty() || !reference.is_empty()).then_some(Self { id, reference })
+    }
+
+    pub fn matches(&self, id: &str, reference: &str) -> bool {
+        (!id.is_empty() && self.id == id) || (!reference.is_empty() && self.reference == reference)
     }
 }
 
@@ -84,7 +91,7 @@ impl Hub {
         let starred = self.send("GET", "/api/starred", None)?;
         let mut marks = parse_starred(&starred);
         if let Ok(dislikes) = self.send("GET", "/api/dislikes", None) {
-            marks.disliked = parse_dislike_ids(&dislikes);
+            marks.disliked = parse_dislikes(&dislikes);
         }
         Ok(marks)
     }
@@ -116,22 +123,20 @@ impl Hub {
         Ok(())
     }
 
-    pub fn dislike_song(&self, id: &str, artist: &str, title: &str) -> Result<(), String> {
-        self.send(
-            "POST",
-            "/api/dislikes",
-            Some(serde_json::json!({
-                "nd_song_id": id,
-                "artist": artist,
-                "title": title,
-                "client": CLIENT,
-            })),
-        )?;
-        Ok(())
+    pub fn dislike_song(&self, track: &DislikedTrack, artist: &str, title: &str) -> Result<DislikedTrack, String> {
+        let mut body = serde_json::json!({ "artist": artist, "title": title, "client": CLIENT });
+        if !track.id.is_empty() { body["nd_song_id"] = Value::from(track.id.as_str()); }
+        if !track.reference.is_empty() { body["ref"] = Value::from(track.reference.as_str()); }
+        let row = self.send("POST", "/api/dislikes", Some(body))?;
+        DislikedTrack::from_row(&row).ok_or_else(|| "Хаб: в ответе на дизлайк нет трека".into())
     }
 
-    pub fn undislike_song(&self, id: &str) -> Result<(), String> {
-        let path = format!("/api/dislikes?nd_song_id={}", encode(id));
+    pub fn undislike_song(&self, track: &DislikedTrack) -> Result<(), String> {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("client", CLIENT);
+        if !track.id.is_empty() { query.append_pair("nd_song_id", &track.id); }
+        if !track.reference.is_empty() { query.append_pair("ref", &track.reference); }
+        let path = format!("/api/dislikes?{}", query.finish());
         self.send("DELETE", &path, None)?;
         Ok(())
     }
@@ -436,21 +441,12 @@ pub fn parse_starred(value: &Value) -> Marks {
         songs: ids("song_ids"),
         albums: ids("album_ids"),
         refs: ids("refs"),
-        disliked: HashSet::new(),
+        disliked: Vec::new(),
     }
 }
 
-pub fn parse_dislike_ids(value: &Value) -> HashSet<String> {
-    value
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.get("nd_song_id").and_then(Value::as_str))
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+fn parse_dislikes(value: &Value) -> Vec<DislikedTrack> {
+    value.as_array().into_iter().flatten().filter_map(DislikedTrack::from_row).collect()
 }
 
 pub fn parse_search(value: &Value) -> Vec<CatalogHit> {
@@ -1279,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn starred_and_dislikes_keep_ids_only() {
+    fn starred_and_dislikes_recognize_catalog_and_library_tracks() {
         let marks = parse_starred(&serde_json::json!({
             "song_ids": ["s1", ""],
             "album_ids": ["a1"],
@@ -1288,11 +1284,17 @@ mod tests {
         assert_eq!(marks.songs, HashSet::from(["s1".into()]));
         assert_eq!(marks.albums, HashSet::from(["a1".into()]));
         assert_eq!(marks.refs, HashSet::from(["dz:1".into()]));
-        let disliked = parse_dislike_ids(&serde_json::json!([
-            {"id": 1, "nd_song_id": "s1", "title": "V"},
-            {"id": 2, "ref": "dz:9"}
+        let disliked = parse_dislikes(&serde_json::json!([
+            {"nd_song_id": "s1", "ref": "dz:1"},
+            {"ref": "dz:9"},
+            {"nd_song_id": "s2"},
+            {"artist_ref": "dz:artist"}
         ]));
-        assert_eq!(disliked, HashSet::from(["s1".into()]));
+        let marked = |id, reference| disliked.iter().any(|track| track.matches(id, reference));
+        assert!(marked("", "dz:9"));
+        assert!(marked("s2", ""));
+        assert!(marked("", "dz:1") && marked("s1", ""));
+        assert!(!marked("", "") && !marked("dz:9", "") && !marked("", "dz:artist"));
     }
 
     #[test]

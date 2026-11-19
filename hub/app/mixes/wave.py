@@ -656,10 +656,18 @@ async def _vectors(rt: Runtime) -> dict[str, list[float]]:
         for c in candidates:
             c.score = build.score(c, weights(), p)
         if p.geometry:
+            # Reserve part of the existing batch for explicit dislikes, even if
+            # those tracks never appeared in this session's candidate pool.
+            missing = build.missing_dislike_previews(p)
+            now = time.monotonic()
+            due = (k for k in missing if k not in rt.asked or now - rt.asked[k] >= ASK_AGAIN_S)
+            keys = sorted(due, key=lambda k: rt.asked.get(k, -math.inf))[:SIGNALS_MAX]
+            previews = {k: missing[k] for k in keys}
+            rt.asked.update((k, now) for k in keys)
             todo = sorted((c for c in candidates if c.sim is None and c.track.source == "dz"),
-                          key=lambda c: -c.score)[:EMBED_NEW]
-            urls = await asyncio.gather(*(build._preview(c.track) for c in todo))
-            items = [{"key": c.key, "url": url} for c, url in zip(todo, urls, strict=True) if url]
+                          key=lambda c: -c.score)[:EMBED_NEW - len(previews)]
+            previews.update((c.key, c.track.id) for c in todo)
+            items = await build.preview_items(previews)
             if items:
                 try:
                     async with embedder.EmbedderClient() as client:

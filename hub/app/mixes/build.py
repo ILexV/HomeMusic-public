@@ -23,6 +23,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import batched
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -486,12 +487,36 @@ async def library_items() -> list[dict[str, str]]:
 
 
 async def _preview(c: CatalogTrack) -> str | None:
-    if c.source != "dz" or svc.deezer is None:
+    return await _deezer_preview(c.id) if c.source == "dz" else None
+
+
+async def _deezer_preview(track_id: str) -> str | None:
+    if svc.deezer is None:
         return None
     try:
-        return await svc.deezer.preview_url(c.id)
+        return await svc.deezer.preview_url(track_id)
     except Exception:
         return None
+
+
+def missing_dislike_previews(p: V2Profile) -> dict[str, str]:
+    """Disliked tracks are filtered out before ranking; their catalog ref alone can supply audio."""
+    previews = {}
+    if p.geometry:
+        for key in p.geometry.missing:
+            if key in p.explicit_negative_keys:
+                source, _, track_id = key.partition(":")
+                if source == "dz" and track_id.isascii() and track_id.isdecimal():
+                    previews[key] = track_id
+    return previews
+
+
+async def preview_items(previews: dict[str, str]) -> list[dict[str, str]]:
+    items = []
+    for batch in batched(previews.items(), 32):
+        urls = await asyncio.gather(*(_deezer_preview(track_id) for _, track_id in batch))
+        items.extend({"key": key, "url": url} for (key, _), url in zip(batch, urls, strict=True) if url)
+    return items
 
 
 async def sound(p: Profile, cands: list[Cand], stats: dict[str, Any]) -> dict[str, list[float]]:
@@ -547,19 +572,22 @@ async def _sound_v2(p: V2Profile, cands: list[Cand], stats: dict[str, Any]) -> d
         except embedder.EmbedderDown:
             pass
     vectors = await geometry_scores(p, cands)
-    todo = [c for c in cands if c.sim is None and c.track.source == "dz"]
-    urls = await asyncio.gather(*(_preview(c.track) for c in todo)) if p.geometry else []
-    items = [{"key": c.key, "url": url} for c, url in zip(todo, urls, strict=False) if url]
+    previews = missing_dislike_previews(p)
+    if p.geometry:
+        previews.update((c.key, c.track.id) for c in cands if c.sim is None and c.track.source == "dz")
+    items = await preview_items(previews)
     if items:
         try:
             async with embedder.EmbedderClient() as client:
                 await client.embed(items)
+            pending = {item["key"] for item in items}
             settings = get_settings()
             deadline = time.monotonic() + settings.mix_embed_wait_s
             while time.monotonic() < deadline:
                 await asyncio.sleep(settings.mix_poll_s)
                 vectors = await geometry_scores(p, cands)
-                if all(c.sim is not None for c in todo):
+                if p.geometry is None or (pending.isdisjoint(p.geometry.missing)
+                                          and all(c.sim is not None for c in cands if c.key in pending)):
                     break
         except embedder.EmbedderDown:
             pass
