@@ -20,7 +20,7 @@ import hashlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from itertools import batched
@@ -499,16 +499,16 @@ async def _deezer_preview(track_id: str) -> str | None:
         return None
 
 
-def missing_dislike_previews(p: V2Profile) -> dict[str, str]:
-    """Disliked tracks are filtered out before ranking; their catalog ref alone can supply audio."""
-    previews = {}
-    if p.geometry:
-        for key in p.geometry.missing:
-            if key in p.explicit_negative_keys:
-                source, _, track_id = key.partition(":")
-                if source == "dz" and track_id.isascii() and track_id.isdecimal():
-                    previews[key] = track_id
-    return previews
+def missing_feedback(p: V2Profile, missing: Iterable[str]) -> dict[str, str | None]:
+    """Catalog likes and dislikes needing audio; non-Deezer refs can only use the heard copy."""
+    feedback = {}
+    for key in missing:
+        if key.startswith("nd:") or not (key in p.explicit_negative_keys or
+                                         ((track := p.tracks.get(key)) and track.liked)):
+            continue
+        source, _, track_id = key.partition(":")
+        feedback[key] = track_id if source == "dz" and track_id.isascii() and track_id.isdecimal() else None
+    return feedback
 
 
 async def preview_items(previews: dict[str, str]) -> list[dict[str, str]]:
@@ -572,8 +572,9 @@ async def _sound_v2(p: V2Profile, cands: list[Cand], stats: dict[str, Any]) -> d
         except embedder.EmbedderDown:
             pass
     vectors = await geometry_scores(p, cands)
-    previews = missing_dislike_previews(p)
+    previews = {}
     if p.geometry:
+        previews.update((key, dz) for key, dz in missing_feedback(p, p.geometry.missing).items() if dz)
         previews.update((c.key, c.track.id) for c in cands if c.sim is None and c.track.source == "dz")
     items = await preview_items(previews)
     if items:

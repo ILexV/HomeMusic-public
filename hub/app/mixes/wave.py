@@ -657,24 +657,22 @@ async def _vectors(rt: Runtime) -> dict[str, list[float]]:
         for c in candidates:
             c.score = build.score(c, weights(), p)
         if p.geometry:
-            # Reserve part of the existing batch for explicit dislikes, even if
-            # those tracks never appeared in this session's candidate pool.
-            missing = build.missing_dislike_previews(p)
+            # A liked session track can lack a vector even below the global profile's weight cutoff.
+            missing = build.missing_feedback(p, set(p.geometry.missing) | (set(st.pos) - rt.vectors.keys()))
             now = time.monotonic()
-            due = (k for k in p.geometry.missing if k in p.explicit_negative_keys and not k.startswith("nd:")
-                   and (k not in rt.asked or now - rt.asked[k] >= ASK_AGAIN_S))
+            due = (k for k in missing if k not in rt.asked or now - rt.asked[k] >= ASK_AGAIN_S)
             previews = {}
             requested = 0
-            for key in sorted(due, key=lambda k: rt.asked.get(k, -math.inf)):
+            for key in sorted(due, key=lambda k: (rt.asked.get(k, -math.inf), k)):
                 if not heard_audio.schedule(rt.user_id, key):
-                    if key not in missing:
+                    if not (track_id := missing[key]):
                         continue
-                    previews[key] = missing[key]
+                    previews[key] = track_id
                 rt.asked[key] = now
                 requested += 1
                 if requested >= SIGNALS_MAX:
                     break
-            todo = sorted((c for c in candidates if c.sim is None and c.track.source == "dz"),
+            todo = sorted((c for c in candidates if c.sim is None and c.track.source == "dz" and c.key not in missing),
                           key=lambda c: -c.score)[:EMBED_NEW - requested]
             previews.update((c.key, c.track.id) for c in todo)
             items = await build.preview_items(previews)

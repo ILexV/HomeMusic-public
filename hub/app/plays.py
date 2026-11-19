@@ -283,12 +283,14 @@ async def record_events(s: AsyncSession, user_id: int, raw: Iterable[Any], now: 
 
             confirm_wave_start(user_id, ref, values["ts"])
         if e.kind in ("like", "unlike"):
-            from app.favorites import remember
+            from app.favorites import analyze_liked_track, remember
             from app.api.schemas import FavoriteTarget
 
-            await remember(s, FavoriteTarget(target_type=e.target_type, ref=ref, nd_song_id=nd,
-                                             nd_album_id=e.nd_album_id, nd_artist_id=e.nd_artist_id,
-                                             target_data=e.target_data))
+            subject = await remember(s, FavoriteTarget(target_type=e.target_type, ref=ref, nd_song_id=nd,
+                                                       nd_album_id=e.nd_album_id, nd_artist_id=e.nd_artist_id,
+                                                       target_data=e.target_data))
+            if e.kind == "like" and not e.reverts_event_id:
+                analyze_liked_track(user_id, subject)
         if e.kind in PLAY_KINDS and nd and e.client != "navidrome":
             await _drop_scrobbles_near(s, user_id, PlayEvent(**values))
         if e.kind == "dislike":

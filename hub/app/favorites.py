@@ -286,6 +286,13 @@ async def remember(s: AsyncSession, target: FavoriteTarget, *, extra_aliases: It
     return row
 
 
+def analyze_liked_track(user_id: int, subject: FavoriteSubject) -> None:
+    if subject.target_type == "track" and subject.ref and not subject.nd_id:
+        from app.mixes.heard_audio import schedule
+
+        schedule(user_id, subject.ref)
+
+
 async def record(s: AsyncSession, user_id: int, target: FavoriteTarget, liked: bool, *,
                  operation: str | None = None, ts: datetime | None = None, client: str = "hub",
                  context: str | None = None, reverts_event_id: str | None = None,
@@ -298,10 +305,12 @@ async def record(s: AsyncSession, user_id: int, target: FavoriteTarget, liked: b
     row = await remember(s, target)
     eid = event_id or decision_id(operation or uuid.uuid4().hex, target.target_type, row.canonical_key)
     now = utcnow()
-    await s.execute(insert(PlayEvent).values(
+    inserted = await s.execute(insert(PlayEvent).values(
         **target.model_dump(), user_id=user_id, event_id=eid, ts=event_time(ts or now, now) if normalize else ts or now,
         kind="like" if liked else "unlike", client=client, context=context, received_at=now,
         reverts_event_id=reverts_event_id, mirror_pending=mirror_pending).on_conflict_do_nothing())
+    if inserted.rowcount and liked and not reverts_event_id:
+        analyze_liked_track(user_id, row)
     return (await s.execute(select(PlayEvent).where(PlayEvent.user_id == user_id, PlayEvent.event_id == eid))).scalar_one()
 
 

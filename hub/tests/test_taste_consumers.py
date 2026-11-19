@@ -217,6 +217,35 @@ async def test_uncached_catalog_dislike_demotes_similar_tracks_outside_the_libra
     assert queued.call_count == 1 and build.score(similar, {}, p) < build.score(unrelated, {}, p)
 
 
+async def test_wave_retries_heard_like_without_preview_and_promotes_similar_candidate(monkeypatch):
+    from app.mixes import heard_audio
+
+    ref = "file:hitmoz:123"
+    liked = TasteTrack(ref, ref=ref, liked=True, score=.5)  # below the global geometry cutoff
+    p = vp(liked)
+    st = wave.State(taste_model="v2", pos=[ref], positive_weights={ref: 1})
+    rt = wave.Runtime(1, "normal", st, profile=p)
+    unrelated, similar = cand(2), cand(3)
+    st.pool.update((c.key, c) for c in (unrelated, similar))
+    vectors = {unrelated.key: [0, 1], similar.key: [1, 0]}
+
+    async def geometry(profile, candidates, extra_keys):
+        profile.geometry = embedder.GeometryProfile(**{**profile_body(), "facets": [], "negatives": []})
+        for c in candidates:
+            c.sim = 0
+        return {k: vectors[k] for k in [*(c.key for c in candidates), *extra_keys] if k in vectors}
+
+    def analyze(user_id, key):
+        assert (user_id, key) == (rt.user_id, ref)
+        vectors[key] = [1, 0]
+        return True
+
+    monkeypatch.setattr(taste_select, "geometry_scores", geometry)
+    monkeypatch.setattr(heard_audio, "schedule", analyze)
+    assert wave.pick(st, p, "normal", await wave._vectors(rt), n=1) == [unrelated]
+    assert wave.pick(st, p, "normal", await wave._vectors(rt), n=1) == [similar]
+
+
 async def test_old_embedder_or_down_drops_sound_without_raw_fallback(monkeypatch, respx_mock):
     monkeypatch.setenv("EMBEDDER_URL", "http://embedder.test")
     get_settings.cache_clear()
