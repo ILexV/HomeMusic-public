@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import httpx
 import numpy as np
 
-from . import audio
+from . import audio, clip
 from .config import Settings
 from .db import Item, Store
 from .models import GpuBusy, Model
@@ -115,6 +115,8 @@ class Worker:
     async def _prepare_one(self, it: Item) -> np.ndarray | None:
         async with self._sem:
             try:
+                if it.kind == "clip":
+                    return await audio.decode(clip.clip_path(self.store.clip_dir, it.key), sr=self.sr, clip_s=self.s.clip_s)
                 return await audio.load(
                     self.client, it.kind, it.source, music_root=self.s.music_root, sr=self.sr,
                     clip_s=self.s.clip_s, max_bytes=self.s.max_download_mb * 2**20,

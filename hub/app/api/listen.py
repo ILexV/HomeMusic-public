@@ -2,18 +2,50 @@
 
 from __future__ import annotations
 
+import os
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from app import listen, recording_feedback
 from app.api.schemas import ListenOut, ListenPrefetchIn, ListenPrefetchOut
 from app.auth import current_user
-from app.models import User
+from app.models import User, utcnow
 
 router = APIRouter(prefix="/api/listen", tags=["listen"])
+
+
+class _ListenFileResponse(FileResponse):
+    """Observe Starlette's actual descriptor after Range validation, not a stat of a path it may never open."""
+
+    def __init__(self, media, *, on_open, whole_prefetch, headers):
+        super().__init__(media.path, media_type=media.media_type, headers=headers)
+        self.on_open = on_open
+        self.whole_prefetch = whole_prefetch
+
+    @asynccontextmanager
+    async def _open_file(self):
+        async with super()._open_file() as f:
+            st = os.fstat(f.fileno())
+            delivery = await self.on_open(st)
+            yield f
+            # The ASGI server can cancel this task as soon as the final body leaves. No suspension between a
+            # successful full send and recording it; tell() only inspects this already open local descriptor.
+            if (self.whole_prefetch and delivery and delivery.recording and not delivery.precached_at
+                    and f.wrapped.tell() == st.st_size):
+                delivery.precached_at = utcnow()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # A pathsend bypasses _open_file, so it couldn't establish the file's identity.
+        if "http.response.pathsend" in scope.get("extensions", {}):
+            extensions = dict(scope["extensions"])
+            del extensions["http.response.pathsend"]
+            scope = {**scope, "extensions": extensions}
+        await super().__call__(scope, receive, send)
 
 
 async def _choose(ref: str, *, full: bool = False, user_id: int | None = None) -> listen.Choice:
@@ -40,7 +72,8 @@ async def resolve(ref: str, full: bool = False, user: User = Depends(current_use
         page_url=cand.page_url if cand else None,
         nd_song_id=c.nd_song_id,
         recording_binding=binding,
-        stream_url=f"/api/listen/stream?ref={quote(c.ref, safe='')}&binding={quote(binding, safe='')}",
+        stream_url=(f"/api/listen/stream?ref={quote(c.ref, safe='')}&binding={quote(binding, safe='')}"
+                    + ("&full=1" if full else "")),
     )
 
 
@@ -62,16 +95,20 @@ async def stream(ref: str, request: Request, q: str | None = None, full: bool = 
     # the app loads the next tracks of its queue ahead (`X-HomeMusic-Prefetch`): that is no listen yet, its
     # `start` event is (app/api/plays.py), and its server copy waits for those of played tracks
     ahead = request.headers.get("x-homemusic-prefetch") == "1"
+    epoch = listen._rejection_epoch
     try:
         m = await listen.open_media(ref, rng or None, ahead=ahead, quality=q, full_only=full, user_id=user.id)
     except listen.ListenError as e:
         raise HTTPException(e.status, str(e)) from e
-    if not ahead and (m.path is not None or m.status in (200, 206)):
-        ready = listen._full_results.get(ref)
-        verified = (True if ready and listen._full_status(ref) == "ready"
-                    and ready.choice is not None
-                    and listen._file_ident(ready.choice) == listen._file_ident(m.choice) else None)
-        await recording_feedback.record_stream(user.id, m.choice, binding_id=binding, full_verified=verified)
+
+    async def opened(st: os.stat_result | None = None):
+        recording = listen._verified_media(m, st)
+        # Persist the existing reporting binding before marking this response as successfully opened.
+        if not ahead:
+            await recording_feedback.record_stream(user.id, m.choice, binding_id=binding,
+                                                   full_verified=True if recording else None)
+        return listen._observe_wave_stream(user.id, m, full=full, ahead=ahead, epoch=epoch, recording=recording)
+
     if m.choice.kind == "full" and not ahead and (not rng or rng.startswith("bytes=0-")):
         from app.imports.core import listened
 
@@ -80,7 +117,10 @@ async def stream(ref: str, request: Request, q: str | None = None, full: bool = 
     if m.variant:
         variant["X-HomeMusic-Variant"] = m.variant
     if m.path is not None:
-        return FileResponse(m.path, media_type=m.media_type, headers={"Cache-Control": "no-store", **variant})
+        return _ListenFileResponse(m, on_open=opened, whole_prefetch=ahead and rng in ("", "bytes=0-"),
+                                   headers={"Cache-Control": "no-store", **variant})
+    if m.body is not None and m.status in (200, 206):
+        await opened()
     headers = {**m.headers, "accept-ranges": "bytes", "cache-control": "no-store", **variant}
     if m.body is None:
         return Response(status_code=m.status, headers=headers)

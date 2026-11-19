@@ -14,7 +14,7 @@ import pytest
 
 from app import light
 from tests.support import cand
-from tests.test_listen import AUDIO, env, search_files  # noqa: F401  (the fixture)
+from tests.test_listen import AUDIO, env, search_files, wave_copy  # noqa: F401 (fixtures)
 
 VARIANT = "x-homemusic-variant"
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is needed")
@@ -245,6 +245,36 @@ async def test_catalog_track_is_lightened_from_its_server_copy(env, fake_encoder
     # the plain stream is the original, as ever
     r = await c.get("/api/listen/stream", params={"ref": "file:hitmoz:1"})
     assert r.content == AUDIO and VARIANT not in r.headers
+
+
+@pytest.mark.parametrize("evict", ["source", "rendition"])
+async def test_verified_wave_mobile_pins_the_served_opus(wave_copy, fake_encoder, monkeypatch, evict):
+    from app import listen
+    from app.db import session_scope
+    from app.recording_models import RecordingBinding
+
+    async def heavy(path, timeout=60):
+        return SimpleNamespace(bitrate_kbps=320)
+
+    monkeypatch.setattr(light, "probe", heavy)
+    client, user, ref, resolved = wave_copy
+    r = await client.get(resolved["stream_url"] + "&q=mobile")
+    assert r.status_code == 200 and r.headers[VARIANT] == light.LIGHT
+    async with session_scope() as s:
+        binding = await s.get(RecordingBinding, resolved["recording_binding"])
+        assert binding.full_verified is True
+    f, expected_duration = listen.open_heard_wave_recording(user, ref)
+    with f:
+        rendition = Path(f.name)
+        assert rendition.parent == light.root() and expected_duration == 245.25
+        assert f.read() == r.content == b"OggS" + AUDIO[:len(AUDIO) // 2]
+        assert listen.open_heard_wave_recording(user + 1, ref) is None
+        if evict == "source":
+            listen._full_results[ref].path.unlink()
+        else:
+            rendition.unlink()
+            rendition.write_bytes(r.content)  # even identically named Opus of the same size is not the served inode
+        assert listen.open_heard_wave_recording(user, ref) is None
 
 
 async def test_catalog_track_that_is_light_already_is_served_as_it_is(env, fake_encoder, monkeypatch):

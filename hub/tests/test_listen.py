@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 
+from app.models import utcnow
 from tests.support import FakeDeezer, FakeProvider, app_client, cand
 
 AUDIO = bytes(range(256)) * 1024  # 256 KiB standing in for an MP3
@@ -105,6 +106,104 @@ async def env(hub_env):
             config.get_settings().cfg.sources.ru = ["hitmoz", "hitmos_fm"]
             async with app_client(app) as client:
                 yield {"client": client, "hm": hm, "fm": fm, "mock": mock, "music": music, "app": app}
+
+
+@pytest.fixture
+async def wave_copy(env, monkeypatch):
+    from app import listen
+    from app.library.probe import ProbeInfo
+
+    async def measure(path, *, timeout):
+        assert path.read_bytes() == AUDIO
+        return ProbeInfo(duration_s=245.25, codec="mp3")
+
+    env["hm"].cands = [cand("1", "https://cdn.test/good.mp3")]
+    monkeypatch.setattr(listen, "probe", measure)
+    client = env["client"]
+    user = (await client.get("/api/auth/me")).json()["id"]
+    ref = "dz:100"
+    assert await listen.prepare_full(user, [ref], timeout_s=5) == {ref: "ready"}
+    resolved = (await client.get("/api/listen", params={"ref": ref, "full": 1})).json()
+    assert listen.open_heard_wave_recording(user, ref) is None
+    return client, user, ref, resolved
+
+
+async def test_only_opened_verified_wave_file_is_pinned(wave_copy):
+    import os
+    from app import listen
+
+    client, user, ref, resolved = wave_copy
+    url = resolved["stream_url"]
+    # Neither resolving nor an unsatisfiable Range opens the audio descriptor.
+    assert (await client.get(url, headers={"Range": "bytes=9999999-"})).status_code == 416
+    assert listen.open_heard_wave_recording(user, ref) is None
+    assert (await client.get(url, headers={"Range": "bytes=10-99"})).content == AUDIO[10:100]
+    assert listen.open_heard_wave_recording(user + 1, ref) is None
+    f, duration = listen.open_heard_wave_recording(user, ref)
+    path = listen._full_results[ref].path
+    with f:
+        assert duration == 245.25
+        # Even an atomic replacement with restored size and timestamps must not inherit verification.
+        st = path.stat()
+        replacement = path.with_name("replacement")
+        replacement.write_bytes(b"!" * len(AUDIO))
+        os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+        replacement.replace(path)
+        assert listen.open_heard_wave_recording(user, ref) is None
+        assert f.read() == AUDIO  # the already handed-off descriptor didn't follow the new pathname
+    path.unlink()
+    assert listen.open_heard_wave_recording(user, ref) is None
+
+
+async def test_precache_needs_complete_delivery_and_subsequent_owned_wave_start(wave_copy):
+    from app import listen
+
+    client, user, ref, resolved = wave_copy
+    url = resolved["stream_url"]
+    old = utcnow()
+    ahead = {"X-HomeMusic-Prefetch": "1"}
+    assert (await client.get(url, headers={**ahead, "Range": "bytes=0-9"})).content == AUDIO[:10]
+    listen.confirm_wave_start(user, ref, utcnow())
+    assert listen.open_heard_wave_recording(user, ref) is None
+    assert (await client.get(url, headers=ahead)).content == AUDIO
+    listen.confirm_wave_start(user + 1, ref, utcnow())
+    listen.confirm_wave_start(user, ref, old)
+    assert listen.open_heard_wave_recording(user, ref) is None
+    listen.confirm_wave_start(user, ref, utcnow())
+    f, _ = listen.open_heard_wave_recording(user, ref)
+    with f:
+        assert f.read() == AUDIO
+    # An ordinary stream isn't a wave delivery; it invalidates rather than replacing a prior wave listen.
+    assert (await client.get("/api/listen/stream", params={"ref": ref})).content == AUDIO
+    assert listen.open_heard_wave_recording(user, ref) is None
+
+
+async def test_competing_precaches_cannot_be_disambiguated_by_a_ref_only_start(wave_copy):
+    from app import listen
+
+    client, user, ref, resolved = wave_copy
+    ahead = {"X-HomeMusic-Prefetch": "1"}
+    assert (await client.get(resolved["stream_url"], headers=ahead)).content == AUDIO
+    listen._full_results[ref].path.unlink()
+    assert await listen.prepare_full(user, [ref], timeout_s=5) == {ref: "ready"}
+    assert (await client.get(resolved["stream_url"], headers=ahead)).content == AUDIO
+    listen.confirm_wave_start(user, ref, utcnow())
+    assert listen.open_heard_wave_recording(user, ref) is None
+
+
+async def test_rejected_recording_and_unverified_private_fallback_are_not_analyzed(wave_copy, env):
+    from app import listen
+
+    client, user, ref, resolved = wave_copy
+    assert (await client.get(resolved["stream_url"])).content == AUDIO
+    assert (await client.post("/api/recording-feedback", json={
+        "ref": ref, "binding": resolved["recording_binding"]})).status_code == 200
+    assert listen.open_heard_wave_recording(user, ref) is None
+    env["hm"].cands = [cand("2", "https://cdn.test/good.mp3")]
+    assert (await client.get(resolved["stream_url"])).content == AUDIO
+    assert listen._user_choices[user, ref].candidate.provider_id == "2"
+    listen.confirm_wave_start(user, ref, utcnow())
+    assert listen.open_heard_wave_recording(user, ref) is None
 
 
 async def test_listen_picks_the_ranked_file_and_streams_ranges(env):
@@ -754,6 +853,7 @@ def test_local_copies_are_pruned(tmp_path, monkeypatch):
         f = d / "a.m4a"
         f.write_bytes(b"x" * size)
         os.utime(f, (now - age_s, now - age_s))
+        os.utime(d, (now - age_s, now - age_s))
 
     copy("old", listen.LOCAL_KEEP_S + 1)
     copy("busy", listen.LOCAL_KEEP_S + 1)  # being downloaded again

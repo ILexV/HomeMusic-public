@@ -5,7 +5,9 @@ from threading import Event
 import pytest
 import respx
 
-from .support import drain, running
+from app import clip
+
+from .support import drain, running, tone
 
 LIB = "Artist/Album"
 PREVIEW = "https://cdn.example/preview/450.mp3"
@@ -31,6 +33,93 @@ async def status(c, key):
     r = await c.get(f"/embed/{key}")
     assert r.status_code == 200, r.text
     return r.json()
+
+
+async def upload(c, key, data):
+    return await c.post("/embed/clip", params={"key": key}, content=data, headers={"Content-Type": "audio/wav"})
+
+
+async def test_uploaded_clip_survives_restart_and_is_not_replaced_by_preview(settings, previews, library):
+    key = "provider:album/track"
+    wav = tone(440, sr=24_000)
+    preview = {"key": key, "url": "https://cdn.example/gone.mp3"}
+    async with running(settings) as c:
+        await embed(c, preview)
+        assert (await upload(c, key, wav)).json() == {"queued": 1, "known": 0, "rejected": []}
+        assert (await embed(c, preview, force=True))["known"] == 1
+        assert (await upload(c, key, wav)).json()["known"] == 1
+        assert (await status(c, key))["has_clip"]
+        assert len(list(c.app.state.store.clip_dir.iterdir())) == 1
+        c.app.state.store.claim(1)
+    async with running(settings) as c:
+        assert (await status(c, key))["has_clip"]
+        await embed(c, {"key": "same_pitch", "path": f"{LIB}/a440_quiet.wav"},
+                    {"key": "other_pitch", "path": f"{LIB}/c2000.wav"})
+        await drain(c)
+        st = await status(c, key)
+        assert st["has_vector"] and not st["has_clip"] and st["seconds"] == pytest.approx(settings.clip_s)
+        assert (await c.post("/vectors", json={"keys": [key]})).json()["vectors"][key]
+        ranking = await c.post("/similarity", json={
+            "candidates": ["same_pitch", "other_pitch"], "profile": [{"key": key, "weight": -1}],
+        })
+        assert ranking.status_code == 200, ranking.text
+        scores = {r["key"]: r["score"] for r in ranking.json()["results"]}
+        assert scores["same_pitch"] < scores["other_pitch"]
+        assert (await upload(c, key, tone(900, sr=24_000))).json()["known"] == 1
+        assert (await embed(c, preview))["known"] == 1
+        assert not list(c.app.state.store.clip_dir.iterdir())
+        assert previews.calls.call_count == 0
+
+
+async def test_clip_waits_for_inflight_preview_and_takes_over_on_failure(client, previews):
+    await embed(client, {"key": "bad", "url": "https://cdn.example/gone.mp3"}, {"key": "ok", "url": PREVIEW})
+    st = client.app.state
+    pending = st.store.claim(2)
+    wav = tone(440, sr=24_000)
+    for key in ("bad", "ok"):
+        assert not (await status(client, key))["has_clip"]
+        assert (await upload(client, key, wav)).json()["queued"] == 1
+        item = await status(client, key)
+        assert item["status"] == "running" and item["has_clip"]
+    await st.worker.embed(await st.worker.prepare(pending))
+    assert (await status(client, "bad"))["status"] == "queued" and (await status(client, "bad"))["has_clip"]
+    assert (await status(client, "ok"))["has_vector"] and not (await status(client, "ok"))["has_clip"]
+    assert (await upload(client, "ok", wav)).json()["known"] == 1
+    await drain(client)
+    assert (await status(client, "bad"))["has_vector"] and not list(st.store.clip_dir.iterdir())
+    assert previews.calls.call_count == 2
+
+
+async def test_clip_capacity_is_reclaimed_after_terminal_failure(client, monkeypatch):
+    monkeypatch.setattr(clip, "MAX_PENDING", 1)
+    wav = tone(440, sr=24_000)
+    assert (await upload(client, "bad", wav)).json()["queued"] == 1
+    assert (await upload(client, "other", wav)).status_code == 503
+
+    def broken(_wavs):
+        raise ValueError("model failed")
+
+    monkeypatch.setattr(client.model, "embed_audio", broken)
+    await client.app.state.worker.step()
+    assert (await status(client, "bad"))["has_clip"]  # retry, not terminal
+    await drain(client)
+    item = await status(client, "bad")
+    assert item["status"] == "error" and not item["has_clip"]
+    assert not list(client.app.state.store.clip_dir.iterdir())
+    assert (await upload(client, "other", wav)).json()["queued"] == 1
+
+
+async def test_clip_rejects_wrong_format_and_oversized_stream(client, tones):
+    async def oversized():
+        yield bytes(clip.MAX_BYTES)
+        yield b"x"
+
+    assert (await client.post("/embed/clip?key=x", content=b"not a wav")).status_code == 415
+    for malformed in (tones["a440"], tone(440, sr=24_000)[:-1], tone(440, seconds=30.5, sr=24_000)):
+        assert (await upload(client, "x", malformed)).status_code == 422
+    assert (await upload(client, "x", oversized())).status_code == 413
+    assert (await client.get("/embed/x")).status_code == 404
+    assert not list(client.app.state.store.clip_dir.iterdir())
 
 
 async def test_library_and_preview_are_embedded_and_compared(client, previews):
@@ -236,6 +325,7 @@ async def test_token_is_required_when_set(settings, library):
     async with running(replace(settings, token="s3cret")) as c:
         assert (await c.get("/healthz")).status_code == 200
         assert (await c.post("/embed", json={"items": []})).status_code == 401
+        assert (await upload(c, "a", tone(440, sr=24_000))).status_code == 401
         r = await c.post("/embed", json={"items": []}, headers={"Authorization": "Bearer s3cret"})
         assert r.status_code == 200, r.text
 

@@ -278,6 +278,10 @@ async def record_events(s: AsyncSession, user_id: int, raw: Iterable[Any], now: 
             out.duplicates += 1
             continue
         out.accepted += 1
+        if e.kind == "start" and ref and (e.context or "").startswith("wave:"):
+            from app.listen import confirm_wave_start
+
+            confirm_wave_start(user_id, ref, values["ts"])
         if e.kind in ("like", "unlike"):
             from app.favorites import remember
             from app.api.schemas import FavoriteTarget
@@ -364,6 +368,10 @@ async def add_dislike(s: AsyncSession, user_id: int, *, ref: str | None = None, 
         row.ref, row.nd_song_id = row.ref or ref, row.nd_song_id or nd_song_id
     row.artist, row.title = row.artist or artist, row.title or title
     await s.flush()
+    if row.ref and not row.nd_song_id and not artist_ref and source != "yandex_import":
+        from app.mixes.heard_audio import schedule
+
+        schedule(user_id, row.ref)
     return row
 
 

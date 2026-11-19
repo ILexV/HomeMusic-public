@@ -12,9 +12,10 @@ from urllib.parse import urlparse
 
 import httpx
 import numpy as np
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
+from . import clip
 from .audio import AudioError, library_path
 from .config import Settings
 from .db import Store
@@ -64,6 +65,7 @@ class ItemOut(BaseModel):
     error: str | None
     attempts: int
     has_vector: bool
+    has_clip: bool
     seconds: float | None
     updated_at: float
 
@@ -331,6 +333,36 @@ def create_app(settings: Settings | None = None, factory: Callable[[Settings], M
             st.worker.wake.set()
         return EmbedOut(queued=queued, known=known, rejected=rejected)
 
+    @app.post("/embed/clip", response_model=EmbedOut, dependencies=[Depends(auth)])
+    async def embed_clip(request: Request, key: Annotated[str, Query(min_length=1, max_length=300)], st=Depends(state)):
+        if request.headers.get("content-type", "").partition(";")[0].strip().lower() != "audio/wav":
+            raise HTTPException(415, "expected audio/wav")
+        size = request.headers.get("content-length")
+        if size is not None:
+            try:
+                length = int(size)
+            except ValueError as e:
+                raise HTTPException(400, "invalid content length") from e
+            if length < 0:
+                raise HTTPException(400, "invalid content length")
+            if length > clip.MAX_BYTES:
+                raise HTTPException(413, "clip too large")
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > clip.MAX_BYTES:
+                raise HTTPException(413, "clip too large")
+            body.extend(chunk)
+        try:
+            frames = clip.pcm_frames(body)
+            queued, known = await asyncio.to_thread(st.store.enqueue_clip, key, frames, st.engine.name)
+        except AudioError as e:
+            raise HTTPException(422, str(e)) from e
+        except clip.ClipQueueFull as e:
+            raise HTTPException(503, "clip queue full") from e
+        if queued:
+            st.worker.wake.set()
+        return EmbedOut(queued=queued, known=known, rejected=[])
+
     @app.get("/embed/{key:path}", response_model=ItemOut, dependencies=[Depends(auth)])
     async def embed_status(key: str, st=Depends(state)):
         it = st.store.get(key)
@@ -338,7 +370,8 @@ def create_app(settings: Settings | None = None, factory: Callable[[Settings], M
             raise HTTPException(404, "unknown key")
         return ItemOut(
             key=it.key, status=it.status, error=it.error, attempts=it.attempts,
-            has_vector=it.status == "done" and it.model == st.engine.name, seconds=it.seconds,
+            has_vector=it.status == "done" and it.model == st.engine.name,
+            has_clip=it.status in ("queued", "running") and st.store.has_clip(key), seconds=it.seconds,
             updated_at=it.updated_at,
         )
 

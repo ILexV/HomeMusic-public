@@ -6,7 +6,10 @@ Navidrome ("ndX"). Navidrome is a mock that keeps the user's scrobbles (`state["
 
 from __future__ import annotations
 
+import asyncio
+import io
 import uuid
+import wave
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -484,6 +487,47 @@ async def test_dislike_event_marks_the_track_and_undislike_clears_it(env):
     assert [(x["ref"], x["nd_song_id"], x["source"]) for x in rows] == [("dz:100", "ndK", "app")]
     await post(c, ev("undislike", ref="dz:100"))
     assert (await c.get("/api/dislikes")).json() == []
+
+
+async def test_dislike_uploads_the_middle_of_the_heard_copy_without_waiting_for_analysis(env, monkeypatch, tmp_path):
+    from app import listen
+    from app.config import get_settings
+
+    base, ref = "http://embedder.test", "file:hitmoz:123"
+    monkeypatch.setattr(get_settings(), "embedder_url", base)
+    audio = tmp_path / "heard.wav"
+    rate = 24000
+    middle = b"\x11\x22" * (30 * rate)
+    with wave.open(str(audio), "wb") as f:
+        f.setparams((1, 2, rate, 0, "NONE", ""))
+        f.writeframes(b"\0\0" * rate + middle + b"\0\0" * rate)
+    monkeypatch.setattr(listen, "open_heard_wave_recording",
+                        lambda user, key: (audio.open("rb"), 32) if key == ref else None)
+    release = asyncio.Event()
+
+    async def status(_):
+        await release.wait()
+        return httpx.Response(404)
+
+    uploaded = asyncio.get_running_loop().create_future()
+
+    def accept(request):
+        uploaded.set_result(request)
+        return httpx.Response(200, json={"queued": 1, "known": 0, "rejected": []})
+
+    with respx.mock() as remote:
+        remote.get(host="embedder.test", path=f"/embed/{ref}").mock(side_effect=status)
+        remote.post(f"{base}/embed/clip", params={"key": ref}).mock(side_effect=accept)
+        async with asyncio.timeout(10):
+            r = await env["client"].post("/api/dislikes", json={"ref": ref, "client": "desktop"})
+            assert r.status_code == 200 and r.json()["nd_song_id"] is None
+            audio.unlink()  # eviction during the status lookup must not lose or change the recording
+            release.set()
+            request = await uploaded
+        assert request.headers["content-type"] == "audio/wav"
+        with wave.open(io.BytesIO(request.content)) as clip:
+            assert clip.getframerate() == rate and clip.getnframes() == 30 * rate
+            assert clip.readframes(clip.getnframes()) == middle
 
 
 async def test_dislikes_api_tracks_and_artists(env):

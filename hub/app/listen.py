@@ -39,11 +39,13 @@ import math
 import os
 import shutil
 import re
+import stat
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 import httpx
 from sqlalchemy import select
@@ -64,8 +66,8 @@ from app.jobs.downloads import (
 )
 from app.library.owned import find_existing
 from app.library.probe import ProbeError, probe
-from app.models import Track
 from app.matching.select import rank_candidates
+from app.models import Track
 from app.net import Priority, in_background, make_client, priority_context
 from app.providers.base import FILE_REF, Candidate, StreamSource, TrackQuery, file_ref
 from app.services import svc
@@ -201,13 +203,33 @@ class Media:
     close: Callable[[], Awaitable[None]] | None = None  # after the answer (the body may never have been read)
 
 
-@dataclass
+# Device/inode distinguish replacements, including a replacement with restored size and mtime.
+_FileStamp = tuple[int, int, int, int, int]
+
+
+@dataclass(eq=False)
 class _FullResult:
     status: str
     until: float
     choice: Choice | None = None
     path: Path | None = None
-    signature: tuple[str, int | None, str] | None = None
+    signature: tuple[str, int | None, _FileStamp] | None = None
+    duration_s: float = 0
+
+
+@dataclass(frozen=True)
+class _ServedRecording:
+    source: _FullResult  # complete, probed recording behind this stream
+    path: Path  # the rendition actually opened by FileResponse: never substitute the heavy original for Opus
+    stamp: _FileStamp
+
+
+@dataclass
+class _WaveDelivery:
+    recording: _ServedRecording | None  # None: competing/unverified bytes, never inferred from a later start
+    until: float
+    heard: bool = False
+    precached_at: datetime | None = None  # after a successful complete prefetched response
 
 
 _choices: dict[str, Choice] = {}
@@ -224,6 +246,8 @@ _full_wanted: dict[int, list[str]] = {}
 _full_jobs: dict[str, asyncio.Future[None]] = {}
 _full_active: set[str] = set()
 _full_results: dict[str, _FullResult] = {}
+_wave_deliveries: dict[tuple[int, str], _WaveDelivery] = {}
+_rejection_epoch = 0  # a request opened before a rejection cannot restore its forgotten association
 _tasks: set[asyncio.Task] = set()  # fire-and-forget work (kept referenced until done)
 _http: httpx.AsyncClient | None = None  # Deezer preview CDN
 # Audio is proxied over HTTP/1.1: on a shared HTTP/2 connection a stream the player abandons (track switch, seek)
@@ -239,6 +263,8 @@ async def choose(ref: str, *, background: bool = False, stale: Choice | None = N
     from app.recording_feedback import library_candidate, rejected_candidates
     rejected = await rejected_candidates(user_id, ref)
     private = _user_choices.get((user_id, ref))
+    if not rejected and private is not None:
+        del _user_choices[user_id, ref]
     if rejected and private is not None and private is not stale and private.fresh() and _usable(private):
         if private.candidate and (private.candidate.provider, private.candidate.provider_id) not in rejected:
             private.alternates = [c for c in private.alternates if (c.provider, c.provider_id) not in rejected]
@@ -491,6 +517,8 @@ async def forget(ref: str) -> None:
     for key in [key for key in _user_choices if key[1] == ref]:
         del _user_choices[key]
     _full_results.pop(ref, None)
+    for key in [key for key in _wave_deliveries if key[1] == ref]:
+        del _wave_deliveries[key]
     await cache_delete(_key(ref))
 
 
@@ -667,8 +695,12 @@ def _full_expected(c: Choice) -> int | None:
             or (c.candidate.duration_s if c.candidate else None))
 
 
-def _full_signature(c: Choice, path: Path) -> tuple[str, int | None, str]:
-    return _file_ident(c), _full_expected(c), _library_ident(path)
+def _file_stamp(st: os.stat_result) -> _FileStamp:
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _full_signature(c: Choice, path: Path) -> tuple[str, int | None, _FileStamp]:
+    return _file_ident(c), _full_expected(c), _file_stamp(path.stat())
 
 
 def _full_status(ref: str) -> str | None:
@@ -690,6 +722,103 @@ def _full_status(ref: str) -> str | None:
         _full_results.pop(ref, None)
         return None
     return result.status
+
+
+def _verified_media(m: Media, st: os.stat_result | None) -> _ServedRecording | None:
+    """Verify the source and bind it to the opened rendition, including an atomically published local transcode."""
+    ref = m.choice.ref
+    r = _full_results.get(ref)
+    if (st is None or not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or m.path is None
+            or r is None or r.path is None or r.signature is None or r.status != "ready"
+            or r.until <= time.monotonic() or _choices.get(ref) is not r.choice or not m.choice.fresh()
+            or r.signature[:2] != (_file_ident(m.choice), _full_expected(m.choice))):
+        return None
+    stamp = _file_stamp(st)
+    if r.path == m.path:
+        if r.signature[2] != stamp:
+            return None
+    else:
+        if m.variant != light.LIGHT or _full_status(ref) != "ready":
+            return None
+        # The key is chosen by the Hub, not the client. Old light files can outlive a source's server copy:
+        # analyze these exact served bytes only, with a duration check on the pinned Opus before extraction.
+        try:
+            ident = _library_ident(r.path) if m.choice.kind == "library" else _file_ident(m.choice)
+            if m.path != light.copy_path(light.key_of(ident)) or _file_stamp(m.path.lstat()) != stamp:
+                return None
+        except OSError:
+            return None
+    return _ServedRecording(r, m.path, stamp)
+
+
+def _observe_wave_stream(user_id: int, m: Media, *, full: bool, ahead: bool, epoch: int,
+                         recording: _ServedRecording | None) -> _WaveDelivery | None:
+    """Called with the stat of the actual FileResponse descriptor, never for a pick/probe or invalid range."""
+    key = user_id, m.choice.ref
+    old = _wave_deliveries.get(key)
+    if not full and old is None:
+        return None
+    now = time.monotonic()
+    if not full or epoch != _rejection_epoch or m.choice.kind != "full" or m.choice.candidate is None:
+        recording = None
+    if ahead and old and old.until > now:
+        if old.recording == recording:
+            return old
+        # A start names the catalog ref, not a precached file. It cannot tell competing deliveries apart.
+        recording = None
+    if key not in _wave_deliveries and len(_wave_deliveries) >= MEM_MAX:
+        del _wave_deliveries[next(iter(_wave_deliveries))]
+    _wave_deliveries.pop(key, None)
+    entry = _WaveDelivery(recording, now + MEM_TTL_S, heard=recording is not None and not ahead)
+    _wave_deliveries[key] = entry
+    return entry
+
+
+def confirm_wave_start(user_id: int, ref: str, at: datetime) -> None:
+    """Only an accepted wave start after unambiguous complete delivery confirms playback from the device cache."""
+    entry = _wave_deliveries.get((user_id, ref))
+    if (entry and entry.recording and entry.until > time.monotonic()
+            and entry.precached_at is not None and entry.precached_at <= at):
+        entry.heard = True
+
+
+def _reject_wave_recording(user_id: int, provider: str, provider_id: str) -> None:
+    global _rejection_epoch
+    _rejection_epoch += 1
+    # Invalidate equivalent nd:/dz: aliases too, but not another candidate or account.
+    for (owner, ref), entry in _wave_deliveries.items():
+        if (owner == user_id and entry.recording and entry.recording.source.signature
+                and entry.recording.source.signature[0] == f"{ref}|{provider}:{provider_id}"):
+            entry.recording = None
+            entry.heard = False
+
+
+def open_heard_wave_recording(user_id: int, ref: str) -> tuple[BinaryIO, float] | None:
+    """Return the pinned served file and its verified source duration (light Opus must match before extraction)."""
+    entry = _wave_deliveries.get((user_id, ref))
+    if not entry or not entry.recording or not entry.heard or entry.until <= time.monotonic():
+        return None
+    recording = entry.recording
+    r = recording.source
+    c = _user_choices.get((user_id, ref)) or _choices.get(ref)
+    if (r.signature is None or r.path is None or r is not _full_results.get(ref)
+            or r.until <= time.monotonic() or _choices.get(ref) is not r.choice
+            or c is None or not c.fresh() or c.kind != "full" or c.candidate is None
+            or (_file_ident(c), _full_expected(c)) != r.signature[:2]
+            or (recording.path != r.path and _full_status(ref) != "ready")):
+        return None
+    try:
+        f = open(recording.path, "rb", opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK))
+        try:
+            st = os.fstat(f.fileno())
+            if stat.S_ISREG(st.st_mode) and _file_stamp(st) == recording.stamp:
+                return f, r.duration_s
+        except OSError:
+            pass
+        f.close()
+    except OSError:
+        pass
+    return None
 
 
 def _prune_full() -> None:
@@ -735,8 +864,12 @@ async def _prepare_recording(ref: str) -> _FullResult:
         await cp.until(cp.settled)
         if cp.failed is not None:
             raise cp.failed
+        if not _same_file(c.candidate, cp.cand):
+            return _FullResult("pending", 0)
         path = cp.path
     if path is None or not path.is_file():
+        return _FullResult("unavailable", 0)
+    if c.kind != "library" and not path.resolve(strict=True).is_relative_to((get_settings().staging_dir / LOCAL_DIR).resolve()):
         return _FullResult("unavailable", 0)
     expected = _full_expected(c)
     if c.kind != "library" and not expected:
@@ -750,7 +883,7 @@ async def _prepare_recording(ref: str) -> _FullResult:
     if (not math.isfinite(info.duration_s) or info.duration_s <= 0
             or (expected and abs(info.duration_s - expected) > tolerance)):
         return _FullResult("unavailable", 0)
-    return _FullResult("ready", 0, c, path, signature)
+    return _FullResult("ready", 0, c, path, signature, info.duration_s)
 
 
 async def _warm_full(ref: str) -> None:
@@ -866,6 +999,7 @@ async def reset() -> None:
     _full_jobs.clear()
     _full_active.clear()
     _full_results.clear()
+    _wave_deliveries.clear()
     _wake = _calm = None
     light.reset()
     for client in (_http, _media):
@@ -1154,7 +1288,7 @@ async def _predownload(c: Choice) -> Path:
     """The local copy of the file (downloaded now, or already). Concurrent callers share one download; a user
     request joining a background one lifts it."""
     if c.local is not None and c.local.is_file():
-        await asyncio.to_thread(os.utime, c.local)  # in use: pruned last
+        await asyncio.to_thread(os.utime, c.local.parent)  # preserve the verified file's identity
         return c.local
     key = _file_ident(c)
     job = _fetching.get(key)
@@ -1209,7 +1343,8 @@ def prune_local(root: Path, busy: set[str], now: float | None = None) -> None:
         if d.name in busy or not d.is_dir():
             continue
         files = [f.stat() for f in d.iterdir() if f.is_file()]
-        dirs.append((max((st.st_mtime for st in files), default=0.0), sum(st.st_size for st in files), d))
+        used = max(d.stat().st_mtime, max((st.st_mtime for st in files), default=0.0))
+        dirs.append((used, sum(st.st_size for st in files), d))
     total = sum(size for _, size, _ in dirs)
     for used, size, d in sorted(dirs, key=lambda x: x[0]):
         if now - used < LOCAL_KEEP_S and total <= LOCAL_MAX_BYTES:
@@ -1363,7 +1498,7 @@ def _byte_range(header: str | None, size: int) -> tuple[int, int] | Literal[Fals
 async def _from_copy(c: Choice, cp: _Copy, range_header: str | None, *, foreground: bool) -> Media | None:
     """The answer from the server copy; None when the range lies far past what it has (the upstream serves it)."""
     if cp.done:
-        await asyncio.to_thread(os.utime, cp.path)  # in use: pruned last
+        await asyncio.to_thread(os.utime, cp.path.parent)  # in use: prune the directory last
         return Media(c, path=cp.path, media_type=cp.media_type)
     if cp.size is None:
         return None

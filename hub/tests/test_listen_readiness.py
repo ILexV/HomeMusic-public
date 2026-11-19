@@ -25,7 +25,8 @@ async def readiness(tmp_path, monkeypatch):
         copy_gate=None, probe_gate=None, copy_started=asyncio.Event(), probes=asyncio.Queue(),
         clock=time.monotonic(), original_resolve=listen._resolve,
     )
-    monkeypatch.setattr(listen, "time", SimpleNamespace(monotonic=lambda: state.clock, time=time.time))
+    monkeypatch.setattr(listen, "time", SimpleNamespace(monotonic=lambda: state.clock, time=time.time,
+                                                       monotonic_ns=time.monotonic_ns))
     monkeypatch.setattr(listen, "get_settings", lambda: SimpleNamespace(
         staging_dir=tmp_path / "staging", cfg=SimpleNamespace(matching=SimpleNamespace(duration_tolerance_s=3))))
 

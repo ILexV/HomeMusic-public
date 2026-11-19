@@ -123,6 +123,8 @@ async def report(user_id: int, ref: str, binding_id: str) -> RecordingFeedback:
             RecordingFeedback.ref == ref, RecordingFeedback.provider == binding.provider,
             RecordingFeedback.provider_id == binding.provider_id))).scalar_one()
         await s.commit()
+        from app.listen import _reject_wave_recording
+        _reject_wave_recording(user_id, binding.provider, binding.provider_id)
         return row
 
 

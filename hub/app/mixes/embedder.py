@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, Field, FiniteFloat
@@ -156,6 +157,28 @@ class EmbedderClient:
             return r.json()
         except (httpx.HTTPError, ValueError) as e:
             raise EmbedderDown(f"/healthz: {e!r}") from e
+
+    async def has_vector_or_clip(self, key: str) -> bool:
+        try:
+            r = await self._client.get(f"{self.base_url}/embed/{quote(key, safe='')}")
+            if r.status_code == 404:
+                return False
+            r.raise_for_status()
+            status = r.json()
+            return bool(status["has_vector"] or status.get("has_clip"))
+        except (httpx.HTTPError, ValueError, KeyError) as e:
+            raise EmbedderDown(f"embed status: {e!r}") from e
+
+    async def submit_clip(self, key: str, wav: bytes) -> None:
+        try:
+            r = await self._client.post(f"{self.base_url}/embed/clip", params={"key": key},
+                                        headers={"Content-Type": "audio/wav"}, content=wav)
+            r.raise_for_status()
+            result = r.json()
+            if not (result.get("queued") or result.get("known")):
+                raise ValueError("embedder did not accept the recording")
+        except (httpx.HTTPError, ValueError) as e:
+            raise EmbedderDown(f"embed clip: {e!r}") from e
 
     async def embed(self, items: list[dict[str, str]]) -> int:
         """`[{key, url|path}]` into the service's queue (known ones are skipped there). Returns how many were queued."""

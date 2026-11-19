@@ -646,6 +646,7 @@ async def _vectors(rt: Runtime) -> dict[str, list[float]]:
     later)."""
     st = rt.state
     if st.taste_model == "v2":
+        from app.mixes import heard_audio
         from app.mixes.taste_select import geometry_scores
         p = rt.profile
         assert isinstance(p, V2Profile)
@@ -660,12 +661,21 @@ async def _vectors(rt: Runtime) -> dict[str, list[float]]:
             # those tracks never appeared in this session's candidate pool.
             missing = build.missing_dislike_previews(p)
             now = time.monotonic()
-            due = (k for k in missing if k not in rt.asked or now - rt.asked[k] >= ASK_AGAIN_S)
-            keys = sorted(due, key=lambda k: rt.asked.get(k, -math.inf))[:SIGNALS_MAX]
-            previews = {k: missing[k] for k in keys}
-            rt.asked.update((k, now) for k in keys)
+            due = (k for k in p.geometry.missing if k in p.explicit_negative_keys and not k.startswith("nd:")
+                   and (k not in rt.asked or now - rt.asked[k] >= ASK_AGAIN_S))
+            previews = {}
+            requested = 0
+            for key in sorted(due, key=lambda k: rt.asked.get(k, -math.inf)):
+                if not heard_audio.schedule(rt.user_id, key):
+                    if key not in missing:
+                        continue
+                    previews[key] = missing[key]
+                rt.asked[key] = now
+                requested += 1
+                if requested >= SIGNALS_MAX:
+                    break
             todo = sorted((c for c in candidates if c.sim is None and c.track.source == "dz"),
-                          key=lambda c: -c.score)[:EMBED_NEW - len(previews)]
+                          key=lambda c: -c.score)[:EMBED_NEW - requested]
             previews.update((c.key, c.track.id) for c in todo)
             items = await build.preview_items(previews)
             if items:
@@ -833,6 +843,13 @@ async def record(s: AsyncSession, sid: str, user_id: int, raw: list[Any]):
         rows = list((await s.execute(select(PlayEvent).where(PlayEvent.user_id == user_id,
                                                              PlayEvent.event_id.in_(ids), PlayEvent.context == context)
                                      .order_by(PlayEvent.ts, PlayEvent.id))).scalars())
+        # Offline clients can attach wave context to a start that /plays already stored.
+        if out.duplicates:
+            from app.listen import confirm_wave_start
+
+            for event in rows:
+                if event.kind == "start" and event.target_type == "track" and event.ref:
+                    confirm_wave_start(user_id, event.ref, event.ts)
     return out, rows
 
 

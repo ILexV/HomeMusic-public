@@ -8,10 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
+from . import clip
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
     key TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,            -- url | path
+    kind TEXT NOT NULL,            -- url | path | clip
     source TEXT NOT NULL,
     status TEXT NOT NULL,          -- queued | running | done | error
     error TEXT,
@@ -26,6 +28,12 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS items_queue ON items (status, not_before, created_at);
 """
+
+QUEUE_ITEM = (
+    "INSERT INTO items (key, kind, source, status, created_at, updated_at) VALUES (?,?,?,'queued',?,?)"
+    " ON CONFLICT(key) DO UPDATE SET kind=excluded.kind, source=excluded.source, status='queued',"
+    " error=NULL, attempts=0, not_before=0, updated_at=excluded.updated_at"
+)
 
 
 @dataclass
@@ -57,6 +65,9 @@ class Store:
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
         self._lock = threading.Lock()
+        self.clip_dir = path.parent / "pending-clips"
+        self.clip_dir.mkdir(mode=0o700, exist_ok=True)
+        self._clip_keys: set[str] = set()
         self.now = now
         # bumps on every new vector: the in-memory index for /text rebuilds when it changes
         self.version = 0
@@ -65,9 +76,61 @@ class Store:
         self._db.close()
 
     def recover(self) -> int:
-        """Items cut off by a restart go back to the queue."""
+        """Reconcile the private spool after a restart, then resume interrupted work."""
         with self._lock:
-            return self._db.execute("UPDATE items SET status='queued' WHERE status='running'").rowcount
+            n = self._db.execute("UPDATE items SET status='queued' WHERE status='running'").rowcount
+            self._clip_keys.clear()
+            files = set(self.clip_dir.glob("*.wav"))
+            (self.clip_dir / ".incoming").unlink(missing_ok=True)
+            if files:
+                # A clip attached to an interrupted preview can now run instead. Completed/never
+                # enqueued keys are orphans (a crash between the SQLite and filesystem operations).
+                promote = []
+                for key, kind in self._db.execute("SELECT key, kind FROM items WHERE status='queued'"):
+                    path = clip.clip_path(self.clip_dir, key)
+                    if path in files:
+                        files.remove(path)
+                        self._clip_keys.add(key)
+                        if kind != "clip":
+                            promote.append((key,))
+                        if not files:
+                            break
+                self._db.executemany(
+                    "UPDATE items SET kind='clip', source='', attempts=0, error=NULL, not_before=0 WHERE key=?", promote
+                )
+                for path in files:
+                    path.unlink()
+            return n
+
+    def has_clip(self, key: str) -> bool:
+        with self._lock:
+            return key in self._clip_keys and clip.clip_path(self.clip_dir, key).is_file()
+
+    def enqueue_clip(self, key: str, frames: memoryview, model: str) -> tuple[int, int]:
+        """Keep current vectors. Replace queued previews; keep a fallback for already-running work."""
+        with self._lock:
+            item = self.get(key)
+            path = clip.clip_path(self.clip_dir, key)
+            if (item and item.status == "done" and item.model == model) or (key in self._clip_keys and path.is_file()):
+                return 0, 1
+            if key not in self._clip_keys and len(self._clip_keys) >= clip.MAX_PENDING:
+                raise clip.ClipQueueFull
+            try:
+                clip.publish(path, frames)
+                if not item or item.status != "running":
+                    t = self.now()
+                    self._db.execute(QUEUE_ITEM, (key, "clip", "", t, t))
+                    self.version += 1
+                self._clip_keys.add(key)
+            except Exception:
+                path.unlink(missing_ok=True)
+                raise
+            return 1, 0
+
+    def _discard_clip(self, key: str) -> None:
+        if key in self._clip_keys:
+            clip.clip_path(self.clip_dir, key).unlink(missing_ok=True)
+            self._clip_keys.remove(key)
 
     def enqueue(self, items: list[tuple[str, str, str]], *, force: bool, model: str) -> tuple[int, int]:
         """(key, kind, source) → queued. An item already embedded by this model from the same source is kept
@@ -77,20 +140,18 @@ class Store:
         with self._lock:
             self._db.execute("BEGIN")
             for key, kind, source in items:
-                row = self._db.execute("SELECT status, source, model FROM items WHERE key=?", (key,)).fetchone()
+                if key in self._clip_keys:
+                    known += 1
+                    continue
+                row = self._db.execute("SELECT status, kind, source, model FROM items WHERE key=?", (key,)).fetchone()
                 if row and not force:
-                    status, old_source, old_model = row
+                    status, old_kind, old_source, old_model = row
                     if status in ("queued", "running") or (
-                        status == "done" and old_source == source and old_model == model
+                        status == "done" and (old_kind == "clip" or old_source == source) and old_model == model
                     ):
                         known += 1
                         continue
-                self._db.execute(
-                    "INSERT INTO items (key, kind, source, status, created_at, updated_at) VALUES (?,?,?,'queued',?,?)"
-                    " ON CONFLICT(key) DO UPDATE SET kind=excluded.kind, source=excluded.source, status='queued',"
-                    " error=NULL, attempts=0, not_before=0, updated_at=excluded.updated_at",
-                    (key, kind, source, t, t),
-                )
+                self._db.execute(QUEUE_ITEM, (key, kind, source, t, t))
                 queued += 1
             self._db.execute("COMMIT")
             if queued:
@@ -117,18 +178,25 @@ class Store:
 
     def finish(self, key: str, vector: np.ndarray, model: str, seconds: float) -> None:
         with self._lock:
-            self._db.execute(
+            updated = self._db.execute(
                 "UPDATE items SET status='done', error=NULL, model=?, dim=?, vector=?, seconds=?, updated_at=?"
                 " WHERE key=? AND status='running'",
                 (model, int(vector.shape[0]), to_blob(vector), seconds, self.now(), key),
-            )
+            ).rowcount
+            if updated:
+                self._discard_clip(key)
             self.version += 1
 
     def fail(self, key: str, error: str, *, retry: bool, max_attempts: int, retry_s: float) -> None:
         """A transient error goes back to the queue after a pause while attempts last; anything else is final."""
         with self._lock:
-            row = self._db.execute("SELECT attempts FROM items WHERE key=? AND status='running'", (key,)).fetchone()
+            row = self._db.execute("SELECT attempts, kind FROM items WHERE key=? AND status='running'", (key,)).fetchone()
             if not row:
+                return
+            if row[1] != "clip" and key in self._clip_keys:
+                # The in-flight source failed; the uploaded recording gets its own attempt budget.
+                t = self.now()
+                self._db.execute(QUEUE_ITEM, (key, "clip", "", t, t))
                 return
             attempts = row[0] + 1
             if retry and attempts < max_attempts:
@@ -141,6 +209,7 @@ class Store:
                     "UPDATE items SET status='error', error=?, attempts=?, updated_at=? WHERE key=?",
                     (error, attempts, self.now(), key),
                 )
+                self._discard_clip(key)
 
     def get(self, key: str) -> Item | None:
         row = self._db.execute(
