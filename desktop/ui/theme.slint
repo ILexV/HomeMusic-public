@@ -142,6 +142,50 @@ export component Glyph inherits Rectangle {
     }
 }
 
+component ActionButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tip;
+    in property <bool> active;
+    in property <color> surface;
+    callback clicked();
+    width: 32px;
+    height: 30px;
+    border-radius: 8px;
+    background: touch.pressed ? #ffffff24 : root.active ? #493020
+        : touch.has-hover ? Theme.raised : root.surface;
+    accessible-role: button;
+    accessible-label: root.tip;
+    accessible-action-default => { root.clicked(); }
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        kind: root.icon;
+        tint: root.active ? Theme.orange : touch.has-hover ? Theme.text : Theme.muted;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Tooltip { text: @markdown("\{root.tip}"); }
+}
+
+export component PlaybackActions inherits HorizontalLayout {
+    in property <bool> liked;
+    in property <bool> disliked;
+    in property <bool> eq-on;
+    in property <color> surface: Theme.panel;
+    callback toggle-like();
+    callback toggle-dislike();
+    callback toggle-eq();
+    spacing: 4px;
+    horizontal-stretch: 0;
+    cross-axis-alignment: center;
+    ActionButton { icon: "heart"; tip: "Лайк"; surface: root.surface; active: root.liked; clicked => { root.toggle-like(); } }
+    ActionButton { icon: "dislike"; tip: "Дизлайк"; surface: root.surface; active: root.disliked; clicked => { root.toggle-dislike(); } }
+    Rectangle { width: 4px; }
+    ActionButton { icon: "equalizer"; tip: "Эквалайзер"; surface: root.surface; active: root.eq-on; clicked => { root.toggle-eq(); } }
+}
+
 export component TransportButton inherits Rectangle {
     in property <string> kind;
     in property <bool> primary: false;

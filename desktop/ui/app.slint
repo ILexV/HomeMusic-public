@@ -49,6 +49,7 @@ export component AppWindow inherits Window {
     in-out property <[float]> bands;
     in-out property <bool> playing;
     in-out property <[QueueItem]> queue;
+    in-out property <int> current-queue-row: -1;
     in-out property <string> queue-title: "Очередь";
     in-out property <string> queue-total;
     in-out property <[ArtistItem]> artists;
@@ -276,6 +277,7 @@ export component AppWindow inherits Window {
                         album-download => { root.album-download(); }
                         album-play-row(index) => { root.album-play-row(index); }
                         queue: root.queue;
+                        current-queue-row: root.current-queue-row;
                         queue-title: root.queue-title;
                         queue-total: root.queue-total;
                         search <=> root.search;

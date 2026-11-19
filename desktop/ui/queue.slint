@@ -3,6 +3,14 @@ import { QueueItem } from "types.slint";
 
 export component QueueView inherits Rectangle {
     in property <[QueueItem]> queue;
+    // Index in the displayed (possibly filtered) model; -1 disables following.
+    in property <int> current-row: -1;
+    in property <bool> show-instructions: true;
+    in property <bool> playing;
+    private property <length> current-top: root.current-row * root.row-height + flick.content-y;
+    private property <bool> has-current: root.current-row >= 0 && root.current-row < root.queue.length && flick.height > 0px;
+    out property <bool> current-offscreen: root.has-current &&
+        (root.current-top + root.row-height <= 0px || root.current-top >= flick.height);
     in property <bool> busy;
     in property <string> error;
     in property <bool> filtered;
@@ -30,9 +38,18 @@ export component QueueView inherits Rectangle {
     }
     changed queue => { root.reset-drag(); }
 
+    public function reveal-current() {
+        if root.has-current && (root.current-top < 0px || root.current-top + root.row-height > flick.height) {
+            flick.content-y = -clamp(root.current-row * root.row-height - (flick.height - root.row-height) / 2,
+                0px, max(0px, flick.content-height - flick.height));
+        }
+    }
+    init => { root.reveal-current(); }
+    changed current-row => { root.reveal-current(); }
+
     VerticalLayout {
         spacing: 2px;
-        Text {
+        if root.show-instructions : Text {
             height: 16px;
             text: root.dragging ? "Отпустите на нужной строке" : "≡ перетащить · следующим · × убрать";
             color: root.dragging ? Theme.orange : Theme.dim;
@@ -62,6 +79,7 @@ export component QueueView inherits Rectangle {
                 interactive: !root.dragging;
                 content-width: self.width;
                 content-height: root.queue.length * root.row-height;
+                changed height => { root.reveal-current(); }
                 for item[index] in root.queue : Rectangle {
                     y: index * root.row-height;
                     height: root.row-height;
@@ -110,8 +128,12 @@ export component QueueView inherits Rectangle {
                 for item[index] in root.queue : Text {
                     y: index * root.row-height + flick.content-y;
                     height: root.row-height; width: 24px;
-                    text: "≡"; color: root.drag-source == item.source ? Theme.orange : Theme.dim;
-                    font-size: 18px; horizontal-alignment: center; vertical-alignment: center;
+                    property <bool> show-state: index == root.current-row && root.drag-source != item.source &&
+                        !(handle.has-hover && root.row-at(handle.mouse-y) == index);
+                    text: self.show-state ? (root.playing ? "▶" : "Ⅱ") : "≡";
+                    color: self.show-state || root.drag-source == item.source ? Theme.orange : Theme.dim;
+                    font-size: self.show-state ? 14px : 18px;
+                    horizontal-alignment: center; vertical-alignment: center;
                 }
                 handle := TouchArea {
                     mouse-cursor: grab;

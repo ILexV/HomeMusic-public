@@ -1,32 +1,4 @@
-import { CoverArt, Glyph, PlaybackStatus, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
-
-component MiniAction inherits Rectangle {
-    in property <string> icon;
-    in property <string> tip;
-    in property <bool> active;
-    callback clicked();
-
-    width: 32px;
-    height: 30px;
-    border-radius: 8px;
-    background: touch.pressed ? #ffffff24 : root.active ? #493020
-        : touch.has-hover ? Theme.raised : Theme.panel;
-    accessible-role: button;
-    accessible-label: root.tip;
-    accessible-action-default => { root.clicked(); }
-
-    Glyph {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        kind: root.icon;
-        tint: root.active ? Theme.orange : touch.has-hover ? Theme.text : Theme.muted;
-    }
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-    Tooltip { text: @markdown("\{root.tip}"); }
-}
+import { CoverArt, Glyph, PlaybackActions, PlaybackStatus, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
@@ -152,14 +124,13 @@ export component Mini inherits Rectangle {
                 TransportButton { kind: "next"; clicked => { root.next(); } }
             }
             Rectangle { horizontal-stretch: 1; }
-            HorizontalLayout {
-                spacing: 4px;
-                horizontal-stretch: 0;
-                cross-axis-alignment: center;
-                MiniAction { icon: "heart"; tip: "Лайк"; active: root.liked; clicked => { root.toggle-like(); } }
-                MiniAction { icon: "dislike"; tip: "Дизлайк"; active: root.disliked; clicked => { root.toggle-dislike(); } }
-                Rectangle { width: 4px; }
-                MiniAction { icon: "equalizer"; tip: "Эквалайзер"; active: root.eq-on; clicked => { root.toggle-eq(); } }
+            PlaybackActions {
+                liked: root.liked;
+                disliked: root.disliked;
+                eq-on: root.eq-on;
+                toggle-like => { root.toggle-like(); }
+                toggle-dislike => { root.toggle-dislike(); }
+                toggle-eq => { root.toggle-eq(); }
             }
             Rectangle { horizontal-stretch: 1; }
             HorizontalLayout {

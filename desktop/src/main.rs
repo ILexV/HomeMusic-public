@@ -2901,21 +2901,30 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
     }
     let query = ui.get_queue_search().to_string();
     let current = queue.index();
+    let mut current_row = -1;
     let rows: Vec<QueueItem> = queue
         .items()
         .iter()
         .enumerate()
         .filter(|(_, item)| matches_query(item, &query))
-        .map(|(index, item)| QueueItem {
-            source: index as i32,
-            number: format!("{}", index + 1).into(),
-            title: item.title.clone().into(),
-            meta: item.artist.clone().into(),
-            duration: row_duration(item).into(),
-            current: current == Some(index),
+        .enumerate()
+        .map(|(row, (index, item))| {
+            let is_current = current == Some(index);
+            if is_current {
+                current_row = row as i32;
+            }
+            QueueItem {
+                source: index as i32,
+                number: format!("{}", index + 1).into(),
+                title: item.title.clone().into(),
+                meta: item.artist.clone().into(),
+                duration: row_duration(item).into(),
+                current: is_current,
+            }
         })
         .collect();
     ui.set_queue(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+    ui.set_current_queue_row(current_row);
     let title = if queue.is_empty() || queue.name().is_empty() {
         "Очередь"
     } else {
@@ -3006,6 +3015,7 @@ fn clear_track(ui: &AppWindow) {
         QueueItem,
     >::new(
     )))));
+    ui.set_current_queue_row(-1);
     ui.set_queue_title("Очередь".into());
     ui.set_queue_total(String::new().into());
 }
