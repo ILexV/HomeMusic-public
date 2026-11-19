@@ -92,8 +92,19 @@ export component Glyph inherits Rectangle {
         height: 100%;
         viewbox-width: 16;
         viewbox-height: 16;
-        commands: "M 1 6 L 5 6 L 9 2 L 9 14 L 5 10 L 1 10 Z";
+        commands: "M1 6 H4 L8 2.5 V13.5 L4 10 H1 Z";
         fill: root.tint;
+    }
+    if root.kind == "speaker" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M10.5 5.5 C12 6.8 12 9.2 10.5 10.5 M12.5 3 C15.6 5.6 15.6 10.4 12.5 13";
+        fill: transparent;
+        stroke: root.tint;
+        stroke-width: 1.4px;
+        stroke-line-cap: round;
     }
     if root.kind == "heart" : Path {
         width: 100%;
@@ -110,6 +121,16 @@ export component Glyph inherits Rectangle {
         viewbox-height: 16;
         commands: "M 1 2 L 3 2 L 3 9 L 1 9 Z M 5 2 L 12 2 C 13 2 14 3 14 4 L 13 8 C 13 9 12 10 11 10 L 9 10 L 9 14 L 7 14 L 5 9 Z";
         fill: root.tint;
+    }
+    if root.kind == "equalizer" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M3 2V5 M3 9V14 M1 7H5 M8 2V9 M8 13V14 M6 11H10 M13 2V3 M13 7V14 M11 5H15";
+        stroke: root.tint;
+        stroke-width: 1.5px;
+        stroke-line-cap: round;
     }
     if root.kind == "settings" : Path {
         width: 100%;
@@ -261,6 +282,7 @@ export component SeekBar inherits Rectangle {
     min-width: 48px;
     property <bool> dragging: false;
     property <float> progress: root.duration > 0 ? max(0, min(1, root.position / root.duration)) : 0;
+    property <float> pointer-ratio: max(0, min(1, area.mouse-x / max(1px, area.width)));
     property <length> track-height: root.wave.length > 0 ? root.bar-height - 2px : 6px;
     property <int> columns: max(1, min(root.wave.length, ceil(root.width / 1px)));
     property <color> played: root.inverted ? #ffffff : Theme.orange;
@@ -321,6 +343,34 @@ export component SeekBar inherits Rectangle {
         }
     }
 
+    if area.has-hover && root.seek-enabled && root.duration > 0 : Rectangle {
+        property <length> cursor-x: min(self.width - 1px, root.pointer-ratio * self.width);
+
+        Rectangle {
+            x: parent.cursor-x;
+            width: 1px;
+            height: 100%;
+            background: root.inverted ? Theme.bg : Theme.text;
+        }
+        Rectangle {
+            x: clamp(parent.cursor-x - self.width / 2, 0px, parent.width - self.width);
+            y: 0px;
+            width: min(parent.width, stamp.preferred-width + 12px);
+            height: 17px;
+            border-radius: 4px;
+            background: Theme.raised;
+            stamp := Text {
+                property <int> total: floor(root.pointer-ratio * root.duration);
+                property <int> seconds: mod(self.total, 60);
+                text: "\{floor(self.total / 60)}:\{self.seconds < 10 ? "0" : ""}\{self.seconds}";
+                color: Theme.text;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
     area := TouchArea {
         width: 100%;
         height: 100%;
@@ -329,7 +379,7 @@ export component SeekBar inherits Rectangle {
         pointer-event(event) => {
             if (root.seek-enabled && (event.kind == PointerEventKind.down || (event.kind == PointerEventKind.move && root.dragging))) {
                 root.dragging = true;
-                root.seek(max(0, min(1, area.mouse-x / area.width)));
+                root.seek(root.pointer-ratio);
             }
             if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                 root.dragging = false;
