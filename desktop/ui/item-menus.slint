@@ -1,0 +1,47 @@
+export enum TrackList { queue, album, home, catalog }
+export enum TrackPlacement { next, end }
+
+// Right-click is handled by Slint's menu system. Ordinary pointer presses,
+// wheel events and keyboard input still go to the controls underneath.
+export global ItemActions {
+    callback place-track(TrackList, int, TrackPlacement);
+    callback open-song-album(string);
+    callback load-album(string, bool); // album ID; true replaces and starts playback
+}
+
+export component TrackMenu inherits ContextMenuArea {
+    width: 100%;
+    height: 100%;
+    in property <TrackList> list;
+    in property <int> source;
+    in property <bool> can-next: true;
+    in property <bool> can-end: true;
+    in property <string> song-id;
+    Menu {
+        MenuItem {
+            title: "Играть следующим";
+            enabled: root.can-next;
+            activated => { ItemActions.place-track(root.list, root.source, TrackPlacement.next); }
+        }
+        MenuItem {
+            title: root.list == TrackList.queue ? "Переместить в конец очереди" : "Добавить в конец очереди";
+            enabled: root.can-end;
+            activated => { ItemActions.place-track(root.list, root.source, TrackPlacement.end); }
+        }
+        if root.song-id != "" : MenuItem {
+            title: "Открыть альбом";
+            activated => { ItemActions.open-song-album(root.song-id); }
+        }
+    }
+}
+
+export component AlbumMenu inherits ContextMenuArea {
+    width: 100%;
+    height: 100%;
+    in property <string> album-id;
+    enabled: root.album-id != "";
+    Menu {
+        MenuItem { title: "Играть альбом"; activated => { ItemActions.load-album(root.album-id, true); } }
+        MenuItem { title: "Добавить альбом в конец очереди"; activated => { ItemActions.load-album(root.album-id, false); } }
+    }
+}

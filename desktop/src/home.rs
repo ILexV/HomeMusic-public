@@ -22,6 +22,7 @@ pub struct Row {
     pub detail: String,
     pub key: String,
     pub cover_id: String,
+    pub song_id: String,
     pub accent: bool,
 }
 
@@ -113,6 +114,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
         detail: wave_line.into(),
         key: "wave".into(),
         cover_id: String::new(),
+        song_id: String::new(),
         accent: false,
     });
     let (title, detail) = mix_card(mix);
@@ -122,6 +124,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
         detail,
         key: "mix".into(),
         cover_id: String::new(),
+        song_id: String::new(),
         accent: false,
     });
     if !feed.radio.is_empty() {
@@ -133,6 +136,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
                 detail: String::new(),
                 key: artist.id.clone(),
                 cover_id: artist.cover_id.clone(),
+                song_id: String::new(),
                 accent: false,
             });
         }
@@ -153,6 +157,7 @@ pub fn playlist_rows(lists: &[PlaylistLine]) -> Vec<Row> {
             detail: songs_label(list.songs),
             key: list.id.clone(),
             cover_id: String::new(),
+            song_id: String::new(),
             accent: false,
         });
     }
@@ -190,6 +195,7 @@ pub fn mix_rows(mix: &MixSnapshot) -> Vec<Row> {
                     key: mode.into(),
                     cover_id: String::new(),
                     accent: mix.mode == mode,
+                    song_id: String::new(),
                 });
             }
             rows.push(note(&format!(
@@ -253,6 +259,7 @@ pub fn taste_rows(artists: &[TasteArtist], picked: &HashSet<String>) -> Vec<Row>
             key: artist.reference.clone(),
             accent: picked.contains(&artist.reference),
             cover_id: String::new(),
+            song_id: String::new(),
         });
     }
     rows
@@ -332,6 +339,7 @@ fn push_albums(rows: &mut Vec<Row>, title: &str, albums: &[HomeAlbum]) {
             detail: album_detail(album),
             key: album.id.clone(),
             cover_id: album.cover_id.clone(),
+            song_id: String::new(),
             accent: album.starred,
         });
     }
@@ -346,11 +354,12 @@ fn track_row(index: usize, song: &hub::Playable) -> Row {
         format!("{} · {}", song.artist, song.album)
     };
     Row {
-        kind: "track",
+        kind: if song.can_play() { "track" } else { "disabled" },
         title: song.title.clone(),
         detail,
         key: index.to_string(),
         cover_id: String::new(),
+        song_id: song.nd_song_id.clone(),
         accent: false,
     }
 }
@@ -362,6 +371,7 @@ fn section(title: &str) -> Row {
         detail: String::new(),
         key: String::new(),
         cover_id: String::new(),
+        song_id: String::new(),
         accent: false,
     }
 }
@@ -373,6 +383,7 @@ fn note(text: &str) -> Row {
         detail: String::new(),
         key: String::new(),
         cover_id: String::new(),
+        song_id: String::new(),
         accent: false,
     }
 }
@@ -384,6 +395,7 @@ fn action(key: &str, title: &str) -> Row {
         detail: String::new(),
         key: key.into(),
         cover_id: String::new(),
+        song_id: String::new(),
         accent: true,
     }
 }

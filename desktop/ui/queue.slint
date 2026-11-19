@@ -1,3 +1,4 @@
+import { TrackList, TrackMenu } from "item-menus.slint";
 import { EmptyNote, Theme, TitleButton, VerticalScrollBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
@@ -156,6 +157,13 @@ export component QueueView inherits Rectangle {
                         border-color: Theme.orange;
                         glyph: "×"; tip: "Убрать из очереди";
                         clicked => { root.remove-queue-row(item.source); }
+                    }
+                    TrackMenu {
+                        list: TrackList.queue;
+                        source: item.source;
+                        song-id: item.song-id;
+                        can-next: item.can-move-next;
+                        can-end: item.can-move-end;
                     }
                 }
             }

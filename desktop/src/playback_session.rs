@@ -284,12 +284,12 @@ fn decode(bytes: &[u8], account: &str) -> Option<SavedPlayback> {
     })
 }
 
-fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
     static SERIAL: AtomicU64 = AtomicU64::new(1);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(
-        ".playback-state-{}-{}.tmp", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)
+        ".homemusic-state-{}-{}.tmp", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

@@ -50,6 +50,16 @@ impl Item {
     }
 }
 
+/// One user removal, owned by its queue so a replacement cannot inherit it.
+struct RemovedRow {
+    item: Item,
+    row: u64,
+    index: usize,
+    original_index: Option<usize>,
+    recommendation: Option<Recommendation>,
+    was_current: bool,
+}
+
 pub struct Queue {
     name: String,
     items: Vec<Item>,
@@ -61,6 +71,7 @@ pub struct Queue {
     rows: Vec<u64>,
     original: Option<Vec<u64>>,
     recommendations: HashMap<u64, Recommendation>,
+    removed: Option<RemovedRow>,
     repeat: Repeat,
     shuffle: Shuffle,
     smart_enabled: bool,
@@ -74,6 +85,7 @@ impl Queue {
             rows: (0..items.len()).map(|_| next_revision()).collect(),
             original: None,
             recommendations: HashMap::new(),
+            removed: None,
             repeat: Repeat::Off,
             shuffle: Shuffle::Off,
             smart_enabled: true,
@@ -185,14 +197,29 @@ impl Queue {
 
     /// Remove a row, selecting its successor (or predecessor) if it was current.
     pub fn remove(&mut self, index: usize) -> bool {
+        self.remove_row(index, false)
+    }
+
+    pub fn remove_with_undo(&mut self, index: usize) -> bool {
+        self.remove_row(index, true)
+    }
+
+    fn remove_row(&mut self, index: usize, undoable: bool) -> bool {
         if index >= self.items.len() {
             return false;
         }
         let removed_current = self.index == Some(index);
-        self.items.remove(index);
+        let item = self.items.remove(index);
         let row = self.rows.remove(index);
-        self.recommendations.remove(&row);
-        if let Some(original) = &mut self.original { original.retain(|id| *id != row); }
+        let recommendation = self.recommendations.remove(&row);
+        let original_index = self.original.as_mut().and_then(|order| {
+            let at = order.iter().position(|id| *id == row)?;
+            order.remove(at);
+            Some(at)
+        });
+        self.removed = undoable.then_some(RemovedRow {
+            item, row, index, original_index, recommendation, was_current: removed_current,
+        });
         self.index = self.index.and_then(|current| {
             if current > index {
                 Some(current - 1)
@@ -209,6 +236,39 @@ impl Queue {
         self.revision = next_revision();
         if removed_current {
             self.current_token = self.index.map(|_| self.revision);
+        }
+        true
+    }
+
+    pub fn has_undo(&self) -> bool {
+        self.removed.is_some()
+    }
+
+    pub fn forget_removal(&mut self) {
+        self.removed = None;
+    }
+
+    pub fn undo_removal(&mut self) -> bool {
+        let Some(removed) = self.removed.take() else { return false };
+        let at = removed.index.min(self.items.len());
+        self.items.insert(at, removed.item);
+        self.rows.insert(at, removed.row);
+        if let (Some(order), Some(index)) = (&mut self.original, removed.original_index) {
+            order.insert(index.min(order.len()), removed.row);
+        }
+        if let Some(rec) = removed.recommendation {
+            self.recommendations.insert(removed.row, rec);
+        }
+        self.revision = next_revision();
+        if let Some(current) = self.index {
+            // The player keeps its current occurrence, including a successor
+            // selected when the originally playing track was removed.
+            if at <= current { self.index = Some(current + 1); }
+        } else if removed.was_current {
+            // Removing the only playing row stopped playback. Select it for a
+            // future Play command without starting it here.
+            self.index = Some(at);
+            self.current_token = Some(self.revision);
         }
         true
     }
@@ -334,6 +394,8 @@ impl Queue {
 
     pub fn set_shuffle(&mut self, shuffle: Shuffle) {
         if self.shuffle == shuffle { return; }
+        // The saved positions refer to the old ordering.
+        self.forget_removal();
         if self.shuffle == Shuffle::Smart { self.remove_pending_recommendations(); }
         if shuffle == Shuffle::Off {
             if let Some(mut order) = self.original.take() {
@@ -766,6 +828,95 @@ mod tests {
             assert_eq!(queue.index(), None);
         }
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn undo_filtered_duplicate_restores_source_position_and_keeps_playback() {
+        let mut q = Queue::from_tracks("", vec![
+            item("same", "Hidden", 10), item("same", "Match A", 11), item("same", "Match B", 12),
+        ]);
+        let before = q.rows.clone();
+        let filtered = crate::visible_sources(&q, "match");
+        assert_eq!(filtered, [1, 2]);
+        q.select(2);
+        let playing = q.current_token();
+        assert!(q.remove_with_undo(filtered[0]));
+        assert_eq!(q.index(), Some(1));
+        assert!(q.undo_removal());
+        assert_eq!(q.rows, before);
+        assert_eq!(q.items()[1].title, "Match A");
+        assert_eq!(q.index(), Some(2));
+        assert_eq!(q.current_token(), playing);
+        assert!(!q.undo_removal());
+    }
+
+    #[test]
+    fn undo_current_removal_does_not_reselect_it_over_successor_or_predecessor() {
+        for removed in 0..3 {
+            let mut q = sample();
+            let before = q.rows.clone();
+            q.select(removed);
+            assert!(q.remove_with_undo(removed));
+            let now_playing = q.rows[q.index().unwrap()];
+            let playing = q.current_token();
+            assert_ne!(now_playing, before[removed]);
+            assert!(q.undo_removal());
+            assert_eq!(q.rows, before);
+            assert_eq!(q.rows[q.index().unwrap()], now_playing);
+            assert_eq!(q.current_token(), playing);
+        }
+    }
+
+    #[test]
+    fn undo_only_row_restores_idle_or_stopped_selection() {
+        for selected in [true, false] {
+            let mut q = Queue::from_path("file", "Only", "WAV");
+            if selected { q.select(0); }
+            let row = q.row_token(0);
+            assert!(q.remove_with_undo(0));
+            assert!(q.is_empty());
+            assert!(q.undo_removal());
+            assert_eq!(q.row_token(0), row);
+            assert_eq!(q.index(), selected.then_some(0));
+        }
+    }
+
+    #[test]
+    fn undo_is_single_use_and_limited_to_its_queue() {
+        let mut q = sample();
+        q.remove_with_undo(1);
+        q.remove_with_undo(0);
+        assert!(q.undo_removal());
+        assert_eq!(q.items().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+        assert!(!q.undo_removal());
+        q.remove_with_undo(0);
+        q.forget_removal();
+        assert!(!q.undo_removal());
+        q.remove_with_undo(0);
+        assert!(q.has_undo());
+        q = sample();
+        assert!(!q.has_undo());
+        assert!(!q.undo_removal());
+    }
+
+    #[test]
+    fn undo_preserves_shuffled_order_and_recommendation_metadata() {
+        let mut q = sample();
+        let original = q.rows.clone();
+        q.select(0);
+        q.set_shuffle(Shuffle::Smart);
+        let at = q.row_index(original[2]).unwrap();
+        q.remove_with_undo(at);
+        assert!(q.undo_removal());
+        let rec = Recommendation { session: "session".into(), label: "Для вас".into() };
+        assert!(q.insert_recommendation("a", item("d", "D", 1), rec));
+        let row = q.row_token(1);
+        q.remove_with_undo(1);
+        assert!(q.undo_removal());
+        assert_eq!(q.row_token(1), row);
+        assert_eq!(q.recommendation(1).unwrap().session, "session");
+        q.set_shuffle(Shuffle::Off);
+        assert_eq!(q.rows, original);
     }
 
     #[test]

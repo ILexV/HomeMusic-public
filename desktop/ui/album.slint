@@ -1,3 +1,4 @@
+import { TrackList, TrackMenu } from "item-menus.slint";
 import { CoverArt, EmptyNote, EqButton, QueueRow, ScrollPort, Theme } from "theme.slint";
 import { QueueItem } from "types.slint";
 
@@ -59,9 +60,10 @@ export component AlbumDetail inherits Rectangle {
             if !root.album-busy && root.album-error != "" : EmptyNote { message: root.album-error; error: true; }
             if !root.album-busy && root.album-error == "" && root.album-tracks.length == 0 : EmptyNote { message: "В альбоме нет треков"; }
             if root.can-play : ScrollPort {
-                for item[index] in root.album-tracks : QueueRow {
+                for item in root.album-tracks : QueueRow {
                     item: item;
-                    clicked => { root.album-play-row(index); }
+                    clicked => { root.album-play-row(item.source); }
+                    TrackMenu { list: TrackList.album; source: item.source; }
                 }
             }
         }

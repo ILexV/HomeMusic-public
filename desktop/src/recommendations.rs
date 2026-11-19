@@ -406,7 +406,8 @@ impl State {
                         ui.set_album_title(text(&value, "title").into()); ui.set_album_artist(text(&value, "artist").into());
                         ui.set_album_total(album.total_label().into());
                         let rows = album.items().iter().enumerate().map(|(i, item)| crate::QueueItem {
-                            source: i as i32, number: (i + 1).to_string().into(), title: item.title.clone().into(), meta: item.artist.clone().into(), duration: crate::row_duration(item).into(), current: false,
+                            source: i as i32, number: (i + 1).to_string().into(), title: item.title.clone().into(), meta: item.artist.clone().into(), duration: crate::row_duration(item).into(),
+                            ..crate::QueueItem::default()
                         }).collect::<Vec<_>>();
                         ui.set_album_tracks(ModelRc::new(VecModel::from(rows)));
                         if let Some(preview) = self.ctx.hub.album_preview.borrow_mut().as_mut() { preview.tracks = album.into_items(); }

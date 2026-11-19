@@ -1,3 +1,5 @@
+import { ComboBox, LineEdit } from "std-widgets.slint";
+import { TrackList, TrackMenu } from "item-menus.slint";
 import { CatalogHit, QueueItem } from "types.slint";
 
 export global Theme {
@@ -669,11 +671,16 @@ export component Equalizer inherits Rectangle {
     in property <bool> enabled;
     in property <float> preamp;
     in property <[float]> bands;
+    in property <[string]> preset-names;
+    in-out property <string> preset-name;
+    in-out property <int> preset-index;
+    in property <string> preset-status;
     callback set-enabled(bool);
     callback set-preamp(float);
     callback set-band(int, float);
     callback reset();
-    height: 132px;
+    callback save-preset(string);
+    callback apply-preset(int);
     background: Theme.panel;
 
     VerticalLayout {
@@ -681,7 +688,7 @@ export component Equalizer inherits Rectangle {
         spacing: 4px;
 
         HorizontalLayout {
-            height: 22px;
+            height: 32px;
             vertical-stretch: 0;
             spacing: 6px;
             cross-axis-alignment: center;
@@ -691,11 +698,60 @@ export component Equalizer inherits Rectangle {
                 active: root.enabled;
                 clicked => { root.set-enabled(!root.enabled); }
             }
-            Rectangle { horizontal-stretch: 1; }
+            LineEdit {
+                min-width: 85px;
+                horizontal-stretch: 1;
+                text <=> root.preset-name;
+                placeholder-text: "Имя пресета";
+                accessible-label: "Имя пресета эквалайзера";
+                accepted(name) => { root.save-preset(name); }
+            }
+            EqButton {
+                height: 26px;
+                label: "Сохранить";
+                tip: "Сохранить предусиление и 10 полос. Существующий пресет с таким именем будет заменён.";
+                enabled: root.preset-name != "";
+                clicked => { root.save-preset(root.preset-name); }
+            }
             EqButton {
                 height: 22px;
                 label: "сброс";
                 clicked => { root.reset(); }
+            }
+        }
+
+        HorizontalLayout {
+            height: 32px;
+            vertical-stretch: 0;
+            spacing: 6px;
+            cross-axis-alignment: center;
+            ComboBox {
+                width: 156px;
+                model: root.preset-names;
+                current-index <=> root.preset-index;
+                accessible-label: "Встроенные и мои пресеты эквалайзера";
+                selected(_) => { root.apply-preset(self.current-index); }
+            }
+            EqButton {
+                height: 26px;
+                label: "Применить";
+                tip: "Загрузить выбранную кривую, не меняя вкл/выкл эквалайзера";
+                clicked => { root.apply-preset(root.preset-index); }
+            }
+            Rectangle {
+                min-width: 0px;
+                horizontal-stretch: 1;
+                height: 32px;
+                message := Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.preset-status != "" ? root.preset-status : "Выберите готовый пресет или сохраните свой";
+                    font-size: 12px;
+                    color: Theme.muted;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Tooltip { text: @markdown("\{message.text}"); }
             }
         }
 
@@ -765,9 +821,11 @@ export component QueueRow inherits Rectangle {
 
 export component CatalogRow inherits Rectangle {
     in property <CatalogHit> hit;
+    in property <int> source;
     callback clicked();
     callback download();
-    height: root.hit.section == "" ? 44px : 72px;
+    callback check-source();
+    height: 44px + (root.hit.section == "" ? 0px : 28px) + (root.hit.is-album ? 0px : 24px);
 
     VerticalLayout {
         spacing: 0px;
@@ -874,6 +932,27 @@ export component CatalogRow inherits Rectangle {
                     enabled: root.hit.can-download;
                     clicked => { root.download(); }
                 }
+            }
+            if !root.hit.is-album : TrackMenu {
+                list: TrackList.catalog;
+                source: root.source;
+                song-id: root.hit.song-id;
+            }
+        }
+        if !root.hit.is-album : HorizontalLayout {
+            height: 24px;
+            padding-left: 44px;
+            padding-right: 8px;
+            spacing: 8px;
+            alignment: start;
+            cross-axis-alignment: center;
+            Text { text: root.hit.availability; color: Theme.muted; font-size: 11px; overflow: elide; }
+            if root.hit.can-check-source : EqButton {
+                width: 70px;
+                height: 22px;
+                label: "Уточнить";
+                tip: "Узнать источник без воспроизведения";
+                clicked => { root.check-source(); }
             }
         }
     }

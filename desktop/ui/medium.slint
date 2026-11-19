@@ -74,6 +74,7 @@ export component Medium inherits Rectangle {
     callback toggle-catalog();
     callback pick-hit(int);
     callback download-hit(int);
+    callback check-source(int);
 
     background: Theme.bg;
 
@@ -237,8 +238,10 @@ export component Medium inherits Rectangle {
                 if !root.catalog-busy && root.hits.length > 0 : ScrollPort {
                     for hit[index] in root.hits : CatalogRow {
                         hit: hit;
+                        source: index;
                         clicked => { root.pick-hit(index); }
                         download => { root.download-hit(index); }
+                        check-source => { root.check-source(index); }
                     }
                 }
             }

@@ -1,3 +1,4 @@
+import { AlbumMenu, TrackList, TrackMenu } from "item-menus.slint";
 import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
@@ -118,6 +119,7 @@ component HomeCard inherits Rectangle {
         Rectangle { vertical-stretch: 1; }
     }
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    if root.item.kind == "album" : AlbumMenu { album-id: root.item.album-id; }
 }
 
 component AlbumCard inherits Rectangle {
@@ -146,6 +148,7 @@ component AlbumCard inherits Rectangle {
         active: root.item.starred;
         clicked => { root.like(); }
     }
+    AlbumMenu { album-id: root.item.id; }
 }
 
 export component Large inherits Rectangle {
@@ -235,6 +238,7 @@ export component Large inherits Rectangle {
     callback toggle-catalog();
     callback pick-hit(int);
     callback download-hit(int);
+    callback check-source(int);
     callback star-album(int);
     callback search-edited(string);
     callback pick-artist(int);
@@ -362,8 +366,10 @@ export component Large inherits Rectangle {
                         if !root.catalog-busy && root.hits.length > 0 : ScrollPort {
                             for hit[index] in root.hits : CatalogRow {
                                 hit: hit;
+                                source: index;
                                 clicked => { root.pick-hit(index); }
                                 download => { root.download-hit(index); }
+                                check-source => { root.check-source(index); }
                             }
                         }
                     }
@@ -445,6 +451,8 @@ export component Large inherits Rectangle {
                                 mouse-cursor: pointer;
                                 clicked => { root.pick-home(row.source); }
                             }
+                            if row.kind == "album" : AlbumMenu { album-id: row.album-id; }
+                            if row.kind == "track" : TrackMenu { list: TrackList.home; source: row.source; song-id: row.song-id; }
                         }
                     }
                 }

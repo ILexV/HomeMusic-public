@@ -23,10 +23,33 @@ pub fn open_album(
     if id.is_empty() {
         return;
     }
+    let ticket = begin_preview(ui, hub, title, artist, cover_id);
+    let config = config.clone();
+    let id = id.to_string();
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || {
+        let result = navidrome::album_tracks(&config, &id).map(|tracks| (id, tracks));
+        push_event(&events, HubEvent::AlbumLoaded { ticket, result });
+    });
+}
+
+pub(super) fn open_song_album(ui: &AppWindow, hub: &HubState, config: &navidrome::ServerConfig, song_id: &str) {
+    if song_id.is_empty() { return; }
+    let ticket = begin_preview(ui, hub, "Альбом", "", song_id);
+    let config = config.clone();
+    let id = song_id.to_owned();
+    let events = Arc::clone(&hub.events);
+    std::thread::spawn(move || {
+        let result = navidrome::song_album(&config, &id);
+        push_event(&events, HubEvent::AlbumLoaded { ticket, result });
+    });
+}
+
+fn begin_preview(ui: &AppWindow, hub: &HubState, title: &str, artist: &str, cover_id: &str) -> u64 {
     let ticket = hub.album_generation.get().wrapping_add(1);
     hub.album_generation.set(ticket);
     *hub.album_preview.borrow_mut() = Some(AlbumPreview {
-        id: id.to_string(),
+        id: String::new(),
         cover_id: cover_id.to_string(),
         catalog_ref: String::new(),
         tracks: Vec::new(),
@@ -43,13 +66,7 @@ pub fn open_album(
     let cover = request_cover(hub, cover_id);
     ui.set_album_has_cover(cover.is_some());
     ui.set_album_cover(cover.unwrap_or_default());
-    let config = config.clone();
-    let id = id.to_string();
-    let events = Arc::clone(&hub.events);
-    std::thread::spawn(move || {
-        let result = navidrome::album_tracks(&config, &id);
-        push_event(&events, HubEvent::AlbumLoaded { ticket, result });
-    });
+    ticket
 }
 
 pub fn close_album(ui: &AppWindow, hub: &HubState) {
@@ -63,7 +80,7 @@ pub fn apply_album_result(
     ui: &AppWindow,
     hub: &HubState,
     ticket: u64,
-    result: Result<navidrome::LibraryQueue, String>,
+    result: Result<(String, navidrome::LibraryQueue), String>,
 ) {
     if ticket != hub.album_generation.get() || !ui.get_album_open() {
         return;
@@ -72,7 +89,8 @@ pub fn apply_album_result(
     let Some(preview) = preview.as_mut() else { return };
     ui.set_album_busy(false);
     match result {
-        Ok(library) => {
+        Ok((id, library)) => {
+            preview.id = id;
             let album = library_to_queue(library);
             ui.set_album_title(album.name().into());
             ui.set_album_total(album.total_label().into());
@@ -87,7 +105,7 @@ pub fn apply_album_result(
                 title: item.title.clone().into(),
                 meta: item.artist.clone().into(),
                 duration: row_duration(item).into(),
-                current: false,
+                ..QueueItem::default()
             }).collect::<Vec<_>>();
             ui.set_album_tracks(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
             preview.tracks = album.into_items();
@@ -134,28 +152,19 @@ pub fn connect_album_actions(
         }
         let preview = hub_play.album_preview.borrow();
         let Some(preview) = preview.as_ref() else { return };
-        if index as usize >= preview.tracks.len() {
-            return;
-        }
-        if let Some(item) = queue_play.borrow().current() {
-            note_wave_leave(&player_play.borrow(), item, &hub_play, false);
-        }
+        let index = index as usize;
+        if index >= preview.tracks.len() { return; }
         cancel_queue_load(&ui, &hub_play);
-        clear_wave(&hub_play);
-        *hub_play.album_id.borrow_mut() = preview.id.clone();
-        let mut next = queue::Queue::from_tracks(
-            ui.get_album_title().to_string(), preview.tracks.clone(),
-        );
-        next.select(index as usize);
-        next.inherit_preferences(&queue_play.borrow());
-        *queue_play.borrow_mut() = next;
-        jump(&ui, &player_play, &queue_play, &config_play, &status_play, &waves_play, &hub_play, true);
+        let album = queue::Queue::from_tracks(ui.get_album_title().to_string(), preview.tracks.clone());
+        play_album(&ui, &hub_play, &player_play, &queue_play, &config_play, &status_play,
+            &waves_play, &preview.id, album, index);
         ui.set_album_note("Очередь заменена альбомом".into());
     });
 
     let weak = ui.as_weak();
     let hub_add = hub.clone();
     let queue_add = queue.clone();
+    let player_add = player.clone();
     ui.on_album_enqueue(move || {
         let Some(ui) = weak.upgrade() else { return };
         if ui.get_album_busy() || !ui.get_album_error().is_empty() {
@@ -164,20 +173,44 @@ pub fn connect_album_actions(
         let preview = hub_add.album_preview.borrow();
         let Some(preview) = preview.as_ref().filter(|preview| !preview.tracks.is_empty()) else { return };
         cancel_queue_load(&ui, &hub_add);
-        let mut queue = queue_add.borrow_mut();
-        if queue.is_empty() {
-            let mut next = queue::Queue::from_tracks(ui.get_album_title().to_string(), preview.tracks.clone());
-            next.select(0);
-            next.inherit_preferences(&queue);
-            *queue = next;
-            *hub_add.album_id.borrow_mut() = preview.id.clone();
-            crate::show_cover(&ui, &hub_add, &preview.tracks[0].id);
-        } else {
-            queue.extend(preview.tracks.iter().cloned());
-            // A mixed queue must not advertise a single album's favourite action.
-            hub_add.album_id.borrow_mut().clear();
-        }
-        show_queue(&ui, &queue, &hub_add);
+        append_album(&ui, &hub_add, &player_add, &mut queue_add.borrow_mut(), &preview.id,
+            ui.get_album_title().as_str(), preview.tracks.iter().cloned());
         ui.set_album_note(format!("Добавлено в очередь: {}", preview.tracks.len()).into());
     });
+}
+
+pub(super) fn play_album(
+    ui: &AppWindow, hub: &HubState, player: &RefCell<Player>, queue: &RefCell<queue::Queue>,
+    config: &navidrome::ServerConfig, status: &str, waves: &Arc<wave::WaveHub>,
+    id: &str, mut album: queue::Queue, index: usize,
+) {
+    if !album.select(index) { return; }
+    if let Some(item) = queue.borrow().current() {
+        note_wave_leave(&player.borrow(), item, hub, false);
+    }
+    clear_wave(hub);
+    id.clone_into(&mut hub.album_id.borrow_mut());
+    album.inherit_preferences(&queue.borrow());
+    *queue.borrow_mut() = album;
+    jump(ui, player, queue, config, status, waves, hub, true);
+}
+
+pub(super) fn append_album(
+    ui: &AppWindow, hub: &HubState, player: &RefCell<Player>, queue: &mut queue::Queue,
+    id: &str, name: &str, tracks: impl ExactSizeIterator<Item = queue::Item>,
+) {
+    if tracks.len() == 0 { return; }
+    player.borrow_mut().cancel_preload();
+    if queue.is_empty() {
+        let mut album = queue::Queue::from_tracks(name, tracks.collect());
+        album.select(0);
+        album.inherit_preferences(queue);
+        *queue = album;
+        id.clone_into(&mut hub.album_id.borrow_mut());
+        if let Some(item) = queue.current() { crate::show_cover(ui, hub, &item.id); }
+    } else {
+        queue.extend(tracks);
+        if hub.album_id.borrow().as_str() != id { hub.album_id.borrow_mut().clear(); }
+    }
+    show_queue(ui, queue, hub);
 }

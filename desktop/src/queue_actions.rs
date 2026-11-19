@@ -55,9 +55,23 @@ pub fn connect_queue_actions(
     let state = hub.clone();
     let items = queue.clone();
     let playback = player.clone();
+    ui.on_undo_queue_removal(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        if items.borrow_mut().undo_removal() {
+            playback.borrow_mut().cancel_preload();
+            cancel_queue_load(&ui, &state);
+            show_queue(&ui, &items.borrow(), &state);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let state = hub.clone();
+    let items = queue.clone();
+    let playback = player.clone();
     let config = config.clone();
     let status = status.clone();
     let waves = waves.clone();
+    let undo_timer = slint::Timer::default();
     ui.on_remove_queue_row(move |source| {
         let Some(ui) = weak.upgrade() else { return };
         if source < 0 {
@@ -71,9 +85,15 @@ pub fn connect_queue_actions(
                 note_wave_leave(&playback.borrow(), item, &state, false);
             }
         }
-        if !items.borrow_mut().remove(source) {
+        if !items.borrow_mut().remove_with_undo(source) {
             return;
         }
+        let weak = ui.as_weak();
+        let queue = items.clone();
+        undo_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_secs(8), move || {
+            queue.borrow_mut().forget_removal();
+            if let Some(ui) = weak.upgrade() { ui.set_queue_undo_available(false); }
+        });
         playback.borrow_mut().cancel_preload();
         cancel_queue_load(&ui, &state);
         if current_removed {

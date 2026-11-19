@@ -3,6 +3,7 @@ import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
 import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
 
+export { ItemActions, TrackList, TrackPlacement } from "item-menus.slint";
 import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
 import { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow } from "tools.slint";
 export { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow }
@@ -19,7 +20,8 @@ export component AppWindow inherits Window {
     resize-border-width: 6px;
     forward-focus: keys;
     min-width: root.mode == Mode.mini ? 520px : (root.mode == Mode.medium ? 420px : 1000px);
-    min-height: (root.mode == Mode.mini ? 150px : (root.mode == Mode.medium ? 560px : 660px)) + (root.eq-open ? 132px : 0px);
+    min-height: root.layout-min-height;
+    out property <length> layout-min-height: (root.mode == Mode.mini ? 150px : (root.mode == Mode.medium ? 560px : 660px)) + (root.eq-open ? root.eq-panel-height : 0px);
 
     in-out property <Mode> mode: Mode.mini;
     property <int> mode-index: root.mode == Mode.mini ? 0 : root.mode == Mode.medium ? 1 : 2;
@@ -45,6 +47,11 @@ export component AppWindow inherits Window {
     in-out property <string> wave-message;
     in-out property <bool> eq-on;
     in-out property <bool> eq-open;
+    out property <length> eq-panel-height: 178px;
+    in-out property <[string]> eq-preset-names;
+    in-out property <string> eq-preset-name;
+    in-out property <int> eq-preset-index;
+    in-out property <string> eq-preset-status;
     in-out property <float> preamp;
     in-out property <[float]> bands;
     in-out property <bool> playing;
@@ -52,6 +59,7 @@ export component AppWindow inherits Window {
     in-out property <int> current-queue-row: -1;
     in-out property <string> queue-title: "Очередь";
     in-out property <string> queue-total;
+    in-out property <bool> queue-undo-available;
     in-out property <length> large-queue-width: 304px;
     in-out property <[ArtistItem]> artists;
     in-out property <[AlbumItem]> albums;
@@ -101,10 +109,13 @@ export component AppWindow inherits Window {
     callback set-preamp(float);
     callback set-band(int, float);
     callback reset-eq();
+    callback save-eq-preset(string);
+    callback apply-eq-preset(int);
     callback search-edited(string);
     callback queue-search-edited(string);
     callback move-queue-row(int, int);
     callback remove-queue-row(int);
+    callback undo-queue-removal();
     callback queue-row-next(int);
     callback close-album();
     callback album-play();
@@ -119,6 +130,7 @@ export component AppWindow inherits Window {
     callback toggle-catalog();
     callback pick-hit(int);
     callback download-hit(int);
+    callback check-source(int);
     callback star-album(int);
     callback pick-home(int);
     callback navigate(string);
@@ -305,6 +317,7 @@ export component AppWindow inherits Window {
                         toggle-catalog => { root.toggle-catalog(); }
                         pick-hit(index) => { root.pick-hit(index); }
                         download-hit(index) => { root.download-hit(index); }
+                        check-source(index) => { root.check-source(index); }
                     }
                     if root.mode == Mode.large : Large {
                         width: 100%;
@@ -386,6 +399,7 @@ export component AppWindow inherits Window {
                         toggle-catalog => { root.toggle-catalog(); }
                         pick-hit(index) => { root.pick-hit(index); }
                         download-hit(index) => { root.download-hit(index); }
+                        check-source(index) => { root.check-source(index); }
                         star-album(index) => { root.star-album(index); }
                         home-open: root.home-open;
                         home-title: root.home-title;
@@ -397,16 +411,56 @@ export component AppWindow inherits Window {
                         navigate(page) => { root.navigate(page); }
                         pick-home(index) => { root.pick-home(index); }
                     }
+
+                    if root.queue-undo-available && root.mode != Mode.mini : Rectangle {
+                        x: parent.width - self.width - 12px;
+                        y: parent.height - self.height - (root.mode == Mode.large ? 82px : 46px);
+                        width: 165px;
+                        height: 28px;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: undo-touch.has-hover || undo-keys.has-focus ? Theme.orange : Theme.dim;
+                        background: Theme.raised;
+                        undo-keys := FocusScope {
+                            accessible-role: button;
+                            accessible-label: "Трек убран · Вернуть";
+                            accessible-action-default => { root.undo-queue-removal(); }
+                            key-pressed(event) => {
+                                if event.text == Key.Return || event.text == " " {
+                                    root.undo-queue-removal();
+                                    accept
+                                } else { reject }
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                cross-axis-alignment: center;
+                                spacing: 4px;
+                                Text { text: "Трек убран ·"; color: Theme.text; font-size: 12px; }
+                                Text { text: "Вернуть"; color: Theme.orange; font-size: 12px; }
+                            }
+                            undo-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.undo-queue-removal(); }
+                            }
+                        }
+                    }
                 }
 
                 if root.eq-open : Equalizer {
+                    height: root.eq-panel-height;
                     enabled: root.eq-on;
                     preamp: root.preamp;
                     bands: root.bands;
+                    preset-names: root.eq-preset-names;
+                    preset-name <=> root.eq-preset-name;
+                    preset-index <=> root.eq-preset-index;
+                    preset-status: root.eq-preset-status;
                     set-enabled(on) => { root.set-eq-enabled(on); }
                     set-preamp(value) => { root.set-preamp(value); }
                     set-band(index, value) => { root.set-band(index, value); }
                     reset => { root.reset-eq(); }
+                    save-preset(name) => { root.save-eq-preset(name); }
+                    apply-preset(index) => { root.apply-eq-preset(index); }
                 }
             }
         }

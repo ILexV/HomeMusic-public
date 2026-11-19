@@ -2,7 +2,9 @@
 
 mod album_view;
 mod commands;
+mod context_actions;
 mod eq;
+mod eq_presets;
 mod home;
 mod hub;
 mod media_keys;
@@ -52,6 +54,10 @@ enum HubEvent {
     },
     AlbumLoaded {
         ticket: u64,
+        result: Result<(String, navidrome::LibraryQueue), String>,
+    },
+    CardAlbum {
+        request: context_actions::AlbumRequest,
         result: Result<navidrome::LibraryQueue, String>,
     },
     QueueLoaded {
@@ -65,6 +71,7 @@ enum HubEvent {
         ticket: u64,
         hits: Vec<hub::CatalogHit>,
     },
+    SourceChecked { ticket: u64, index: usize, reference: String, availability: hub::Availability },
     Miss {
         ticket: u64,
         message: String,
@@ -384,6 +391,7 @@ fn main() -> Result<(), slint::PlatformError> {
         hub: hub_state.clone(),
         waves: waves.clone(),
     };
+    context_actions::bind(&ui, &feature_context);
     let _audio_features = audio_features::bind(&feature_context, &tools);
     let _queue_modes = queue_modes::bind(&feature_context, &tools);
     *hub_state.modes.borrow_mut() = Rc::downgrade(&_queue_modes);
@@ -477,6 +485,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    eq_presets::connect(&ui, &player, paths::dir().join("eq-presets.json"));
     let ui_eq = ui.as_weak();
     ui.on_toggle_eq(move || {
         if let Some(ui) = ui_eq.upgrade() {
@@ -1042,6 +1051,24 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_search_edited(ui.get_search());
     });
 
+    let ui_source = ui.as_weak();
+    let hub_source = hub_state.clone();
+    ui.on_check_source(move |index| {
+        let (Some(ui), Ok(index)) = (ui_source.upgrade(), usize::try_from(index)) else { return };
+        let mut hits = hub_source.hits.borrow_mut();
+        let Some(hit) = hits.get_mut(index) else { return };
+        if hit.kind != hub::HitKind::Track || !hit.availability.can_check() || hit.reference.is_empty() { return; }
+        update_hit_availability(&ui, index, hit, hub::Availability::Checking);
+        let reference = hit.reference.clone();
+        let client = Arc::clone(&hub_source.hub);
+        let events = Arc::clone(&hub_source.events);
+        let ticket = hub_source.search_generation.get();
+        std::thread::spawn(move || {
+            let availability = client.check_availability(&reference);
+            push_event(&events, HubEvent::SourceChecked { ticket, index, reference, availability });
+        });
+    });
+
     let ui_hit = ui.as_weak();
     let hub_hit = hub_state.clone();
     let queue_hit = queue.clone();
@@ -1423,7 +1450,7 @@ fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
     if let Some((width, height)) =
         session.and_then(|place| window_place::usable_size(place.width, place.height))
     {
-        ui.window().set_size(slint::LogicalSize::new(width, height));
+        ui.window().set_size(slint::LogicalSize::new(width, height.max(ui.get_layout_min_height())));
     } else {
         resize(ui, mode);
     }
@@ -1661,8 +1688,6 @@ fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
     ui.set_duration_label(if duration > 0.0 { clock(duration) } else { "—:—".into() }.into());
 }
 
-const EQ_PANEL_HEIGHT: f32 = 132.0;
-
 fn resize(ui: &AppWindow, mode: i32) {
     // Presets include the title strip; the equalizer expands the same window.
     let (width, mut height) = match mode {
@@ -1671,7 +1696,7 @@ fn resize(ui: &AppWindow, mode: i32) {
         _ => (1180.0, 760.0),
     };
     if ui.get_eq_open() {
-        height += EQ_PANEL_HEIGHT;
+        height += ui.get_eq_panel_height();
     }
     ui.window().set_size(slint::LogicalSize::new(width, height));
 }
@@ -1687,11 +1712,11 @@ fn set_eq_open(ui: &AppWindow, open: bool) {
         return;
     }
     let delta = if open {
-        EQ_PANEL_HEIGHT
+        ui.get_eq_panel_height()
     } else {
-        -EQ_PANEL_HEIGHT
+        -ui.get_eq_panel_height()
     };
-    let height = (size.height + delta).clamp(80.0, 4000.0);
+    let height = (size.height + delta).clamp(ui.get_layout_min_height(), 4000.0);
     ui.window()
         .set_size(slint::LogicalSize::new(size.width, height));
 }
@@ -1826,6 +1851,16 @@ fn clear_catalog(ui: &AppWindow, hub: &HubState) {
     ui.set_catalog_note("Введите название или исполнителя".into());
 }
 
+fn update_hit_availability(ui: &AppWindow, index: usize, hit: &mut hub::CatalogHit, availability: hub::Availability) {
+    hit.availability = availability;
+    let model = ui.get_hits();
+    if let Some(mut row) = model.row_data(index) {
+        row.availability = availability.label().into();
+        row.can_check_source = availability.can_check();
+        model.set_row_data(index, row);
+    }
+}
+
 fn show_hits(ui: &AppWindow, hits: &[hub::CatalogHit]) {
     let rows = hits
         .iter()
@@ -1837,9 +1872,12 @@ fn show_hits(ui: &AppWindow, hits: &[hub::CatalogHit]) {
                 ""
             }.into(),
             is_album: hit.kind == hub::HitKind::Album,
+            song_id: if hit.owned { hit.nd_song_id.as_str() } else { "" }.into(),
             title: hit.title.clone().into(),
             artist: hit.artist.clone().into(),
             detail: hit.detail.clone().into(),
+            availability: if hit.kind == hub::HitKind::Track { hit.availability.label() } else { "" }.into(),
+            can_check_source: hit.kind == hub::HitKind::Track && !hit.reference.is_empty() && hit.availability.can_check(),
             action: hit.action().into(),
             download_action: if hit.kind == hub::HitKind::Track && !hit.owned {
                 if hit.downloading { "качается" } else { "скачать" }
@@ -1986,6 +2024,9 @@ fn apply_hub_events(
             HubEvent::AlbumLoaded { ticket, result } => {
                 apply_album_result(ui, hub, ticket, result);
             }
+            HubEvent::CardAlbum { request, result } => {
+                context_actions::apply_card_album(ui, hub, player, queue, config, status, waves, request, result);
+            }
             HubEvent::QueueLoaded { ticket, result, context } => {
                 if ticket != hub.queue_generation.get() {
                     continue;
@@ -2037,6 +2078,13 @@ fn apply_hub_events(
                     hub.hub_note.borrow_mut().clear();
                     ui.set_catalog_busy(false);
                     refresh_hits = true;
+                }
+            }
+            HubEvent::SourceChecked { ticket, index, reference, availability } => {
+                if hub.catalog_open.get() && ticket == hub.search_generation.get() {
+                    if let Some(hit) = hub.hits.borrow_mut().get_mut(index).filter(|hit| hit.reference == reference) {
+                        update_hit_availability(ui, index, hit, availability);
+                    }
                 }
             }
             HubEvent::Miss { ticket, message } => {
@@ -2420,6 +2468,8 @@ fn refresh_home(ui: &AppWindow, hub: &HubState, playing: bool) {
         HomeRow {
             source: source as i32,
             kind: row.kind.into(),
+            album_id: if row.kind == "album" { row.key.as_str() } else { "" }.into(),
+            song_id: row.song_id.as_str().into(),
             title: row.title.as_str().into(),
             detail: row.detail.as_str().into(),
             accent: row.accent,
@@ -2620,20 +2670,24 @@ fn play_songs(
     jump(ui, player, queue, config, status, waves, hub, moved);
 }
 
+fn playable_item(song: &hub::Playable) -> queue::Item {
+    queue::Item {
+        id: song.nd_song_id.clone(),
+        path: String::new(),
+        listen_ref: song.reference.clone(),
+        title: song.title.clone(),
+        artist: song.artist.clone(),
+        album: song.album.clone(),
+        meta: String::new(),
+        duration_s: song.duration_s,
+    }
+}
+
 fn queue_from_playables(name: &str, songs: &[hub::Playable]) -> queue::Queue {
     let items = songs
         .iter()
         .filter(|song| song.can_play())
-        .map(|song| queue::Item {
-            id: song.nd_song_id.clone(),
-            path: String::new(),
-            listen_ref: song.reference.clone(),
-            title: song.title.clone(),
-            artist: song.artist.clone(),
-            album: song.album.clone(),
-            meta: String::new(),
-            duration_s: song.duration_s,
-        })
+        .map(playable_item)
         .collect();
     queue::Queue::from_tracks(name, items)
 }
@@ -2659,16 +2713,7 @@ fn append_playables(queue: &RefCell<queue::Queue>, songs: &[hub::Playable]) {
         };
         !have.contains(key)
     });
-    queue.extend(items.map(|song| queue::Item {
-        id: song.nd_song_id.clone(),
-        path: String::new(),
-        listen_ref: song.reference.clone(),
-        title: song.title.clone(),
-        artist: song.artist.clone(),
-        album: song.album.clone(),
-        meta: String::new(),
-        duration_s: song.duration_s,
-    }));
+    queue.extend(items.map(playable_item));
 }
 
 fn album_line(album: &navidrome::Album) -> String {
@@ -2745,21 +2790,21 @@ fn visible_sources(queue: &queue::Queue, query: &str) -> Vec<usize> {
         .collect()
 }
 
+fn library_item(track: navidrome::LibraryTrack) -> queue::Item {
+    queue::Item {
+        id: track.id,
+        path: String::new(),
+        listen_ref: String::new(),
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        meta: track.meta,
+        duration_s: track.duration_s,
+    }
+}
+
 fn library_to_queue(library: navidrome::LibraryQueue) -> queue::Queue {
-    let items = library
-        .tracks
-        .into_iter()
-        .map(|track| queue::Item {
-            id: track.id,
-            path: String::new(),
-            listen_ref: String::new(),
-            title: track.title,
-            artist: track.artist,
-            album: track.album,
-            meta: track.meta,
-            duration_s: track.duration_s,
-        })
-        .collect();
+    let items = library.tracks.into_iter().map(library_item).collect();
     queue::Queue::from_tracks(library.name, items)
 }
 
@@ -2900,6 +2945,7 @@ fn take_queue_step(player: &mut Player, queue: &mut queue::Queue) -> bool {
 }
 
 fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
+    ui.set_queue_undo_available(queue.has_undo());
     if !queue.is_empty() {
         hub.playback_ready.set(true);
     }
@@ -2924,6 +2970,9 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
                 meta: item.artist.clone().into(),
                 duration: row_duration(item).into(),
                 current: is_current,
+                song_id: item.id.as_str().into(),
+                can_move_next: !is_current && index != current.map_or(0, |i| i + 1),
+                can_move_end: index + 1 < queue.items().len(),
             }
         })
         .collect();
@@ -3009,6 +3058,7 @@ fn apply_cover(
 }
 
 fn clear_track(ui: &AppWindow) {
+    ui.set_queue_undo_available(false);
     ui.set_track_title("Нет трека".into());
     ui.set_track_artist(String::new().into());
     ui.set_track_album(String::new().into());
@@ -3092,10 +3142,12 @@ mod tests {
             home::Row {
                 kind: "album", key: "new".into(), title: "Same title".into(),
                 detail: String::new(), cover_id: "new-art".into(), accent: false,
+                song_id: String::new(),
             },
             home::Row {
                 kind: "album", key: "old".into(), title: "Same title".into(),
                 detail: String::new(), cover_id: "old-art".into(), accent: false,
+                song_id: String::new(),
             },
         ];
         let displayed = |source| HomeRow {

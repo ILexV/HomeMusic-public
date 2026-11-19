@@ -42,6 +42,37 @@ pub enum HitKind {
     Album,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Availability {
+    Unknown, Checking, Library, Full, Preview, CheckFailed,
+}
+
+impl Availability {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Источник не определён",
+            Self::Checking => "Проверяем источник…",
+            Self::Library => "В библиотеке",
+            Self::Full => "Полная запись",
+            Self::Preview => "Только превью · до 30 с",
+            Self::CheckFailed => "Не удалось проверить источник",
+        }
+    }
+
+    pub fn can_check(self) -> bool {
+        matches!(self, Self::Unknown | Self::CheckFailed)
+    }
+
+    fn from_listen(body: &Value) -> Self {
+        match body["kind"].as_str() {
+            Some("library") => Self::Library,
+            Some("full") => Self::Full,
+            Some("preview") => Self::Preview,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogHit {
     pub kind: HitKind,
@@ -53,6 +84,7 @@ pub struct CatalogHit {
     pub detail: String,
     pub duration_s: u32,
     pub owned: bool,
+    pub availability: Availability,
     pub downloading: bool,
 }
 
@@ -145,6 +177,12 @@ impl Hub {
         let path = format!("/api/search?q={}", encode(query.trim()));
         let body = self.send("GET", &path, None)?;
         Ok(parse_search(&body))
+    }
+
+    pub fn check_availability(&self, reference: &str) -> Availability {
+        // Resolve only the selected track, with the same preview policy as the Play button.
+        self.send("GET", &format!("/api/listen?ref={}", encode(reference)), None)
+            .map(|body| Availability::from_listen(&body)).unwrap_or(Availability::CheckFailed)
     }
 
     pub fn download_track(&self, reference: &str) -> Result<String, String> {
@@ -508,6 +546,7 @@ fn album_hit(album: &Value) -> Option<CatalogHit> {
         },
         duration_s: 0,
         owned,
+        availability: Availability::Unknown,
         downloading: false,
     })
 }
@@ -535,6 +574,7 @@ fn track_hit(track: &Value) -> Option<CatalogHit> {
         (seconds, true) => clock(seconds),
         (seconds, false) => format!("{} · {album}", clock(seconds)),
     };
+    let owned = track.get("owned").and_then(Value::as_bool).unwrap_or(!nd_song_id.is_empty());
     Some(CatalogHit {
         kind: HitKind::Track,
         reference,
@@ -551,8 +591,8 @@ fn track_hit(track: &Value) -> Option<CatalogHit> {
         album,
         detail,
         duration_s,
-        owned: track.get("owned").and_then(Value::as_bool).unwrap_or(false)
-            || !text(track, "nd_song_id").is_empty() && track.get("owned").is_none(),
+        owned,
+        availability: if owned { Availability::Library } else { Availability::Unknown },
         downloading: track
             .get("downloading")
             .and_then(Value::as_bool)
@@ -1326,6 +1366,20 @@ mod tests {
         let dumped = format!("{hits:?}");
         assert!(!dumped.contains("example.test"));
         assert!(!dumped.contains("secret"));
+    }
+
+    #[test]
+    fn availability_uses_the_resolved_recording_not_a_catalog_preview_url() {
+        let hits = parse_search(&serde_json::json!({"tracks": [
+            {"ref": "dz:1", "duration_s": 30, "preview_url": "https://example.test"},
+            {"ref": "dz:2", "owned": true, "nd_song_id": "song2"}
+        ]}));
+        assert_eq!(hits[0].availability, Availability::Unknown);
+        assert_eq!(hits[1].availability, Availability::Library);
+        for (kind, expected) in [("full", Availability::Full), ("preview", Availability::Preview),
+            ("library", Availability::Library), ("unexpected", Availability::Unknown)] {
+            assert_eq!(Availability::from_listen(&serde_json::json!({"kind": kind})), expected);
+        }
     }
 
     #[test]

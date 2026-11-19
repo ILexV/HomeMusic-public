@@ -6,6 +6,9 @@ export struct QueueItem {
     meta: string,
     duration: string,
     current: bool,
+    song-id: string,
+    can-move-next: bool,
+    can-move-end: bool,
 }
 
 export struct AlbumItem {
@@ -23,9 +26,12 @@ export struct CatalogHit {
     title: string,
     artist: string,
     detail: string,
+    availability: string,
+    can-check-source: bool,
     action: string,
     download-action: string,
     can-download: bool,
+    song-id: string,
 }
 
 export struct ArtistItem {
@@ -42,6 +48,8 @@ export struct HomeRow {
     title: string,
     detail: string,
     accent: bool,
+    album-id: string,
+    song-id: string,
 }
 
 export struct HomeSection {
