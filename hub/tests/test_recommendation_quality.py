@@ -98,6 +98,58 @@ def test_sparse_learning_is_neutral_and_factors_are_bounded():
     assert out["attempts"] == 0 and out["completion_rate"] is None and out["new_track_like_rate"] is None
 
 
+def test_shares_only_use_recorded_positive_contributions_and_conserve_each_outcome():
+    from dataclasses import replace
+
+    raw = {"radio": 6, "tags": 3., "charts": 1., "zero": 0, "negative": -2, "invalid": "9",
+           "bool": True, "inf": float("inf"), "nan": float("nan")}
+    snapshot = {"generators": {"unrelated": 0}, "score_parts": {
+        "generator_contributions": raw, "generator_weights": {"unrelated": 100}}}
+    d = replace(decision(generator="radio"), decision_json=snapshot)
+    assert rec.source_shares(d) == pytest.approx({"radio": .6, "tags": .3, "charts": .1})
+    no_parts = replace(d, decision_json={"generators": {"unrelated": 0}})
+    assert rec.source_shares(no_parts) == {"radio": 1.}
+    assert rec.source_shares(replace(no_parts, generator="")) == {}
+    assert rec.source_shares(replace(d, decision_json={"score_parts": {
+        "generator_contributions": {"a": 1e308, "b": 1e308}}})) == {"a": .5, "b": .5}
+
+    rows = [event("finish"), event("like", at=NOW), event("skip", attempt="b", listened_ms=5000),
+            event("error", attempt="c"), event("interrupted", attempt="d"), event("start", attempt="unfinished")]
+    out = report(rows, [d])
+    for source in out["sources"]:
+        share = rec.source_shares(d)[source["id"]]
+        for metric in ("attempts", "eligible_plays", "early_skips", "completed", "playback_errors", "new_track_likes"):
+            assert source["effective_" + metric] == pytest.approx(share * out[metric])
+        assert source["fallback_attempts"] == 0
+        assert source["attempts"] == (out["attempts"] if source["id"] == "radio" else 0)
+    assert (out["attempts"], out["eligible_plays"], out["completed"], out["early_skips"],
+            out["playback_errors"], out["new_track_likes"]) == (5, 2, 1, 1, 1, 1)
+
+
+def test_mixed_track_attempt_id_cannot_assign_another_tracks_outcome():
+    events = [event("start"), event("finish", ref="dz:changed")]
+    out = report(events, [decision(), decision("dz:changed", generator="other")])
+    assert out["eligible_plays"] == 1
+    assert out["sources"] == [] and out["new_track_plays"] == 0
+
+
+def test_threshold_uses_effective_outcomes_and_winner_only_comparison_is_observed():
+    from dataclasses import replace
+
+    d = replace(decision(generator="radio"), decision_json={"score_parts": {
+        "generator_contributions": {"radio": 1, "tags": 1}}})
+    rows = [event("finish", attempt=f"play{i}") for i in range(40)]
+    before = {s["id"]: s for s in report(rows[:-1], [d])["sources"]}
+    assert before["radio"]["winner_only_multiplier"] > 1
+    for source in before.values():
+        assert source["effective_learning_samples"] == 19.5 and source["multiplier"] == 1
+    at = {s["id"]: s for s in report(rows, [d])["sources"]}
+    for source in at.values():
+        assert source["multiplier"] == pytest.approx(1 + .25 * 20 / 60)
+        assert source["effective_learning_samples"] == 20
+    assert at["tags"]["winner_only_multiplier"] == 1 and at["tags"]["learning_samples"] == 0
+
+
 def test_explanation_uses_actual_weights_and_known_sound_only():
     from app.mixes import build
     from tests.test_mix_build import tr
@@ -195,6 +247,81 @@ async def test_api_owned_frozen_decisions_and_learning_isolation(quality_db, mon
     learned = await rec.adapted_weights(users[0], base)
     assert 1 < learned["ytm_radio"] <= 1.25 and learned["favorites"] == .5 and learned["disabled"] == 0
     assert await rec.adapted_weights(users[1], base) == base
+
+
+async def test_recorded_credit_is_the_same_in_live_weights_api_window_and_offline_replay(quality_db, db_file, monkeypatch):
+    from app.db import session_scope
+    from app.matching.replay_quality import observed_quality
+    from app.mixes.evaluate import readonly_db
+    from app.models import Mix, MixItem, SmartItem, SmartSession, WaveItem, WaveSession
+
+    (uid, other), _ = quality_db
+    monkeypatch.setattr(rec, "utcnow", lambda: NOW)
+    offered = NOW - timedelta(days=75)
+    recent = NOW - timedelta(days=1)
+
+    def snapshot(weights):
+        return {"novelty": "new_artist", "score_parts": {"generator_contributions": weights}}
+
+    async with session_scope() as s:
+        s.add_all([Mix(id=42, user_id=uid, created_at=offered - timedelta(days=2), title="mix", mode="normal"),
+                   WaveSession(id="w42", user_id=uid, created_at=offered),
+                   SmartSession(id="s42", user_id=uid, context="liked", created_at=offered)])
+        await s.flush()
+        s.add_all([
+            MixItem(mix_id=42, position=0, ref="dz:1", generator="radio", offered_at=offered,
+                    features_json=snapshot({"radio": 3, "charts": 1})),
+            MixItem(mix_id=42, position=1, ref="dz:failed", generator="not-offered", state="failed"),
+            WaveItem(session_id="w42", user_id=uid, position=0, ref="dz:2", key="dz:2", first_handed_at=offered,
+                     last_handed_at=NOW, handed_count=2, generator="tags", decision_json=snapshot({"charts": 1, "tags": 3})),
+            # Old waves overwrote their snapshot on repeat: no credit before its last known handout.
+            WaveItem(session_id="w42", user_id=uid, position=1, ref="dz:5", key="dz:5", first_handed_at=offered,
+                     last_handed_at=recent, handed_count=2, generator="too-late", decision_json={}),
+            SmartItem(session_id="s42", user_id=uid, position=0, slot=0, ref="dz:3", handed_at=offered,
+                      generator="charts", decision_json=snapshot({"charts": 2, "tags": 2})),
+            SmartItem(session_id="s42", user_id=uid, position=1, slot=1, ref="dz:4", handed_at=offered,
+                      generator="old", decision_json={"generators": {"wrong": 0}})])
+        s.add_all([event("finish", user=uid, context="mix:42", attempt=f"past{i}",
+                         at=NOW - timedelta(days=65) + timedelta(minutes=i)) for i in range(80)])
+        s.add_all([event("finish", user=uid, context="mix:42", attempt="pre-offer", at=offered - timedelta(hours=1)),
+                   event("finish", user=uid, context="wave:w42", ref="dz:5", attempt="pre-rehand",
+                         at=NOW - timedelta(days=65)),
+                   event("finish", user=uid, ref="dz:failed", context="mix:42", attempt="never-offered",
+                         at=NOW - timedelta(days=65)),
+                   event("finish", user=uid, ref="dz:3", context="smart:s42", attempt="discovery",
+                         at=NOW - timedelta(days=18)),
+                   event("like", user=uid, ref="dz:3", context="search", at=NOW - timedelta(days=17)),
+                   event("finish", user=uid, context="mix:42", at=recent),
+                   event("skip", user=uid, ref="dz:2", context="wave:w42", attempt="b", at=recent, listened_ms=1000),
+                   event("finish", user=uid, ref="dz:3", context="smart:s42", attempt="c", at=recent),
+                   event("finish", user=uid, ref="dz:4", context="smart:s42", attempt="d", at=recent),
+                   event("finish", user=other, context="mix:42", attempt="not-owner", at=recent)])
+
+    async with session_scope() as s:
+        live = await rec.quality(s, uid, days=7, now=NOW)
+    with readonly_db(db_file) as c:
+        replay = observed_quality(c, user_id=uid, until=NOW, days=7)
+        assert not observed_quality(c, user_id=other, until=NOW, days=7)["sources"]
+    assert live["discovery_adoption"] == replay["discovery_adoption"]
+    assert live["discovery_adoption"]["mature"] == live["discovery_adoption"]["adopted"] == 1
+    assert {r["id"]: r["adopted"] for r in live["discovery_adoption"]["sources"]} == {"charts": .5, "tags": .5}
+    active = {s["id"]: s for s in live["sources"] if s["effective_learning_samples"]}
+    assert active == {s["id"]: s for s in replay["sources"]}
+    assert set(active) == {"radio", "charts", "tags", "old"}
+    assert sum(s["effective_attempts"] for s in active.values()) == live["attempts"] == 4
+    assert sum(s["effective_learning_samples"] for s in active.values()) == 85
+    assert active["old"]["fallback_attempts"] == active["old"]["effective_eligible_plays"] == 1
+    assert active["radio"]["learning_samples"] == 81
+    assert type(active["charts"]["learning_samples"]) is int
+    assert active["charts"]["effective_learning_samples"] == 21.5
+    assert (active["charts"]["effective_completed"], active["charts"]["effective_early_skips"]) == (.75, .25)
+    assert active["tags"]["effective_eligible_plays"] == 1.25
+    assert active["charts"]["winner_only_multiplier"] == 1.
+    assert active["charts"]["multiplier"] == pytest.approx(1 + .25 * 21 / 61.5)
+    base = {"radio": .5, "charts": 2., "tags": 1.}
+    assert await rec.adapted_weights(uid, base) == {
+        name: weight * active[name]["multiplier"] for name, weight in base.items()}
+    assert await rec.adapted_weights(other, base) == base
 
 
 async def test_mix_and_smart_apply_blocked_and_soft_penalized_candidates(quality_db, monkeypatch):

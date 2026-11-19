@@ -116,7 +116,6 @@ class V2Profile(Profile):
     evidence: float = 0.0
     maturity: float = 0.0
     explicit_negative_keys: set[str] = field(default_factory=set)
-    favorite_states: dict[tuple[str, str], State] = field(default_factory=dict)
     geometry: GeometryProfile | None = None
     limitations: tuple[str, ...] = ()
 
@@ -124,10 +123,6 @@ class V2Profile(Profile):
     def empty(self) -> bool:
         return not (any(t.score > 0 or t.liked or t.downloaded or t.album_liked for t in self.tracks.values()) or
                     any(st.liked for st in self.favorite_states.values()) or self.picked_artists)
-
-    def known(self, *, ref=None, nd_song_id=None, fp=None) -> bool:
-        t = self.find(ref=ref, nd_song_id=nd_song_id, fp=fp)
-        return bool(t and t.familiar)
 
     def seeds(self, n: int, max_per_artist: int = 2) -> list[TasteTrack]:
         from app.mixes.taste_select import select_profile_seeds

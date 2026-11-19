@@ -120,6 +120,30 @@ async def test_a_long_playlist_gets_a_recommendation_after_every_third_own_song(
     assert env["prefetched"][-1] == [r["ref"] for r in plan["recs"]]  # their files are picked ahead
 
 
+@pytest.mark.parametrize("model", ["v1", "v2"])
+async def test_smart_slots_record_track_novelty_from_account_history(env, monkeypatch, model):
+    from app.config import get_settings
+    from app.db import session_scope
+    from app.models import SmartItem
+
+    monkeypatch.setattr(get_settings().cfg.mixes, "taste_model", model)
+    ids = await library(13)
+    at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=10)
+    for i in range(6):
+        await add_event(env["admin"], "finish", nd=ids[-1], at=at - timedelta(hours=i))
+    familiar = CatalogTrack(ref="dz:13", source="dz", id="13", title="Песня 13", artist="Свой 13", duration_s=200)
+    fake_gens(monkeypatch, [new(0, "Свой 13"), new(1), familiar])
+    plan = await start(env["client"], ids[:-1], current=ids[0])
+    assert [r["slot"] for r in plan["recs"]] == [0, 1, 2]
+    async with session_scope() as s:
+        rows = (await s.scalars(select(SmartItem).where(SmartItem.session_id == plan["session_id"]))).all()
+        assert {r.ref: (r.familiar, r.decision_json["novelty"]) for r in rows} == {
+            "dz:5000": (False, "new_track_known_artist"), "dz:5001": (False, "new_artist"),
+            "dz:13": (True, "familiar_track")}
+    assert any("Новый трек знакомого исполнителя" in why for r in plan["recs"] if r["ref"] == "dz:5000"
+               for why in r["explanation"])
+
+
 async def test_a_short_playlist_gets_one_after_every_second_and_a_tiny_one_gets_one(env, monkeypatch) -> None:
     ids = await library(8)
     fake_gens(monkeypatch, [new(i) for i in range(30)])

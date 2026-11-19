@@ -73,7 +73,7 @@ def read_snapshot(connection, *, user_id: int, until: datetime,
         events.append(TasteEvent(**data))
     limitations = ["Historical state before journal coverage is incomplete; unjournalled removals are unknown.",
         "Current likes/dislikes, onboarding, downloads, aliases and metadata were not imported into the past.",
-        "Historical vectors, facets, generator contributions and exposure propensities are not recorded.",
+        "Taste replay has no historical vectors, facets or exposure propensities. Observed quality uses generator contributions only where the decision recorded them.",
         "v1 baseline uses corrected B ledger and local events only; phantom ND/network heuristics are not reproduced."]
     if missing_received:
         limitations.append("Events without received_at are unavailable in available-at mode.")

@@ -96,14 +96,14 @@ class WaveError(Exception):
 
 
 def cand_json(c: build.Cand) -> dict[str, Any]:
-    return {"track": c.track.model_dump(mode="json"), "gens": c.gens, "familiar": c.familiar,
+    return {"track": c.track.model_dump(mode="json"), "gens": c.gens, "familiar": c.familiar, "novelty": c.novelty,
             "nd_song_id": c.nd_song_id, "library_track_id": c.library_track_id, "sim": c.sim,
             "score": c.score, "parts": c.parts, "known": c.known, "explanation": c.explanation}
 
 
 def cand_of(d: dict[str, Any]) -> build.Cand:
     return build.Cand(track=CatalogTrack.model_validate(d["track"]), gens=dict(d.get("gens") or {}),
-                      familiar=bool(d.get("familiar")), nd_song_id=d.get("nd_song_id"),
+                      familiar=bool(d.get("familiar")), novelty=d.get("novelty"), nd_song_id=d.get("nd_song_id"),
                       library_track_id=d.get("library_track_id"), sim=d.get("sim"), score=float(d.get("score") or 0),
                       parts=d.get("parts"), known=d.get("known"), explanation=list(d.get("explanation") or []))
 
@@ -608,6 +608,13 @@ def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: i
                 or next((c for c in ranked if not seq or c.artist != seq[-1]), None))
         if best is None:
             break
+        if share == build.MODES["discover"] and best.novelty in build.DISCOVERIES and best.track.ref not in queued:
+            # Keep both kinds of discovery in each batch, including the reserve batch prepared for failed audio.
+            # Explicit seeds, the familiar quota, queue stability and artist spacing still take precedence.
+            batch = out[len(out) // BATCH * BATCH:]
+            if {c.novelty for c in batch if c.novelty in build.DISCOVERIES} == {best.novelty}:
+                spaced = ok or (c for c in ranked if not seq or c.artist != seq[-1])
+                best = next((c for c in spaced if c.novelty in build.DISCOVERIES and c.novelty != best.novelty), best)
         ranked.remove(best)
         out.append(best)
     return out
@@ -1113,7 +1120,6 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
             await build.link_library({seed_track.ref: first})
             if _disliked(first, profile):
                 raise WaveError(409, "Начальный трек исключён из рекомендаций")
-            first.familiar = build.keep(first, profile, cfg) and first.familiar
             first.score = build.score(first, weights(), profile)
         if first is not None:
             rt.state.heard.add(fp_of(first))  # the radios' copies of the seed stay out
@@ -1246,7 +1252,7 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
                                   recent_offers.penalty(offered, c.track.ref, c.nd_song_id))
         c.parts["recent_offer_penalty"] = c.recent_offer_penalty
         c.score = c.parts["total"]
-        c.known = build.known_of(c, rt.profile)
+        build.snapshot_profile(c, rt.profile)
         c.parts["pause_multiplier"] = policy.multiplier(c)
         c.parts["preferences"] = dict(st.preferences)
     await _preferences(rt, candidates)
@@ -1307,9 +1313,7 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
 
 async def save_items(s: AsyncSession, sid: str, user_id: int, tracks: list[build.Cand],
                      values: dict[str, float], now: datetime | None = None) -> None:
-    """What the wave handed out into `wave_items` (INSIGHTS.md 6.4): a track new to the session gets the next
-    position; one handed out again (it went back to the pool, or the client still has it queued) counts once more,
-    with its latest score, closeness and value."""
+    """Record the first decision immutably; handing out the same track updates only its exposure count/time."""
     if not tracks:
         return
     now = now or utcnow()
@@ -1334,10 +1338,7 @@ async def save_items(s: AsyncSession, sid: str, user_id: int, tracks: list[build
             nxt += 1
     q = sqlite_insert(WaveItem).values(rows)
     await s.execute(q.on_conflict_do_update(index_elements=["session_id", "ref"], set_={
-        "handed_count": WaveItem.handed_count + 1, "last_handed_at": q.excluded.last_handed_at,
-        "score": q.excluded.score, "sim": q.excluded.sim, "value": q.excluded.value,
-        "generator": q.excluded.generator, "gens": q.excluded.gens, "familiar": q.excluded.familiar,
-        "decision_json": q.excluded.decision_json}))
+        "handed_count": WaveItem.handed_count + 1, "last_handed_at": q.excluded.last_handed_at}))
 
 
 async def settle(sid: str) -> None:

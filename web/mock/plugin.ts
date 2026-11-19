@@ -975,6 +975,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
       ...empty, days, since, until, metric_version: 'mock-empty', provenance: 'dev mock without listening history',
       starts: 0, playback_errors: 0, interrupted: 0, new_track_plays: 0, new_track_likes: 0, repeats: 0,
       new_track_like_rate: null, repeat_rate: null, sources: [], limitations: ['Демонстрационный режим: истории прослушиваний нет.'],
+      discovery_adoption: { window_days: 14, mature: 0, adopted: 0, pending: 0, rate: null, sources: [], limitations: [],
+        cohort_since: new Date(Date.parse(since) - 14 * 86400_000).toISOString(),
+        cohort_until: new Date(Date.parse(until) - 14 * 86400_000).toISOString() },
       comparison: {
         current: { ...empty, since, until },
         previous: { ...empty, since: new Date(Date.parse(since) - days * 86400_000).toISOString(), until: since },

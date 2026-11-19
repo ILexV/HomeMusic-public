@@ -4,8 +4,8 @@
   (`ytm_radio`, `lastfm_similar`, `deezer_radio`), «Незнакомое» (`yandex_similar`, `similar_artists`), «Новинки»
   (`new_releases`), «Моя волна» Яндекса (`yandex_wave`). A generator that fails is left out (its error goes to the
   mix's stats); the mix is made of the others.
-- Familiar — the track is in the user's history, or its artist was listened to more than 5 times; new — neither
-  (the «Незнакомое» rule of Yandex). Familiar songs heard in the last 3 days are left out.
+- A familiar song has qualifying listening or explicit preference evidence. A new track of a familiar artist
+  and a track by a new artist both occupy discovery slots. Recently played songs still rest.
 - Score: Σ weight / log2(position + 2) over the generators that gave it, + 1.5·sim (the embedder: closeness to the
   taste by sound), + 0.2·popularity (Deezer rank, log); a picked artist's next song is worth less.
 - Mode shares (familiar / new): normal 40/60, favorites 80/20, discover 10/90; ≤ 2 songs of an artist; order —
@@ -53,6 +53,10 @@ GENERATOR_TITLES = {
 BANNED_VERSIONS = {"karaoke", "instrumental", "cover", "slowed", "sped up", "8d", "bass boosted", "remix", "live"}
 REJECT_REASONS = ("disliked", "version", "duration", "recent", "negative_score")  # `keep_reason`
 UNFAMILIAR_MAX_LISTENS = 5
+FAMILIAR_TRACK = "familiar_track"
+NEW_TRACK_KNOWN_ARTIST = "new_track_known_artist"
+NEW_ARTIST = "new_artist"
+DISCOVERIES = {NEW_TRACK_KNOWN_ARTIST, NEW_ARTIST}
 RECENT_DAYS = 3
 FAVORITE_REST_DAYS = 7
 STASH_REST_DAYS = 60
@@ -77,6 +81,7 @@ class Cand:
     known: dict[str, Any] | None = None
     explanation: list[str] = field(default_factory=list)
     recent_offer_penalty: float = 0.0
+    novelty: str | None = None  # absent from historical decisions; never infer those from `familiar`
 
     @property
     def key(self) -> str:
@@ -98,7 +103,7 @@ class Cand:
     def features(self) -> dict[str, Any]:
         return {"track": self.track.model_dump(mode="json"), "generators": self.gens, "sim": self.sim,
                 "rank": self.track.rank, "familiar": self.familiar, "score_parts": self.parts, "profile": self.known,
-                "explanation": list(self.explanation)}
+                "novelty": self.novelty, "explanation": list(self.explanation)}
 
 
 @dataclass
@@ -408,6 +413,23 @@ async def link_library(cands: dict[str, Cand]) -> None:
                 nd[song].nd_song_id, nd[song].library_track_id = song, tid
 
 
+def _classify(c: Cand, p: Profile) -> TasteTrack | None:
+    """Classify against this account's evidence, not generator membership, ownership or artist score."""
+    t = c.track
+    nd = c.nd_song_id or (t.id if t.source == "nd" else None)
+    known = p.find(ref=t.ref, nd_song_id=nd, fp=fingerprint(t.artist, t.title) if t.artist and t.title else None)
+    c.familiar = bool(known and known.familiar)
+    if c.familiar:
+        c.novelty = FAMILIAR_TRACK
+    else:
+        names, refs = p.preferred_artists
+        artist = c.artist
+        familiar_artist = (t.artist_ref in refs or artist in names or
+                           (artist and p.artist_listens.get(artist, 0) > UNFAMILIAR_MAX_LISTENS))
+        c.novelty = NEW_TRACK_KNOWN_ARTIST if familiar_artist else NEW_ARTIST
+    return known
+
+
 def keep_reason(c: Cand, p: Profile, cfg) -> str | None:
     """Return the first rejection reason, or None when kept; sets `familiar`."""
     t = c.track
@@ -418,9 +440,8 @@ def keep_reason(c: Cand, p: Profile, cfg) -> str | None:
         return "version"
     if t.duration_s and not cfg.min_duration_s <= t.duration_s <= cfg.max_duration_s:
         return "duration"
-    known = p.find(ref=ref, nd_song_id=c.nd_song_id, fp=fingerprint(t.artist, t.title))
+    known = _classify(c, p)
     if isinstance(p, V2Profile):
-        c.familiar = bool(known and known.familiar) or p.artist_listens.get(c.artist, 0) > UNFAMILIAR_MAX_LISTENS
         if known and known.familiar and known.last_heard and known.last_heard >= p.now - timedelta(days=RECENT_DAYS):
             return "recent"
         return None
@@ -429,9 +450,6 @@ def keep_reason(c: Cand, p: Profile, cfg) -> str | None:
             return "negative_score"
         if known.last_played and known.last_played >= p.now - timedelta(days=RECENT_DAYS):
             return "recent"
-        c.familiar = True
-        return None
-    c.familiar = p.artist_listens.get(c.artist, 0) > UNFAMILIAR_MAX_LISTENS
     return None
 
 
@@ -482,16 +500,14 @@ def apply_score(c: Cand, weights: dict[str, float], profile: Profile | None, mul
     c.parts.update(temporary_multiplier=multiplier, recent_offer_penalty=c.recent_offer_penalty, total=c.score)
 
 
-def known_of(c: Cand, p: Profile) -> dict[str, Any] | None:
-    """What the profile knew of a candidate when the mix was built (none: an unknown track)."""
-    t = c.track
-    known = p.find(ref=t.ref if t.source == "dz" else None, nd_song_id=c.nd_song_id, fp=fingerprint(t.artist, t.title))
-    if known is None:
-        return None
+def snapshot_profile(c: Cand, p: Profile) -> None:
+    """Refresh novelty at decision time, including restored pools and an explicitly requested Wave seed."""
+    known = _classify(c, p)
     v2 = isinstance(p, V2Profile)
-    return {"key": known.key, "s": known.score, "positive": known.positive_raw if v2 else None,
-            "negative": known.negative if v2 else None, "artist_score": p.artists.get(c.artist),
-            "familiar": known.familiar if v2 else True}
+    c.known = None if known is None else {
+        "key": known.key, "s": known.score, "positive": known.positive_raw if v2 else None,
+        "negative": known.negative if v2 else None, "artist_score": p.artists.get(c.artist),
+        "familiar": known.familiar}
 
 
 # --- the audio term ----------------------------------------------------------------------------------------------
@@ -644,6 +660,18 @@ def _take(pool: list[Cand], n: int, per_artist: dict[str, int], cap: int) -> lis
     return out
 
 
+def _take_new(pool: list[Cand], n: int, per: dict[str, int], cap: int, mode: str) -> list[Cand]:
+    if mode != "discover" or n < 2:
+        return _take(pool, n, per, cap)
+    out = _take(pool, 1, per, cap)
+    if out and out[0].novelty in DISCOVERIES:
+        other = [c for c in pool if c.novelty in DISCOVERIES and c.novelty != out[0].novelty]
+        for c in _take(other, 1, per, cap):
+            pool.remove(c)
+            out.append(c)
+    return out + _take(pool, n - len(out), per, cap)
+
+
 def select_songs(cands: list[Cand], mode: str, size: int, reserve: int, cap: int) -> tuple[list[Cand], list[Cand]]:
     """The mix's songs by the mode's shares (a pool that runs short is made up by the other) and the reserve."""
     fam = sorted((c for c in cands if c.familiar), key=lambda c: -c.score)
@@ -651,10 +679,10 @@ def select_songs(cands: list[Cand], mode: str, size: int, reserve: int, cap: int
     n_fam = round(size * MODES.get(mode, MODES["normal"]))
     per: dict[str, int] = {}
     a_fam = _take(fam, n_fam, per, cap)
-    a_new = _take(new, size - len(a_fam), per, cap)
+    a_new = _take_new(new, size - len(a_fam), per, cap, mode)
     a_fam += _take(fam, size - len(a_fam) - len(a_new), per, cap)
     r_fam = _take(fam, round(reserve * MODES.get(mode, MODES["normal"])), per, cap)
-    r_new = _take(new, reserve - len(r_fam), per, cap)
+    r_new = _take_new(new, reserve - len(r_fam), per, cap, mode)
     r_fam += _take(fam, reserve - len(r_fam) - len(r_new), per, cap)
     return a_fam + a_new, sorted(r_fam + r_new, key=lambda c: -c.score)
 
@@ -815,7 +843,7 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
     active, reserve = select_songs(kept, mode, cfg.size, cfg.reserve, cfg.max_per_artist)
     active = order(active, vectors)
     for c in active + reserve:
-        c.known = known_of(c, p)
+        snapshot_profile(c, p)
         c.explanation = explain_candidate(c)
     used: dict[str, int] = {}
     for c in active:
@@ -829,9 +857,10 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
     stats["build_seconds"] = round(time.monotonic() - t0, 1)
     replay = None
     if capture_replay:
-        captured = tuple(ReplayCandidate(replace(c, familiar=False, score=0, parts=None, known=None, explanation=[]),
-                                         policy.blocked(c), policy.multiplier(c))
-                         for c in islice(cands.values(), 500))
+        captured = tuple(
+            ReplayCandidate(replace(c, familiar=False, novelty=None, score=0, parts=None, known=None, explanation=[]),
+                            policy.blocked(c), policy.multiplier(c))
+            for c in islice(cands.values(), 500))
         replay = ReplayInputs(captured, len(cands), dict(weights), vectors)
     return Built(active=active, reserve=reserve, title=title, description=description, stats=stats, replay=replay)
 

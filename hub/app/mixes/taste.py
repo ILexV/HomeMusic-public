@@ -17,7 +17,8 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from functools import cached_property
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,9 @@ from app.mixes.embedder import song_key
 from app.mixes.taste_snapshot import PLAYBACK_KINDS, TasteEvent, playback_attempts
 from app.models import Dislike, DownloadItem, MixSettings, Track, User, utcnow
 from app.plays import Ids, user_events
+
+if TYPE_CHECKING:
+    from app.favorites import State
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +109,32 @@ class Profile:
     disliked_artist_refs: set[str] = field(default_factory=set)
     disliked_artists: set[str] = field(default_factory=set)  # artist keys
     picked_artists: list[dict[str, Any]] = field(default_factory=list)  # onboarding: [{ref, name}]
+    favorite_states: dict[tuple[str, str], State] = field(default_factory=dict)
+
+    @cached_property
+    def preferred_artists(self) -> tuple[set[str], set[str]]:
+        """Index explicit artist evidence once per loaded profile; a mere metadata row isn't evidence."""
+        names, refs = set(), set()
+
+        def add(name, ref):
+            if key := artist_key(name):
+                names.add(key)
+            if ref:
+                refs.add(ref)
+
+        for picked in self.picked_artists:
+            add(picked.get("name"), picked.get("ref"))
+        for track in self.tracks.values():
+            if track.liked or track.downloaded or track.album_liked:
+                add(track.artist, track.track.artist_ref if track.track else None)
+        for state in self.favorite_states.values():
+            if state.liked:
+                data = state.data or {}
+                if state.target_type == "artist":
+                    add(data.get("name"), state.ref)
+                else:
+                    add(data.get("artist"), data.get("artist_ref"))
+        return names, refs
 
     def find(self, *, ref: str | None = None, nd_song_id: str | None = None, fp: str | None = None) -> TasteTrack | None:
         for k in (ref, song_key(nd_song_id) if nd_song_id else None, fp):
@@ -113,8 +143,8 @@ class Profile:
         return None
 
     def known(self, *, ref: str | None = None, nd_song_id: str | None = None, fp: str | None = None) -> bool:
-        """In the user's history: heard, liked, downloaded or disliked."""
-        return self.find(ref=ref, nd_song_id=nd_song_id, fp=fp) is not None
+        t = self.find(ref=ref, nd_song_id=nd_song_id, fp=fp)
+        return bool(t and t.familiar)
 
     def disliked(self, *, ref: str | None, nd_song_id: str | None, artist: str, artist_ref: str | None) -> bool:
         if (ref and ref in self.disliked_ids) or (nd_song_id and song_key(nd_song_id) in self.disliked_ids):
@@ -216,20 +246,22 @@ async def build_profile(s: AsyncSession, user: User, now: datetime | None = None
     p = Profile(user_id=user.id, now=now)
     b = _Builder(s, p)
     from app.favorites import AliasIndex, reconcile, snapshot
+    from app.insights.launches import test_traffic
+    from app.mixes.taste_math import _heard
 
     # An explicitly supplied successful snapshot is useful for isolated callers/tests.
     # Ordinary profile reads use the local ledger and never reinterpret network errors as unstars.
     if starred is not None:
         await reconcile(s, user, {"song": starred}, now=now)
-    favorites = await snapshot(s, user.id, now, available_only=True)
+    favorites = p.favorite_states = await snapshot(s, user.id, now, available_only=True)
     late_skips: list[tuple[TasteTrack, float, float]] = []  # skips after 30 s without the length in the event
 
     events = [TasteEvent.from_row(e) for e in await user_events(s, user.id, HISTORY_DAYS, kinds=PLAYBACK_KINDS, now=now)
-              if e.received_at <= now]
+              if e.received_at <= now and not test_traffic(e.client) and (e.target_data or {}).get("provenance") != "import"]
     await b.ids.prime([(e.ref, e.nd_song_id) for e in events] +
                       [(x.ref, x.nd_id) for x in favorites.values() if x.target_type == "track"])
     for attempt in playback_attempts(events, AliasIndex(events).key):
-        # Merely creating a TasteTrack marks it familiar in v1 and last_played imposes a rest period.
+        # A failed/interrupted attempt or bare start is not a v1 outcome.
         if not (e := attempt.outcome):
             continue
         t = await b.track(e.ref, e.nd_song_id)
@@ -248,7 +280,9 @@ async def build_profile(s: AsyncSession, user: User, now: datetime | None = None
                 t.score += skip_weight(seconds, e.duration_s) * d
             else:
                 late_skips.append((t, seconds, d))
-        if e.kind == "finish" or (e.kind == "skip" and seconds is not None and seconds >= EARLY_SKIP_S):
+        if _heard(e, e.duration_s):
+            t.heard30 = True
+            t.last_heard = max(t.last_heard or e.ts, e.ts)
             p.artist_listens[t.key] = p.artist_listens.get(t.key, 0) + 1  # per track for now, per artist below
 
     for state in favorites.values():

@@ -5,14 +5,17 @@ import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from app.models import PlayEvent
-from app.recommendations import Decision, summarize
+from app import discovery_adoption
 from app.matching.quality import recording_quality
+from app.mixes.taste_snapshot import Subject
+from app.models import PlayEvent
+from app.recommendations import LEARNING_DAYS, Decision, summarize, wave_snapshot_time, with_learning_window
 
 
 def observed_quality(connection, *, user_id: int, until: datetime, days: int = 30,
                      available_at: bool = True) -> dict:
     since = until - timedelta(days=days)
+    earliest = until - timedelta(days=max(days * 2, LEARNING_DAYS), hours=6)
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     def rows(table):
         # Table names are fixed by this module, never supplied by CLI input.
@@ -22,12 +25,15 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
         return parsed.astimezone(UTC).replace(tzinfo=None) if parsed is not None and parsed.tzinfo else parsed
 
-    events = []
+    def snapshot(value):
+        return json.loads(value) if isinstance(value, str) else value
+
+    history = []
     unavailable = 0
     for source in rows("play_events"):
         row = dict(source)
         at = stamp(row["ts"])
-        if not since - timedelta(days=days, hours=6) <= at <= until:
+        if at > until:
             continue
         received = stamp(row.get("received_at"))
         if available_at and (received is None or received > until):
@@ -36,9 +42,11 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
         # Quality consumes journal fields, not mutable current favorites or audio state.
         fields = {k: row[k] for k in ("id", "user_id", "event_id", "kind", "ref", "nd_song_id", "client",
             "context", "position_s", "duration_s", "playback_id", "device_id", "listened_ms", "target_type",
-            "superseded_scrobble", "reverts_event_id") if k in row}
-        target = json.loads(row["target_data"]) if isinstance(row.get("target_data"), str) else row.get("target_data")
-        events.append(PlayEvent(**fields, ts=at, received_at=received if available_at else at, target_data=target or {}))
+            "superseded_scrobble", "reverts_event_id", "launch_origin", "launch_id") if k in row}
+        history.append(PlayEvent(**fields, ts=at, received_at=received if available_at else at,
+                                 target_data=snapshot(row.get("target_data")) or {}))
+    events = [e for e in history if e.ts >= earliest]
+    contexts = {e.context for e in events if e.context}
     decisions = []
     for session_table, item_table, prefix, time_field in (
         ("wave_sessions", "wave_items", "wave", "first_handed_at"),
@@ -50,19 +58,43 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
         for source in rows(item_table):
             row = dict(source)
             session = owned.get(row["session_id"])
-            if session and row.get(time_field):
-                decisions.append(Decision(user_id, f'{prefix}:{row["session_id"]}', row.get("ref"),
-                    row.get("nd_song_id"), stamp(row[time_field]), row["generator"], bool(row["familiar"]),
-                    session.get("taste_model")))
+            context = f'{prefix}:{row["session_id"]}'
+            if not session or context not in contexts:
+                continue
+            data = snapshot(row.get("decision_json"))
+            at = row.get(time_field)
+            if prefix == "wave":
+                at = wave_snapshot_time(at, row.get("last_handed_at"), row.get("handed_count"), data)
+            if at:
+                decisions.append(Decision(user_id, context, row.get("ref"), row.get("nd_song_id"), stamp(at),
+                    row.get("generator"), bool(row["familiar"]) if row.get("familiar") is not None else None,
+                    session.get("taste_model"), data))
+    mix_playlists = set()
     if "mixes" in tables and "mix_items" in tables:
         owned = {r["id"]: dict(r) for r in rows("mixes")}
         for mid, mix in owned.items():
-            stats = json.loads(mix["stats_json"]) if mix.get("stats_json") else {}
+            if mix.get("nd_playlist_id") and stamp(mix["created_at"]) <= until:
+                mix_playlists.add(mix["nd_playlist_id"])
+            if f"mix:{mid}" not in contexts:
+                continue
+            stats = snapshot(mix.get("stats_json")) or {}
             for source in connection.execute("SELECT * FROM mix_items WHERE mix_id = ? AND state != 'reserve'", (mid,)):
                 row = dict(source)
+                if row["state"] != "active" and not row.get("offered_at"):
+                    continue
                 decisions.append(Decision(user_id, f"mix:{mid}", row.get("ref"), row.get("nd_song_id"),
-                    stamp(mix["created_at"]), row["generator"], bool(row["familiar"]), stats.get("taste_model")))
+                    stamp(row.get("offered_at") or mix["created_at"]), row.get("generator"),
+                    bool(row["familiar"]) if row.get("familiar") is not None else None,
+                    stats.get("taste_model"), snapshot(row.get("features_json"))))
     result = summarize(user_id, events, decisions, days=days, now=until)
+    with_learning_window(result, events, decisions, user_id=user_id, now=until)
+    subjects = []
+    if "favorite_subjects" in tables:
+        for row in connection.execute("SELECT aliases, enriched_at FROM favorite_subjects WHERE target_type = 'track'"):
+            if row["enriched_at"] and stamp(row["enriched_at"]) <= until:
+                subjects.append(Subject("track", tuple(snapshot(row["aliases"]) or ())))
+    result["discovery_adoption"] = discovery_adoption.summarize(user_id, history, decisions, now=until, days=days,
+                                                               subjects=subjects, mix_playlist_ids=mix_playlists)
     previous = summarize(user_id, [e for e in events if e.ts < since], decisions, days=days, now=since)
     fields = ("since", "until", "attempts", "eligible_plays", "completed", "early_skips",
               "completion_rate", "early_skip_rate", "policy_cohorts")

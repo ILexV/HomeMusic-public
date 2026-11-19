@@ -32,8 +32,16 @@ export interface RecommendationQuality {
   early_skip_rate: number | null;
   new_track_like_rate: number | null;
   repeat_rate: number | null;
+  discovery_adoption: {
+    window_days: number; mature: number; adopted: number; pending: number; rate: number | null;
+    cohort_since: string; cohort_until: string; limitations: string[];
+    sources: Array<{ id: string; title: string; mature: number; adopted: number; rate: number | null }>;
+  };
   sources: Array<{ id: string; title: string; attempts: number; completed: number; early_skips: number;
-    playback_errors: number; new_track_likes: number; multiplier: number; learning_samples: number }>;
+    playback_errors: number; new_track_likes: number; multiplier: number; learning_samples: number;
+    effective_attempts: number; effective_completed: number; effective_early_skips: number;
+    effective_eligible_plays: number; effective_playback_errors: number; effective_new_track_likes: number;
+    effective_learning_samples: number; winner_only_multiplier: number; fallback_attempts: number }>;
   limitations: string[];
 }
 

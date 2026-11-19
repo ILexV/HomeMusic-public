@@ -21,7 +21,7 @@ def _without_sound(inputs: build.ReplayInputs, profile: Profile, cfg):
     rows, pool = [], []
     for entry in inputs.candidates:
         c = copy(entry.candidate)
-        c.sim, c.familiar = None, False
+        c.sim, c.familiar, c.novelty = None, False, None
         reason = "temporary_pause" if entry.blocked else build.keep_reason(c, profile, cfg)
         contributions = None
         if reason is None:
@@ -30,7 +30,8 @@ def _without_sound(inputs: build.ReplayInputs, profile: Profile, cfg):
             contributions["generators"] = contributions.pop("generator_contributions")
             contributions["sound"] = None
         row = {"key": c.key, "kept": reason is None, "rejection_reason": reason,
-               "familiar": c.familiar if reason is None else None, "rank": None,
+               "familiar": c.familiar if reason is None else None, "novelty": c.novelty if reason is None else None,
+               "rank": None,
                "score_without_sound": c.score if reason is None else None, "contributions": contributions}
         rows.append(row)
         if reason is None:

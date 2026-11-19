@@ -468,6 +468,9 @@ def test_the_known_track_snapshot_names_what_the_profile_knew():
     t = p.tracks["dz:1"]
     t.positive_raw, t.negative = 1.5, 4.5
 
-    assert build.known_of(c, p) == {"key": "dz:1", "s": -3, "positive": 1.5, "negative": 4.5, "artist_score": -5,
-                                    "familiar": False}
-    assert build.known_of(cand(2, "A2"), p) is None
+    build.snapshot_profile(c, p)
+    assert c.known == {"key": "dz:1", "s": -3, "positive": 1.5, "negative": 4.5, "artist_score": -5,
+                       "familiar": False}
+    fresh = cand(2, "A2")
+    build.snapshot_profile(fresh, p)
+    assert fresh.known is None and fresh.novelty == "new_artist"

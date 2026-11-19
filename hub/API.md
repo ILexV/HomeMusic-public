@@ -416,7 +416,7 @@ All routes require authentication and operate on the current account. Cross-acco
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/recommendations/quality?days=30` | `days`: 7, 30 or 90. `{days,since,until,attempts,starts,eligible_plays,completed,early_skips,playback_errors,interrupted,new_track_plays,new_track_likes,repeats,completion_rate,early_skip_rate,new_track_like_rate,repeat_rate,sources,limitations,metric_version,provenance,policy_cohorts,comparison,recordings}` |
+| GET | `/api/recommendations/quality?days=30` | `days`: 7, 30 or 90. `{days,since,until,attempts,starts,eligible_plays,completed,early_skips,playback_errors,interrupted,new_track_plays,new_track_likes,repeats,completion_rate,early_skip_rate,new_track_like_rate,repeat_rate,sources,discovery_adoption,limitations,metric_version,provenance,policy_cohorts,comparison,recordings}` |
 | GET | `/api/recommendations/explain?context=wave:…&ref=…&nd_song_id=…` | `{reasons: string[]}` from the owned recorded mix/wave/smart decision. Supply ref and/or song ID; both must identify that item. Missing historical snapshot returns an empty list. |
 | GET | `/api/recommendations/pauses` | `{items:[{id,action,label,expires_at,ref,nd_song_id,artist}]}`; integer IDs, UTC expiry, active entries only. |
 | POST | `/api/recommendations/pauses` | `{action:today|week|less_artist,ref?,nd_song_id?}` → `201`, one item. Identity/artist are resolved server-side; repeated equivalent active action returns the existing item. |
@@ -430,11 +430,12 @@ All routes require authentication and operate on the current account. Cross-acco
 Rates are fractions, null without a denominator. Only attributable mix/wave/smart playback attempts count,
 not recommendations offered. Errors, interruptions and unfinished attempts are excluded from taste outcomes.
 Legacy events without `playback_id` use bounded grouping and are explicitly disclosed in `limitations`.
-`sources` items: `{id,title,attempts,completed,early_skips,playback_errors,new_track_likes,multiplier,learning_samples}`.
-Learning always uses 90 days, at least 20 eligible outcomes per source, shrinkage and multipliers in `[0.75,1.25]`;
-insufficient evidence keeps 1.0. Cached per account for at most 60 seconds; applies to new mix/wave/smart choices.
+`sources` retains integer winner-only period counts (`attempts`, `completed`, `early_skips`, `playback_errors`, `new_track_likes`) and 90-day `learning_samples`. Each `effective_*` count distributes the same observation across its saved positive source contributions; no usable split falls back to the recorded leader (`fallback_attempts` in the selected period). `effective_learning_samples` and the active `multiplier` use 90 days, at least 20 effective eligible outcomes per source, shrinkage and bounds `[0.75,1.25]`. Below threshold the multiplier is 1.0. `winner_only_multiplier` is the comparison under the previous accounting. Cached per account for at most 60 seconds; applies to new mix/wave/smart choices.
+
+`discovery_adoption` contains `window_days` (14), `cohort_since`, `cohort_until`, `mature`, `adopted`, `pending`, `rate`, `sources` and `limitations`. The period selects discoveries over 7/30/90 days ending 14 days ago. Each discovery gets exactly 14 days to earn a still-active like or two subsequent deliberate listens. Newer discoveries are pending, not failures. One track counts once per account; rows by source split its credit (`id,title,mature,adopted,rate`). Missing denominators return null. Informational only; never an input to ranking.
 `explanation: string[]` is also included in mix/wave/smart tracks; it reflects saved score components and session
 preferences, never a fresh catalog/profile guess.
+New decision snapshots save `novelty` as `familiar_track`, `new_track_known_artist`, or `new_artist`. The latter two count as discoveries. Replaying a decision never guesses a missing subtype from the current profile; a saved historical `familiar=false` can still establish that the track was new. Repeating a new-format Wave handout does not reclassify the original decision.
 
 `comparison.current` and `.previous` are adjacent, non-overlapping windows of the same duration, each with
 `since`, `until`, `attempts`, `eligible_plays`, `completed`, `early_skips`, both rates and `policy_cohorts`.

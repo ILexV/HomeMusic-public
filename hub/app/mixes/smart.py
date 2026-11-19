@@ -347,7 +347,7 @@ async def _fill(rt: SmartRuntime, slots: list[int]) -> list[tuple[int, build.Can
     vals = {}
     for c in pool:
         build.apply_score(c, weights, p)
-        c.known = build.known_of(c, p)
+        build.snapshot_profile(c, p)
         raw = rec_value(rt, c, vectors, pos, neg, neutral)
         multiplier = policy.multiplier(c)
         value = raw * multiplier if raw >= 0 else raw / multiplier

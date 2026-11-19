@@ -1,6 +1,6 @@
 """Session-only ranking, recorded decisions and bounded full-recording hand-outs."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -10,7 +10,7 @@ from app.api.schemas import WavePreferences
 from app.db import session_scope
 from app.mixes import wave
 from app.models import PlayEvent, WaveItem
-from tests.test_mixes import history
+from tests.test_mixes import add_event, history
 from tests.test_wave import cand, env, fake_sources, profile, state, tr
 
 
@@ -82,15 +82,23 @@ def test_discovery_and_provenance_survive_without_permanent_mutation():
     c.parts = {"generator_contributions": {"ytm_radio": 1.25}, "selection_value": 1.25}
     c.known = {"familiar": True}
     c.explanation = ["Recorded reason"]
+    c.novelty = "familiar_track"
     restored = wave.State.load(st.dump())
     assert restored.dump() == st.dump()
     assert restored.pool["dz:0"].explanation == ["Recorded reason"]
+    assert restored.pool["dz:0"].novelty == "familiar_track"
+    legacy = wave.cand_json(c)
+    legacy.pop("novelty")
+    assert wave.cand_of(legacy).novelty is None  # never infer a historic category from `familiar`
     assert st.started == 0 and not p.tracks
 
 
 async def test_ready_reserve_skips_failed_and_holds_pending_without_taste(env, monkeypatch):
     await history(env["admin"])
-    fake_sources(monkeypatch, [tr(5000 + i) for i in range(20)])
+    at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=9)
+    for i in range(5):
+        await add_event(env["admin"], "finish", nd="nd1", at=at - timedelta(hours=i))
+    fake_sources(monkeypatch, [tr(5000 + i) for i in range(19)] + [tr(5019, "Свой 1")])
     calls = []
     async def prepare(uid, refs, *, timeout_s):
         calls.append(list(refs))
@@ -116,13 +124,48 @@ async def test_ready_reserve_skips_failed_and_holds_pending_without_taste(env, m
         items = list((await s.execute(select(WaveItem).where(WaveItem.session_id == body["session_id"])) ).scalars())
         assert len(items) == 5
         assert all(i.decision_json["explanation"] for i in items)
+        assert {i.decision_json["novelty"] for i in items} == {"new_track_known_artist", "new_artist"}
+        deep_cut = next(i for i in items if i.ref == "dz:5019")
+        assert not deep_cut.familiar and deep_cut.decision_json["novelty"] == "new_track_known_artist"
+        assert any("Новый трек знакомого исполнителя" in reason for reason in
+                   next(t["explanation"] for t in body["tracks"] if t["ref"] == deep_cut.ref))
         assert items[0].decision_json["preferences"]["discovery"] == "new"
         assert items[0].decision_json["source_weights"]["ytm_radio"] == pytest.approx(wave.weights()["ytm_radio"] * 1.1)
         events = list((await s.execute(select(PlayEvent).where(PlayEvent.context == f"wave:{body['session_id']}"))).scalars())
         assert not events
 
 
+async def test_repeated_wave_handout_keeps_first_decision_and_does_not_backfill_legacy(env, monkeypatch):
+    await history(env["admin"])
+    fake_sources(monkeypatch, [tr(5000 + i) for i in range(20)])
+    body = (await env["client"].post("/api/wave/start", json={})).json()
+    sid = body["session_id"]
+    refs = [t["ref"] for t in body["tracks"][:2]]
+    async with session_scope() as s:
+        items = {row.ref: row for row in (await s.scalars(
+            select(WaveItem).where(WaveItem.session_id == sid, WaveItem.ref.in_(refs)))).all()}
+        old = items[refs[1]]
+        old.decision_json = {k: v for k, v in old.decision_json.items() if k != "novelty"}
+        first = {ref: (row.decision_json, row.generator, row.familiar, row.first_handed_at) for ref, row in items.items()}
+    retry = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=1)
+    changed = []
+    for ref in refs:
+        c = cand(int(ref[3:]), familiar=True)
+        c.novelty, c.gens = "familiar_track", {"favorites": 0}
+        changed.append(c)
+    async with session_scope() as s:
+        await wave.save_items(s, sid, env["admin"], changed, {}, retry)
+    async with session_scope() as s:
+        items = (await s.scalars(select(WaveItem).where(WaveItem.session_id == sid, WaveItem.ref.in_(refs)))).all()
+        for row in items:
+            assert row.handed_count == 2 and row.last_handed_at == retry
+            assert (row.decision_json, row.generator, row.familiar, row.first_handed_at) == first[row.ref]
+        assert first[refs[0]][0]["novelty"] == "new_artist" and "novelty" not in first[refs[1]][0]
+
+
 async def test_pending_seed_survives_restart_and_is_never_substituted(env, monkeypatch):
+    # Recent listening normally excludes a candidate, not an explicitly requested seed.
+    await add_event(env["admin"], "finish", ref="dz:100", at=datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1))
     fake_sources(monkeypatch, [tr(5000 + i) for i in range(12)])
     seed_ready = False
     async def prepare(uid, refs, *, timeout_s):
@@ -137,7 +180,9 @@ async def test_pending_seed_survives_restart_and_is_never_substituted(env, monke
     seed_ready = True
     response = await env["client"].post(f"/api/wave/{body['session_id']}/next", json={"played": [], "queued": []})
     assert response.status_code == 200, response.text
-    assert response.json()["tracks"][0]["ref"] == "dz:100"
+    seed = response.json()["tracks"][0]
+    assert seed["ref"] == "dz:100" and seed["familiar"]
+    assert any("Знакомый трек" in reason for reason in seed["explanation"])
 
 
 async def test_unavailable_seed_is_explicit_error_and_all_failed_pool_terminates(env, monkeypatch):

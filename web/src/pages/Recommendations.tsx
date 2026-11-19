@@ -9,6 +9,7 @@ import { useSession } from '../lib/session';
 import { refreshWaveRecommendations } from '../lib/wave';
 
 const rate = (n: number | null) => n === null ? 'Недостаточно данных' : `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })} %`;
+const credit = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 });
 
 export function RecommendationQualityPage() {
   const { me } = useSession();
@@ -23,6 +24,20 @@ export function RecommendationQualityPage() {
       <div className="flex flex-wrap gap-4 text-sm text-accent"><Link to="/recommendations/pauses">Временные паузы</Link><Link to="/releases">Новые релизы</Link></div>
       {res.loading ? <Loading /> : res.error ? <ErrorState text={res.error} onRetry={() => res.reload()} /> : d && <>
         {!d.attempts && <Notice kind="info">Пока нет прослушиваний рекомендаций за этот период. Включите волну или микс — статистика появится после прослушивания.</Notice>}
+        {d.discovery_adoption && <section className="space-y-2 rounded-xl bg-surface p-4">
+          <h2 className="text-lg font-bold">Какие открытия прижились за {d.discovery_adoption.window_days} дней</h2>
+          <p className="text-sm">Считаем трек, если после открытия вы поставили лайк или сами включили его хотя бы дважды.</p>
+          {d.discovery_adoption.mature > 0
+            ? <p className="text-lg font-semibold tabular-nums">{rate(d.discovery_adoption.rate)} · {d.discovery_adoption.adopted} из {d.discovery_adoption.mature}</p>
+            : <p className="text-sm text-muted">Пока нет треков с полным сроком наблюдения.</p>}
+          <p className="text-xs text-muted">Период открытий ({days} дн.) заканчивается {d.discovery_adoption.window_days} дней назад. Более свежих треков: {d.discovery_adoption.pending} — они ещё не входят в процент.</p>
+          {d.discovery_adoption.sources.length > 0 && <ul className="divide-y divide-border text-sm">
+            {d.discovery_adoption.sources.map((s) => <li className="flex justify-between gap-2 py-1" key={s.id}>
+              <span>{s.title}</span><span className="tabular-nums">{rate(s.rate)} · вклад {credit.format(s.adopted)} из {credit.format(s.mature)}</span>
+            </li>)}
+          </ul>}
+          {d.discovery_adoption.limitations?.map((note) => <p className="text-xs text-muted" key={note}>{note}</p>)}
+        </section>}
         <dl className="grid grid-cols-2 gap-3">
           {([
             ['Дослушивания', rate(d.completion_rate)], ['Ранние пропуски', rate(d.early_skip_rate)],
@@ -55,12 +70,15 @@ export function RecommendationQualityPage() {
         </div>
         {d.comparison.limitations.map((text, i) => <Notice key={`comparison:${i}`} kind="info">{text}</Notice>)}
         <h2 className="text-lg font-bold">Ваши источники рекомендаций</h2>
-        <p className="text-sm text-muted">Множитель меняет вклад источника осторожно, от ×0,75 до ×1,25. Мало подтверждённых примеров — нейтральный вклад. Обучение и число примеров всегда учитывают последние 90 дней, независимо от выбранного периода.</p>
+        {d.discovery_adoption && <p className="text-sm text-muted">Если песню нашли несколько источников, они делят одно прослушивание пропорционально вкладу. Без сохранённых долей учитываем только записанного лидера. Множитель меняется при 20 эффективных примерах за 90 дней; прижившиеся открытия на него не влияют.</p>}
         {!d.sources.length && <p className="text-sm text-muted">Пока нет подтверждённых источников.</p>}
         <ul className="space-y-3">{d.sources.map((source) => <li key={source.id} className="rounded-xl bg-surface p-3">
           <div className="flex items-start justify-between gap-3"><h3 className="font-semibold">{source.title}</h3><span className="shrink-0 font-semibold tabular-nums text-accent">×{source.multiplier.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span></div>
-          <p className="mt-1 text-xs text-muted">Примеров обучения: {source.learning_samples}{source.learning_samples < 20 ? ' · пока мало данных' : ''}</p>
-          <p className="mt-2 text-sm text-muted">Попытки: {source.attempts} · дослушано: {source.completed} · ранние пропуски: {source.early_skips} · ошибки: {source.playback_errors} · лайки нового: {source.new_track_likes}</p>
+          {source.effective_learning_samples == null ? <p className="text-sm">Примеров за 90 дней: {source.learning_samples}</p> : <>
+            <p className="mt-1 text-xs text-muted">Эффективных примеров за 90 дней: {credit.format(source.effective_learning_samples)} · при учёте только лидера: ×{credit.format(source.winner_only_multiplier)}</p>
+            <p className="mt-2 text-sm">Вклад за период: попыток {credit.format(source.effective_attempts)} · дослушиваний {credit.format(source.effective_completed)} · ранних пропусков {credit.format(source.effective_early_skips)}</p>
+          </>}
+          {source.fallback_attempts > 0 && <p className="text-xs text-muted">Попыток без сохранённых долей: {source.fallback_attempts}</p>}
         </li>)}</ul>
         {d.limitations.map((text, i) => <Notice key={i} kind="info">{text}</Notice>)}
       </>}

@@ -1,5 +1,6 @@
 //! Account-scoped recommendation tools. All HTTP runs on workers; only replies touch Slint.
 use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -437,10 +438,42 @@ fn encode(value: &str) -> String {
 fn rate(value: &Value) -> String { value.as_f64().map(|n| format!("{:.1}%", n * 100.0)).unwrap_or_else(|| "нет данных".into()) }
 fn quality_text(v: &Value) -> String {
     let count = |key: &str| v[key].as_u64().unwrap_or(0);
-    let mut out = format!("Попытки: {} · старты: {} · пригодны для оценки: {}\nДослушано: {} ({})\nРанние пропуски: {} ({})\nОшибки воспроизведения: {} · прервано: {}\nНовые песни: {} · лайки новых: {} ({})\nПовторы: {} ({})\n\nОшибки и прерывания исключены из оценки вкуса; отсутствие данных не означает 0%.\nДослушивания и ранние пропуски — среди пригодных попыток; лайки новых — среди новых прослушиваний; повторы — среди пригодных попыток.\n\nИсточники (множитель и число обучающих примеров):\n",
+    let mut out = format!("Попытки: {} · старты: {} · пригодны для оценки: {}\nДослушано: {} ({})\nРанние пропуски: {} ({})\nОшибки воспроизведения: {} · прервано: {}\nНовые песни: {} · лайки новых: {} ({})\nПовторы: {} ({})\n",
         count("attempts"), count("starts"), count("eligible_plays"), count("completed"), rate(&v["completion_rate"]), count("early_skips"), rate(&v["early_skip_rate"]), count("playback_errors"), count("interrupted"), count("new_track_plays"), count("new_track_likes"), rate(&v["new_track_like_rate"]), count("repeats"), rate(&v["repeat_rate"]));
+    if let Some(a) = v.get("discovery_adoption") {
+        let _ = writeln!(out, "\nКакие открытия прижились за {} дней\nЛайк или хотя бы два самостоятельных прослушивания после открытия. У каждого трека одинаковый срок наблюдения.", a["window_days"]);
+        if a["mature"].as_u64() == Some(0) {
+            out.push_str("Пока нет треков с полным сроком наблюдения.\n");
+        } else {
+            let _ = writeln!(out, "Прижились: {} из {} ({})", a["adopted"], a["mature"], rate(&a["rate"]));
+        }
+        let _ = writeln!(out, "Период открытий заканчивается 14 дней назад. Более свежих треков: {} — они ещё не входят в процент.", a["pending"]);
+        for s in a["sources"].as_array().into_iter().flatten() {
+            let _ = writeln!(out, "{}: {} · вклад {:.2} из {:.2}", text(s, "title"), rate(&s["rate"]),
+                s["adopted"].as_f64().unwrap_or_default(), s["mature"].as_f64().unwrap_or_default());
+        }
+        for note in a["limitations"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let _ = writeln!(out, "{note}");
+        }
+    } else {
+        out.push_str("\nДля отчёта о прижившихся открытиях обновите Хаб.\n");
+    }
+    out.push_str("\nИсточники рекомендаций\n");
+    if v.get("discovery_adoption").is_some() {
+        out.push_str("Одна попытка делится между источниками по их вкладу. Без сохранённых долей её получает записанный лидер. Множитель обучается за 90 дней.\n");
+    }
     for source in v["sources"].as_array().into_iter().flatten() {
-        out.push_str(&format!("{}: x{:.2} · примеров {} · попыток {} · дослушано {} · ранних пропусков {} · ошибок {}\n", text(source, "title"), source["multiplier"].as_f64().unwrap_or(1.0), source["learning_samples"].as_u64().unwrap_or(0), source["attempts"].as_u64().unwrap_or(0), source["completed"].as_u64().unwrap_or(0), source["early_skips"].as_u64().unwrap_or(0), source["playback_errors"].as_u64().unwrap_or(0)));
+        if let Some(samples) = source["effective_learning_samples"].as_f64() {
+            let _ = writeln!(out, "{}: ×{:.2} · эффективных примеров {:.2} · при учёте только лидера ×{:.2}",
+                text(source, "title"), source["multiplier"].as_f64().unwrap_or(1.0), samples,
+                source["winner_only_multiplier"].as_f64().unwrap_or(1.0));
+            let _ = writeln!(out, "   За период: вклад в попытки {:.2} · дослушивания {:.2} · ранние пропуски {:.2}",
+                source["effective_attempts"].as_f64().unwrap_or_default(), source["effective_completed"].as_f64().unwrap_or_default(),
+                source["effective_early_skips"].as_f64().unwrap_or_default());
+        } else {
+            let _ = writeln!(out, "{}: ×{:.2} · примеров {}", text(source, "title"),
+                source["multiplier"].as_f64().unwrap_or(1.0), source["learning_samples"]);
+        }
     }
     let recordings = &v["recordings"];
     out.push_str(&format!("\nПолные записи: {} · полных {} / проверено {} · неизвестно {} / наблюдений {}\n{}\n",

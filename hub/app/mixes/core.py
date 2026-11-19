@@ -261,7 +261,10 @@ async def _sync(mix_id: int, *, schedule: bool) -> None:
             if not dead:
                 continue
             it.state = "failed"
-            sub = next((r for r in reserve if r.familiar == it.familiar), reserve[0] if reserve else None)
+            novelty = (it.features_json or {}).get("novelty") if mix.mode == "discover" else None
+            sub = next((r for r in reserve if novelty and (r.features_json or {}).get("novelty") == novelty), None)
+            if sub is None:
+                sub = next((r for r in reserve if r.familiar == it.familiar), reserve[0] if reserve else None)
             if sub is None:
                 continue
             reserve.remove(sub)

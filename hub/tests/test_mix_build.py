@@ -49,7 +49,7 @@ def known(n: int, artist: str = "", *, score: float = 2.0, played_days_ago: floa
     t = tr(n, artist)
     played = NOW - timedelta(days=played_days_ago) if played_days_ago is not None else None
     return TasteTrack(key=t.ref, ref=t.ref, artist=t.artist, title=t.title, score=score, last_played=played,
-                      last_event=played, track=t, **kw)
+                      last_event=played, last_heard=played, heard30=played is not None, track=t, **kw)
 
 
 # --- filters and score -------------------------------------------------------------------------------------------
@@ -76,19 +76,53 @@ def test_filters_drop(track: CatalogTrack, why: str) -> None:
 
 
 def test_familiar_and_new() -> None:
-    p = profile(known(1, "Кино"), known(2, "Кино", played_days_ago=1), known(3, "Кино", score=-1),
-                known(4, "Кино", score=0, downloaded=True), listens={"Кино": 6, "Сплин": 5})
+    p = profile(known(1, "Кино", played_days_ago=7), known(2, "Кино", played_days_ago=1), known(3, "Кино", score=-1),
+                known(4, "Скачанный", score=0, downloaded=True), listens={"Кино": 6, "Сплин": 5})
     cfg = b.get_settings().cfg.mixes
-    heard, recent, skipped, downloaded = (b.Cand(track=tr(n, "Кино")) for n in (1, 2, 3, 4))
+    heard, recent, skipped = (b.Cand(track=tr(n, "Кино")) for n in (1, 2, 3))
+    downloaded = b.Cand(track=tr(4, "Скачанный"))
     unheard_known_artist, unknown_artist = b.Cand(track=tr(10, "Кино")), b.Cand(track=tr(11, "Сплин"))
 
     assert b.keep(heard, p, cfg) and heard.familiar
     assert not b.keep(recent, p, cfg)  # heard in the last 3 days
     assert not b.keep(skipped, p, cfg)  # the user skips it
     assert b.keep(downloaded, p, cfg) and downloaded.familiar  # only downloaded: score 0 is not a skip
-    # a new song of an artist listened to more than 5 times is not «Незнакомое»
-    assert b.keep(unheard_known_artist, p, cfg) and unheard_known_artist.familiar
+    assert b.keep(unheard_known_artist, p, cfg) and not unheard_known_artist.familiar
     assert b.keep(unknown_artist, p, cfg) and not unknown_artist.familiar
+    assert [c.features()["novelty"] for c in (heard, downloaded, unheard_known_artist, unknown_artist)] == [
+        "familiar_track", "familiar_track", "new_track_known_artist", "new_artist"]
+
+
+@pytest.mark.parametrize("model", ["v1", "v2"])
+def test_novelty_uses_playback_and_current_preferences_not_profile_row_presence(model):
+    from app.mixes.taste_math import calculate_baseline, calculate_profile
+    from app.mixes.taste_snapshot import TasteEvent, TasteSnapshot, TrackMetadata
+    from app.recommendations import explain_candidate
+
+    at = NOW - timedelta(days=8)
+    events = (
+        TasteEvent(1, "heard", at, "skip", "dz:1", nd_song_id="a", position_s=5, listened_ms=30_000),
+        TasteEvent(1, "started", at, "start", "dz:2"),
+        TasteEvent(1, "skip", at, "skip", "dz:3", position_s=195, listened_ms=5_000),
+        TasteEvent(1, "failed", at, "error", "dz:4", listened_ms=50_000),
+        TasteEvent(1, "like", at, "like", "dz:5", target_data={"artist": "Favourite"}),
+        TasteEvent(1, "artist-like", at, "like", "dz:artist", target_type="artist"),
+        TasteEvent(2, "foreign", at, "finish", "dz:6"),
+        TasteEvent(1, "debug", at, "finish", "dz:7", client="web-debug"),
+    )
+    snapshot = TasteSnapshot(1, events, metadata=(TrackMetadata("dz:1", nd_song_id="a", artist="Heard", title="Song"),),
+                             picked_artists=({"name": "Onboarding"},))
+    p = (calculate_baseline if model == "v1" else calculate_profile)(snapshot, now=NOW, timezone="UTC")
+    for ref in range(1, 8):
+        c = b.Cand(track=tr(ref), nd_song_id="a" if ref == 1 else None)
+        b.snapshot_profile(c, p)
+        assert c.familiar == (ref in (1, 5))
+        assert c.novelty == ("familiar_track" if c.familiar else "new_artist")
+    for track in (tr(8, "FAVOURITE"), tr(9, "Onboarding"), tr(10, artist_ref="dz:artist")):
+        c = b.Cand(track=track)
+        assert b.keep(c, p, b.get_settings().cfg.mixes) and not c.familiar
+        assert c.novelty == "new_track_known_artist"
+        assert any("Новый трек знакомого исполнителя" in reason for reason in explain_candidate(c))
 
 
 def test_score_adds_generators_sound_and_popularity() -> None:
@@ -125,6 +159,22 @@ def test_mode_shares(mode: str, familiar: int) -> None:
 
     assert len(active) == 50 and sum(c.familiar for c in active) == familiar
     assert len(reserve) == 20 and not {c.track.ref for c in reserve} & {c.track.ref for c in active}
+
+
+@pytest.mark.parametrize("rare", ["new_track_known_artist", "new_artist"])
+def test_discover_keeps_both_kinds_in_active_and_reserve_despite_score_gap(rare):
+    common = next(kind for kind in b.DISCOVERIES if kind != rare)
+    pool = [cand(i, familiar=True) for i in range(6)]
+    for i in range(60):
+        c = cand(100 + i, score=1 - i / 100)
+        c.novelty = rare if i >= 58 else common
+        pool.append(c)
+
+    active, reserve = b.select_songs(pool, "discover", 30, 10, 2)
+    for group, familiar in ((active, 3), (reserve, 1)):
+        assert sum(c.familiar for c in group) == familiar
+        assert {c.novelty for c in group if not c.familiar} == b.DISCOVERIES
+        assert sum(c.novelty == rare for c in group) == 1
 
 
 def test_at_most_two_songs_of_an_artist() -> None:
@@ -347,6 +397,7 @@ async def test_shadow_replays_live_active_and_reserve_with_adapted_policy(db, mo
     p = Profile(1, NOW) if model == "v1" else V2Profile(1, NOW, maturity=1)
     # Only the active (online) profile knows this track; do not silently rebuild it from the local snapshot.
     p.disliked_ids.add("dz:9")
+    p.artist_listens[artist_key("Muted")] = 6  # the low-ranked candidate is the only new song of a familiar artist
     snapshot = TasteSnapshot(1)
     weights = {"favorites": 1.25, "stash": .6}
     calls = []
@@ -378,10 +429,13 @@ async def test_shadow_replays_live_active_and_reserve_with_adapted_policy(db, mo
     assert replay["active"] == [c.key for c in built.active]
     assert replay["reserve"] == [c.key for c in built.reserve] and len(replay["reserve"]) == 4
     assert "dz:6" in replay["active"]
+    assert {c.novelty for c in built.active} == b.DISCOVERIES
+    assert all(c.familiar is False and c.features()["novelty"] == c.novelty for c in built.active)
     for name, summary in report["profiles"].items():
         rows = {r["key"]: r for r in summary["candidate_decisions"]}
         assert rows["dz:1"]["rejection_reason"] == "temporary_pause"
         assert rows["dz:9"]["kept"] == (name != model)
+        assert rows["dz:2"]["novelty"] == ("new_track_known_artist" if name == model else "new_artist")
         assert rows["dz:2"]["contributions"]["temporary_multiplier"] == .25
         assert rows["dz:2"]["contributions"]["generator_weights"] == {"favorites": 1.25}
         selection = report["selection"]["models"][name]
