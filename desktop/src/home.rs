@@ -146,10 +146,6 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
 
 pub fn playlist_rows(lists: &[PlaylistLine]) -> Vec<Row> {
     let mut rows = Vec::new();
-    if lists.is_empty() {
-        rows.push(note("Плейлистов нет"));
-        return rows;
-    }
     for list in lists {
         rows.push(Row {
             kind: "playlist",
@@ -165,10 +161,6 @@ pub fn playlist_rows(lists: &[PlaylistLine]) -> Vec<Row> {
 
 pub fn liked_rows(songs: &[hub::Playable], albums: &[HomeAlbum]) -> Vec<Row> {
     let mut rows = Vec::new();
-    if songs.is_empty() && albums.is_empty() {
-        rows.push(note("Пока ничего"));
-        return rows;
-    }
     if !songs.is_empty() {
         rows.push(action("play", "Слушать"));
         for (index, song) in songs.iter().enumerate() {

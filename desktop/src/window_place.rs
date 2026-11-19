@@ -10,6 +10,7 @@ pub struct Place {
     pub mode: Option<i32>,
     pub width: Option<f32>,
     pub height: Option<f32>,
+    pub large_queue_width: Option<f32>,
     pub volume: Option<f32>,
     pub eq_on: Option<bool>,
     pub eq_open: Option<bool>,
@@ -42,6 +43,7 @@ pub fn same(left: Place, right: Place) -> bool {
         && same_position(left.normal_position, right.normal_position)
         && near(left.width, right.width, 0.5)
         && near(left.height, right.height, 0.5)
+        && near(left.large_queue_width, right.large_queue_width, 0.5)
         && near(left.volume, right.volume, 0.005)
         && left.eq_on == right.eq_on
         && left.eq_open == right.eq_open
@@ -90,6 +92,9 @@ fn save_at(path: &Path, place: Place) -> std::io::Result<bool> {
     if let Some(height) = place.height {
         body.push_str(&format!("height = {height}\n"));
     }
+    if let Some(width) = place.large_queue_width {
+        body.push_str(&format!("large-queue-width = {width}\n"));
+    }
     if let Some(volume) = place.volume {
         body.push_str(&format!("volume = {volume}\n"));
     }
@@ -123,6 +128,7 @@ pub fn parse(text: &str) -> Option<Place> {
     let mut mode = None;
     let mut width = None;
     let mut height = None;
+    let mut large_queue_width = None;
     let mut volume = None;
     let mut eq_on = None;
     let mut eq_open = None;
@@ -157,6 +163,7 @@ pub fn parse(text: &str) -> Option<Place> {
             }
             "width" => width = positive(value),
             "height" => height = positive(value),
+            "large-queue-width" => large_queue_width = positive(value),
             "volume" => {
                 if let Some(parsed) = parse_f32(value) {
                     if (0.0..=1.0).contains(&parsed) {
@@ -177,6 +184,7 @@ pub fn parse(text: &str) -> Option<Place> {
         mode,
         width,
         height,
+        large_queue_width,
         volume,
         eq_on,
         eq_open,
@@ -244,6 +252,7 @@ mod tests {
             mode: None,
             width: None,
             height: None,
+            large_queue_width: None,
             volume: None,
             eq_on: None,
             eq_open: None,
@@ -269,6 +278,7 @@ mod tests {
         let place = parse("x = 12\ny = 8\n").unwrap();
         assert_eq!(place.mode, None);
         assert_eq!(place.width, None);
+        assert_eq!(place.large_queue_width, None);
         assert_eq!(place.volume, None);
     }
 
@@ -294,6 +304,15 @@ mod tests {
         assert_eq!(place.volume, None);
         assert_eq!(place.width, Some(10.0));
         assert_eq!(usable_size(place.width, place.height), None);
+    }
+
+    #[test]
+    fn invalid_queue_width_does_not_discard_window_settings() {
+        for width in ["NaN", "inf", "-1", "0", "bad"] {
+            let place = parse(&format!("x=1\ny=2\nmode=2\nlarge-queue-width={width}")).unwrap();
+            assert_eq!(place.mode, Some(2));
+            assert_eq!(place.large_queue_width, None);
+        }
     }
 
     #[test]
@@ -366,7 +385,7 @@ mod tests {
         let mut place = bare(80.0, 60.0);
         assert!(save_at(&path, place).unwrap());
         assert!(!save_at(&path, place).unwrap());
-        for change in 0..11 {
+        for change in 0..12 {
             match change {
                 0 => place.x = 100.0,
                 1 => place.mode = Some(0),
@@ -378,7 +397,8 @@ mod tests {
                 7 => place.preamp = Some(-2.0),
                 8 => place.bands = Some([1.0; 10]),
                 9 => place.mini_position = Some((100.0, 60.0)),
-                _ => place.normal_position = Some((-1200.0, 80.0)),
+                10 => place.normal_position = Some((-1200.0, 80.0)),
+                _ => place.large_queue_width = Some(375.5),
             }
             assert!(save_at(&path, place).unwrap(), "change {change}");
             assert!(!save_at(&path, place).unwrap(), "unchanged {change}");

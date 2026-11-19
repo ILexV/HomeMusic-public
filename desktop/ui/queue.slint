@@ -1,16 +1,24 @@
 import { EmptyNote, Theme, TitleButton, VerticalScrollBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
+// Observe hover before dispatch to child controls, including the drag gutter outside the Flickable.
+component QueueViewport inherits TouchArea {
+    Rectangle { clip: true; @children }
+}
+
 export component QueueView inherits Rectangle {
     in property <[QueueItem]> queue;
     // Index in the displayed (possibly filtered) model; -1 disables following.
     in property <int> current-row: -1;
-    in property <bool> show-instructions: true;
     in property <bool> playing;
+    in property <bool> quiet-actions;
     private property <length> current-top: root.current-row * root.row-height + flick.content-y;
     private property <bool> has-current: root.current-row >= 0 && root.current-row < root.queue.length && flick.height > 0px;
-    out property <bool> current-offscreen: root.has-current &&
+    private property <bool> current-offscreen: root.has-current &&
         (root.current-top + root.row-height <= 0px || root.current-top >= flick.height);
+    // Publish after layout: a conditional header button must not feed back into the viewport size.
+    out property <bool> show-return;
+    changed current-offscreen => { root.show-return = root.current-offscreen; }
     in property <bool> busy;
     in property <string> error;
     in property <bool> filtered;
@@ -22,6 +30,12 @@ export component QueueView inherits Rectangle {
     private property <bool> dragging: false;
     private property <int> target: -1;
     private property <length> row-height: 40px;
+    private property <int> hovered-row: pointer.has-hover && pointer.mouse-x >= 0px &&
+        pointer.mouse-x < pointer.width - 7px && pointer.mouse-y >= 0px && pointer.mouse-y < pointer.height
+        ? root.row-at(pointer.mouse-y) : -1;
+    private property <int> keyboard-row: -1;
+    // Horizontal keyboard navigation: play the row, queue it next, or remove it.
+    private property <int> keyboard-action: 0;
     vertical-stretch: 1;
     min-height: 40px;
     clip: true;
@@ -31,12 +45,33 @@ export component QueueView inherits Rectangle {
     pure function row-at(y: length) -> int {
         floor((y - flick.content-y) / root.row-height)
     }
+    pure function row-focused(index: int) -> bool {
+        list-keys.has-focus && root.keyboard-row == index
+    }
+    pure function show-actions(index: int, source: int) -> bool {
+        !root.quiet-actions || root.hovered-row == index || root.row-focused(index) || root.drag-source == source
+    }
+    function focus-row(index: int) {
+        root.keyboard-row = clamp(index, 0, root.queue.length - 1);
+        let top = root.keyboard-row * root.row-height;
+        if top + flick.content-y < 0px {
+            flick.content-y = -top;
+        } else if top + flick.content-y + root.row-height > flick.height {
+            flick.content-y = min(0px, flick.height - top - root.row-height);
+        }
+    }
     function reset-drag() {
         root.drag-source = -1;
         root.dragging = false;
         root.target = -1;
     }
-    changed queue => { root.reset-drag(); }
+    changed queue => {
+        root.reset-drag();
+        if list-keys.has-focus && root.keyboard-row >= root.queue.length {
+            if root.queue.length > 0 { root.focus-row(root.queue.length - 1); }
+            else { list-keys.clear-focus(); }
+        }
+    }
 
     public function reveal-current() {
         if root.has-current && (root.current-top < 0px || root.current-top + root.row-height > flick.height) {
@@ -49,23 +84,16 @@ export component QueueView inherits Rectangle {
 
     VerticalLayout {
         spacing: 2px;
-        if root.show-instructions : Text {
-            height: 16px;
-            text: root.dragging ? "Отпустите на нужной строке" : "≡ перетащить · следующим · × убрать";
-            color: root.dragging ? Theme.orange : Theme.dim;
-            font-size: 10px;
-            overflow: elide;
-        }
         if root.queue.length > 0 && (root.busy || root.error != "") : Text {
             text: root.busy ? "Загрузка новой очереди…" : root.error;
             color: root.busy ? Theme.muted : Theme.orange;
             font-size: 11px;
             wrap: word-wrap;
         }
-        body := Rectangle {
+        pointer := QueueViewport {
+            enabled: root.quiet-actions;
             vertical-stretch: 1;
             min-height: 20px;
-            clip: true;
             if root.busy && root.queue.length == 0 : EmptyNote { message: "Загрузка очереди…"; }
             if !root.busy && root.error != "" && root.queue.length == 0 : EmptyNote { message: root.error; error: true; }
             if !root.busy && root.error == "" && root.queue.length == 0 : EmptyNote {
@@ -84,7 +112,10 @@ export component QueueView inherits Rectangle {
                     y: index * root.row-height;
                     height: root.row-height;
                     width: flick.width;
-                    background: item.current ? #e8872a30 : (row-touch.has-hover ? Theme.raised : transparent);
+                    background: item.current ? #e8872a30 : ((root.quiet-actions
+                        ? root.hovered-row == index : row-touch.has-hover) ? Theme.raised : transparent);
+                    border-width: root.row-focused(index) && root.keyboard-action == 0 ? 1px : 0px;
+                    border-color: Theme.orange;
                     HorizontalLayout {
                         padding-left: 3px;
                         padding-right: 2px;
@@ -102,7 +133,7 @@ export component QueueView inherits Rectangle {
                     }
                     row-touch := TouchArea {
                         width: parent.width - 50px;
-                        mouse-cursor: pointer;
+                        mouse-cursor: MouseCursor.pointer;
                         clicked => {
                             // A scroll or a long pointer movement is never a play action.
                             if abs(self.mouse-y - self.pressed-y) < 6px && abs(self.mouse-x - self.pressed-x) < 6px {
@@ -112,11 +143,17 @@ export component QueueView inherits Rectangle {
                     }
                     TitleButton {
                         x: parent.width - 48px; y: 9px; width: 24px;
+                        visible: root.show-actions(index, item.source);
+                        border-width: root.row-focused(index) && root.keyboard-action == 1 ? 1px : 0px;
+                        border-color: Theme.orange;
                         icon: "play-next"; tip: "Следующим после текущего";
                         clicked => { root.queue-row-next(item.source); }
                     }
                     TitleButton {
                         x: parent.width - 24px; y: 9px; width: 24px;
+                        visible: root.show-actions(index, item.source);
+                        border-width: root.row-focused(index) && root.keyboard-action == 2 ? 1px : 0px;
+                        border-color: Theme.orange;
                         glyph: "×"; tip: "Убрать из очереди";
                         clicked => { root.remove-queue-row(item.source); }
                     }
@@ -129,8 +166,8 @@ export component QueueView inherits Rectangle {
                     y: index * root.row-height + flick.content-y;
                     height: root.row-height; width: 24px;
                     property <bool> show-state: index == root.current-row && root.drag-source != item.source &&
-                        !(handle.has-hover && root.row-at(handle.mouse-y) == index);
-                    text: self.show-state ? (root.playing ? "▶" : "Ⅱ") : "≡";
+                        (root.quiet-actions ? !root.show-actions(index, item.source) : !(handle.has-hover && root.row-at(handle.mouse-y) == index));
+                    text: self.show-state ? (root.playing ? "▶" : "Ⅱ") : (root.show-actions(index, item.source) ? "≡" : "");
                     color: self.show-state || root.drag-source == item.source ? Theme.orange : Theme.dim;
                     font-size: self.show-state ? 14px : 18px;
                     horizontal-alignment: center; vertical-alignment: center;
@@ -157,7 +194,7 @@ export component QueueView inherits Rectangle {
                         } else if event.kind == PointerEventKind.up {
                             let source = root.drag-source;
                             let target = root.target;
-                            let commit = root.dragging && source >= 0 && target >= 0 && target < root.queue.length && self.mouse-y >= 0px && self.mouse-y <= self.height && self.mouse-x >= 0px && self.mouse-x <= body.width;
+                            let commit = root.dragging && source >= 0 && target >= 0 && target < root.queue.length && self.mouse-y >= 0px && self.mouse-y <= self.height && self.mouse-x >= 0px && self.mouse-x <= pointer.width;
                             root.reset-drag();
                             if commit { root.move-queue-row(source, root.queue[target].source); }
                         } else if event.kind == PointerEventKind.cancel { root.reset-drag(); }
@@ -168,7 +205,9 @@ export component QueueView inherits Rectangle {
                         accept
                     }
                 }
-                Tooltip { text: @markdown("Перетащите за ≡, чтобы изменить порядок"); }
+                Tooltip { text: root.quiet-actions
+                    ? @markdown("Перетащите за ≡ или нажмите Alt+↑/↓, чтобы изменить порядок")
+                    : @markdown("Перетащите за ≡, чтобы изменить порядок"); }
             }
             if root.dragging && root.target >= 0 : Rectangle {
                 x: 0px; y: root.target * root.row-height + flick.content-y;
@@ -182,6 +221,49 @@ export component QueueView inherits Rectangle {
                 height: flick.height;
                 content-height: flick.content-height;
                 scroll-y <=> flick.content-y;
+            }
+            // One tab stop for the entire list. Tab/Shift+Tab and player shortcuts bubble normally.
+            list-keys := FocusScope {
+                enabled: root.quiet-actions && root.queue.length > 0;
+                focus-on-click: false;
+                focus-gained => {
+                    root.keyboard-action = 0;
+                    root.focus-row(root.has-current && !root.current-offscreen
+                        ? root.current-row : root.row-at(0px));
+                }
+                key-pressed(event) => {
+                    if root.keyboard-row < 0 || root.keyboard-row >= root.queue.length ||
+                        event.modifiers.control || event.modifiers.meta || event.modifiers.shift { return reject; }
+                    if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                        let target = clamp(root.keyboard-row + (event.text == Key.UpArrow ? -1 : 1), 0, root.queue.length - 1);
+                        if event.modifiers.alt && target != root.keyboard-row {
+                            root.move-queue-row(root.queue[root.keyboard-row].source, root.queue[target].source);
+                        }
+                        root.focus-row(target);
+                        return accept;
+                    }
+                    if event.modifiers.alt { return reject; }
+                    if event.text == Key.Home || event.text == Key.End {
+                        root.focus-row(event.text == Key.Home ? 0 : root.queue.length - 1);
+                        return accept;
+                    }
+                    if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                        root.keyboard-action = clamp(root.keyboard-action + (event.text == Key.LeftArrow ? -1 : 1), 0, 2);
+                        root.focus-row(root.keyboard-row);
+                        return accept;
+                    }
+                    if event.text == Key.Return {
+                        if !event.repeat {
+                            root.focus-row(root.keyboard-row);
+                            let source = root.queue[root.keyboard-row].source;
+                            if root.keyboard-action == 0 { root.play-row(source); }
+                            else if root.keyboard-action == 1 { root.queue-row-next(source); }
+                            else { root.remove-queue-row(source); }
+                        }
+                        return accept;
+                    }
+                    reject
+                }
             }
         }
     }

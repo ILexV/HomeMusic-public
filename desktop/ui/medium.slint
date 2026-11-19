@@ -213,13 +213,9 @@ export component Medium inherits Rectangle {
                     }
                 }
                 list := QueueView {
-                    // Apply after layout: the header measures its conditional buttons.
-                    private property <bool> show-return;
-                    changed current-offscreen => { self.show-return = self.current-offscreen; }
                     queue: root.queue;
                     current-row: root.current-queue-row;
                     playing: root.playing;
-                    show-instructions: false;
                     busy: root.queue-busy;
                     error: root.queue-error;
                     filtered: root.queue-search != "";

@@ -52,6 +52,7 @@ export component AppWindow inherits Window {
     in-out property <int> current-queue-row: -1;
     in-out property <string> queue-title: "Очередь";
     in-out property <string> queue-total;
+    in-out property <length> large-queue-width: 304px;
     in-out property <[ArtistItem]> artists;
     in-out property <[AlbumItem]> albums;
     in-out property <string> search;
@@ -325,6 +326,7 @@ export component AppWindow inherits Window {
                         playback-error: root.playback-error;
                         seek-enabled: root.seek-enabled;
                         queue-search <=> root.queue-search;
+                        queue-width <=> root.large-queue-width;
                         queue-busy: root.queue-busy;
                         queue-error: root.queue-error;
                         library-busy: root.library-busy;
@@ -351,6 +353,7 @@ export component AppWindow inherits Window {
                         album-download => { root.album-download(); }
                         album-play-row(index) => { root.album-play-row(index); }
                         queue: root.queue;
+                        current-queue-row: root.current-queue-row;
                         queue-title: root.queue-title;
                         queue-total: root.queue-total;
                         artists: root.artists;

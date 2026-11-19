@@ -1396,6 +1396,7 @@ fn current_place(ui: &AppWindow, hub: &HubState) -> Option<window_place::Place> 
         mode: Some(mode_index(ui.get_mode())),
         width: Some(size.width),
         height: Some(size.height),
+        large_queue_width: Some(ui.get_large_queue_width()),
         volume: Some(ui.get_volume()),
         eq_on: Some(ui.get_eq_on()),
         eq_open: Some(ui.get_eq_open()),
@@ -1415,6 +1416,9 @@ fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
     ui.set_mode(mode_from_index(mode));
     if let Some(place) = session {
         ui.set_eq_open(place.eq_open.unwrap_or(false));
+        if let Some(width) = place.large_queue_width {
+            ui.set_large_queue_width(width);
+        }
     }
     if let Some((width, height)) =
         session.and_then(|place| window_place::usable_size(place.width, place.height))
@@ -1847,7 +1851,7 @@ fn show_hits(ui: &AppWindow, hits: &[hub::CatalogHit]) {
         .collect::<Vec<_>>();
     ui.set_hits(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
     let note = if hits.is_empty() {
-        "Ничего не найдено".to_string()
+        format!("По запросу «{}» ничего не найдено.", ui.get_search().trim())
     } else {
         format!("{} найдено", hits.len())
     };
@@ -2190,8 +2194,8 @@ fn apply_hub_events(
                         .find(|hit| hit.reference == reference)
                     {
                         hit.downloading = false;
+                        refresh_hits = true;
                     }
-                    refresh_hits = true;
                 }
             }
         }
