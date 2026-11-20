@@ -221,18 +221,26 @@ class DeezerClient:
         raise DeezerError(f"GET {url}: quota retries exhausted")  # pragma: no cover
 
     async def _get_all(self, path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Collect `data` from every page by following `next`."""
+        """Return a complete list or fail before the caller caches a partial result."""
         data = await self._get(path, {**(params or {}), "limit": PAGE_LIMIT})
-        items: list[dict[str, Any]] = list(data.get("data") or [])
-        seen = {path}
-        while (nxt := data.get("next")) and nxt not in seen:
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        total = None
+        while True:
+            page = data.get("data")
+            nxt = data.get("next")
+            if not isinstance(page, list) or (not page and (seen or nxt)):
+                raise DeezerError(f"{path}: missing page data")
+            items.extend(page)
+            total = data.get("total", total)
+            if not nxt:
+                if total is not None and len(items) != total:
+                    raise DeezerError(f"{path}: expected {total} items, received {len(items)}")
+                return items
+            if nxt in seen:
+                raise DeezerError(f"{path}: repeated next page")
             seen.add(nxt)
             data = await self._get(nxt)
-            page = data.get("data") or []
-            if not page:
-                break
-            items.extend(page)
-        return items
 
     async def _cached_model(self, key: str, ttl_s: int, model: type[M], producer: Callable[[], Awaitable[M]]) -> M:
         async def produce() -> dict[str, Any]:

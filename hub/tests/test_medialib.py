@@ -354,12 +354,23 @@ async def test_empty_or_slow_exact_album_tries_backup_catalog(env, monkeypatch, 
     assert [(t["ref"], t["owned"]) for t in data["tracks"]] == [("dz:100", True), ("hm:9", False), ("nd:ndZ", True)]
 
 
-async def test_conflicting_recording_releases_are_not_combined(env, monkeypatch):
+@pytest.mark.parametrize("stored_album", [False, True])
+async def test_conflicting_recording_releases_are_not_combined(env, monkeypatch, stored_album):
+    from app.db import session_scope
+    from app.models import Album
     from app.services import svc
     from tests.support import FakeDeezer
 
     catalog = FakeDeezer()
-    await add_track("Кино", "Звезда", "ndZ", deezer_track_id="300")
+    album_id = None
+    if stored_album:
+        async with session_scope() as s:
+            album = Album(uid=str(uuid.uuid4()), title=catalog.album.title, album_artist=catalog.album.artist,
+                          deezer_album_id=catalog.album.id)
+            s.add(album)
+            await s.flush()
+            album_id = album.id
+    await add_track("Кино", "Звезда", "ndZ", deezer_track_id="300", album_id=album_id)
     monkeypatch.setattr(svc, "deezer", catalog)
     data = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
     assert data["catalog_status"] == "ambiguous"

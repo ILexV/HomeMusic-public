@@ -19,6 +19,7 @@ use crate::{hub::Hub, navidrome::ServerConfig, queue::{Item, Queue}};
 const DEFAULT_QUOTA: u64 = 2 * 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const QUOTA_ERROR: &str = "Недостаточно места: снимите закрепление, удалите записи или увеличьте лимит";
+const INDEX_ERROR: &str = "Индекс офлайн повреждён или отсутствует; восстановите index.json или очистите хранилище";
 
 #[derive(Clone)]
 struct Entry { key: String, item: Item, bytes: u64, pinned: bool, touched: u64 }
@@ -67,10 +68,9 @@ fn item_json(item: &Item) -> Value {
 }
 fn parse_item(value: &Value) -> Option<Item> {
     let text = |name| value.get(name).and_then(Value::as_str).unwrap_or("").to_owned();
-    let item = Item { id: text("id"), listen_ref: text("ref"), path: String::new(), title: text("title"),
+    let item = Item { id: value.get("id")?.as_str()?.into(), listen_ref: value.get("ref")?.as_str()?.into(), path: String::new(), title: text("title"),
         artist: text("artist"), album: text("album"), meta: text("meta"),
         duration_s: value.get("duration_s").and_then(Value::as_u64).unwrap_or(0).min(u32::MAX as u64) as u32 };
-    key(&item)?;
     Some(item)
 }
 fn persist(root: &Path, index: &Index) -> Result<(), String> {
@@ -91,19 +91,38 @@ fn load(root: &Path) -> Result<Index, String> {
     fs::create_dir_all(root).map_err(|_| disk_error())?;
     let path = root.join("index.json");
     let mut index = Index { entries: Vec::new(), quota: DEFAULT_QUOTA, writable: true };
-    if path.exists() {
-        let bytes = fs::read(path).map_err(|_| disk_error())?;
-        let body: Value = serde_json::from_slice(&bytes).map_err(|_| "Индекс офлайн повреждён; очистите хранилище для восстановления".to_string())?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // An empty directory is a first launch; recordings without an inventory are not.
+            for entry in fs::read_dir(root).map_err(|_| disk_error())? {
+                if entry.map_err(|_| disk_error())?.path().extension().is_some_and(|ext| ext == "audio") {
+                    return Err(INDEX_ERROR.into());
+                }
+            }
+            None
+        }
+        Err(_) => return Err(disk_error()),
+    };
+    if let Some(bytes) = bytes {
+        let body: Value = serde_json::from_slice(&bytes).map_err(|_| INDEX_ERROR)?;
         if body["version"].as_u64() != Some(1) { return Err("Неизвестная версия офлайн-хранилища".into()) }
-        index.quota = body["quota"].as_u64().unwrap_or(DEFAULT_QUOTA).max(1);
+        index.quota = body["quota"].as_u64().filter(|&n| n > 0).ok_or(INDEX_ERROR)?;
+        let rows = body["entries"].as_array().ok_or(INDEX_ERROR)?;
         let mut seen = HashSet::new();
-        for row in body["entries"].as_array().into_iter().flatten() {
-            let Some(item) = parse_item(&row["item"]) else { continue };
-            let key = key(&item).unwrap();
-            let bytes = row["bytes"].as_u64().unwrap_or(0);
-            if bytes == 0 || !seen.insert(key.clone()) { continue }
-            if fs::symlink_metadata(audio_path(root, &key)).map(|m| m.file_type().is_file() && m.len() == bytes).unwrap_or(false) {
-                index.entries.push(Entry { key, item, bytes, pinned: row["pinned"].as_bool().unwrap_or(false), touched: row["touched"].as_u64().unwrap_or(0) });
+        for row in rows {
+            let item = parse_item(&row["item"]).ok_or(INDEX_ERROR)?;
+            let key = key(&item).ok_or(INDEX_ERROR)?;
+            let bytes = row["bytes"].as_u64().filter(|&n| n > 0).ok_or(INDEX_ERROR)?;
+            let pinned = row["pinned"].as_bool().ok_or(INDEX_ERROR)?;
+            if !seen.insert(key.clone()) { return Err(INDEX_ERROR.into()) }
+            match fs::symlink_metadata(audio_path(root, &key)) {
+                Ok(m) if m.is_file() && m.len() == bytes => index.entries.push(Entry {
+                    key, item, bytes, pinned, touched: row["touched"].as_u64().unwrap_or(0),
+                }),
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(disk_error()),
             }
         }
     }
@@ -217,6 +236,7 @@ impl Cache {
         Ok(())
     }
     fn remove(&self, index: &mut Index, key: &str) -> Result<(), String> {
+        if !index.writable { return Err(INDEX_ERROR.into()) }
         // Keep this lock through deletion so playback protection cannot race eviction.
         let protected = self.protected.lock().unwrap();
         if protected.as_deref() == Some(key) { return Err("Текущий трек сохранён: переключите трек перед удалением его локальной копии".into()) }
@@ -629,8 +649,37 @@ mod tests {
         assert!(!dir.0.join("orphan.audio").exists()); save(&cache, &mut index, "recovered", true).unwrap();
     }
     #[test]
+    fn unreadable_inventory_preserves_recordings_until_the_index_is_restored() {
+        let dir = Temp::new();
+        let index_path = dir.0.join("index.json");
+        let song = item("keep");
+        let recording = audio_path(&dir.0, &key(&song).unwrap());
+        let bytes = wav();
+        fs::write(&recording, &bytes).unwrap();
+        let row = json!({"item": item_json(&song), "bytes": bytes.len(), "pinned": true, "touched": 1});
+        let good = json!({"version": 1, "quota": DEFAULT_QUOTA, "entries": [&row]});
+        let mut variants = Vec::new();
+        for (field, invalid) in [("entries", Value::Null), ("quota", json!(0))] {
+            let mut bad = good.clone(); bad[field] = invalid; variants.push(bad);
+        }
+        for (field, invalid) in [("item", Value::Null), ("bytes", json!(0)), ("pinned", json!("yes"))] {
+            let mut bad = good.clone(); bad["entries"][0][field] = invalid; variants.push(bad);
+        }
+        for body in std::iter::once(None).chain(variants.iter().map(Some)) {
+            if let Some(body) = body { fs::write(&index_path, body.to_string()).unwrap(); }
+            assert!(load(&dir.0).is_err());
+            assert_eq!(fs::read(&recording).unwrap(), bytes);
+            assert_eq!(fs::read_to_string(&index_path).ok(), body.map(Value::to_string));
+        }
+        fs::write(&index_path, good.to_string()).unwrap();
+        let recovered = load(&dir.0).unwrap();
+        assert!(recovered.entries[0].pinned);
+        assert_eq!(recovered.entries[0].item.id, song.id);
+    }
+    #[test]
     fn restart_discards_partial_and_orphan_files_and_accounts_are_isolated() {
-        let dir = Temp::new(); fs::write(dir.0.join("orphan.audio"), b"x").unwrap(); fs::write(dir.0.join("unfinished.part"), b"x").unwrap();
+        let dir = Temp::new(); load(&dir.0).unwrap();
+        fs::write(dir.0.join("orphan.audio"), b"x").unwrap(); fs::write(dir.0.join("unfinished.part"), b"x").unwrap();
         let cache = Cache::at(dir.0.clone()); assert!(cache.view.lock().unwrap().entries.is_empty()); assert!(!dir.0.join("unfinished.part").exists()); assert!(!dir.0.join("orphan.audio").exists());
         let mut first = ServerConfig::default(); first.user = "alice".into(); let mut second = first.clone(); second.user = "bob".into(); assert_ne!(account(&first), account(&second));
         second = first.clone(); second.server = "https://different.invalid".into(); assert_ne!(account(&first), account(&second));

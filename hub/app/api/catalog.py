@@ -184,7 +184,7 @@ async def _search_release(
     return ("matched", found) if found else ("not_found", None)
 
 
-async def _exact_album(provider, id_: str, hint: _ReleaseHint) -> tuple[CatalogStatus, CatalogAlbum | None]:
+async def _exact_album(provider, id_: str, hint: _ReleaseHint, known_refs: set[str]) -> tuple[CatalogStatus, CatalogAlbum | None]:
     try:
         a = await provider.get_album(id_)
     except CatalogNotFound:
@@ -196,19 +196,23 @@ async def _exact_album(provider, id_: str, hint: _ReleaseHint) -> tuple[CatalogS
         return "unavailable", None
     hint.edition = a
     hint.artist, hint.title, hint.year = a.artist, a.title, _release_year(a)
-    return ("matched", a) if _complete(a) else ("unavailable", None)
+    if not _complete(a):
+        return "unavailable", None
+    if known_refs and not known_refs.issubset(t.ref for t in a.tracks):
+        return "ambiguous", None
+    return "matched", a
 
 
 async def _deezer_release(provider, hint: _ReleaseHint, album_id: str | None,
                           local: Sequence[LibTrackOut | CatalogTrack]) -> tuple[CatalogStatus, CatalogAlbum | None]:
     status: CatalogStatus = "not_found"
+    known_refs = {t.ref for t in local if t.ref and t.ref.startswith("dz:")}
     if album_id:
-        status, release = await _exact_album(provider, album_id, hint)
-        if release:
+        status, release = await _exact_album(provider, album_id, hint, known_refs)
+        if release or status == "ambiguous":
             return status, release
 
     # An exact Deezer track ID belongs to a release; a recording title or an ISRC alone doesn't.
-    known_refs = {t.ref for t in local if t.ref and t.ref.startswith("dz:")}
     for ref in sorted(known_refs)[:3]:
         try:
             track = await provider.get_track(split_ref(ref)[1])
@@ -227,10 +231,7 @@ async def _deezer_release(provider, hint: _ReleaseHint, album_id: str | None,
         parent_id = split_ref(track.album_ref)[1]
         if album_id:
             return ("ambiguous", None) if parent_id != album_id else (status, None)
-        result, release = await _exact_album(provider, parent_id, hint)
-        if release and not known_refs.issubset({t.ref for t in release.tracks}):
-            return "ambiguous", None
-        return result, release
+        return await _exact_album(provider, parent_id, hint, known_refs)
     if album_id:
         return status, None  # don't substitute a different Deezer edition for the known ID
     result, release = await _search_release(provider, "dz", hint, local)

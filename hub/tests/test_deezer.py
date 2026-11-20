@@ -214,6 +214,27 @@ async def test_album_tracks_follow_next_page(dz: DeezerClient, respx_mock: respx
     assert route.call_count == 2 and album.tracks is not None and len(album.tracks) == 12
 
 
+@pytest.mark.parametrize("failure", ["short", "empty", "cycle"])
+async def test_incomplete_album_pages_do_not_poison_cache(dz: DeezerClient, respx_mock: respx.Router, failure):
+    url = f"{BASE_URL}/album/{ALBUM_ID}"
+    respx_mock.get(url).respond(json=load("album"))
+    full = load("album_tracks")
+    next_url = f"{url}/tracks?index=5"
+    first = {"data": full["data"][:5], "next": next_url}
+    if failure == "short":
+        first = {"data": first["data"], "total": full["total"]}
+    last = {"data": []} if failure == "empty" else {"data": full["data"][5:6], "next": next_url}
+    route = respx_mock.get(f"{url}/tracks").mock(side_effect=lambda req: httpx.Response(
+        200, json=last if "index" in req.url.params else first))
+
+    with pytest.raises(DeezerError):
+        await dz.get_album(ALBUM_ID)
+
+    route.respond(json=full)
+    album = await dz.get_album(ALBUM_ID)
+    assert [t.id for t in album.tracks] == [str(t["id"]) for t in full["data"]]
+
+
 async def test_get_track_maps_isrc_and_contributors(dz: DeezerClient, respx_mock: respx.Router):
     respx_mock.get(f"{BASE_URL}/track/{TRACK_ID}").respond(json=load("track"))
     t = await dz.get_track(TRACK_ID)
