@@ -35,6 +35,21 @@ test('network loss keeps the account and a retry restores the real library', asy
   await expect(page.getByText('Browser tone', { exact: true })).toBeVisible();
 });
 
+test('device panel clears the connection warning on reconnect without losing a playback error', async ({ page, context }) => {
+  await login(page, 'offline', '/player');
+  const panel = page.getByRole('region', { name: 'Устройства и общий сеанс' });
+  await expect(panel).toContainText('связь с сервером установлена');
+  await panel.getByRole('button', { name: 'Разрешить звук' }).click();
+  const alert = panel.getByRole('alert');
+  await expect(alert).toContainText('Сначала передайте трек');
+  await context.setOffline(true);
+  await expect(panel).toContainText('нет связи с сервером');
+  await expect(alert).not.toContainText('Сначала передайте трек');
+  await context.setOffline(false);
+  await expect(panel).toContainText('связь с сервером установлена');
+  await expect(alert).toContainText('Сначала передайте трек');
+});
+
 test('revoked session returns to login and closes the old playback', async ({ page }) => {
   await playLibrary(page, 'expiry');
   // Revoke the real server-side session without replacing the application's HTTP client.
@@ -124,6 +139,36 @@ test('a browser can play the selected track locally without taking another devic
     await expect(target.getByRole('region', { name: 'Устройства и общий сеанс' })).toContainText('Локальный режим');
     await expect.poll(async () => Number(await target.getByRole('slider', { name: 'Перемотка', exact: true }).inputValue())).toBeGreaterThan(0);
     await expect(source).toContainText('Владелец: Браузер (здесь)');
+  } finally {
+    await target.close();
+  }
+});
+
+test('former owner can choose local playback after an offline recovery', async ({ page, context, browser }) => {
+  await playLibrary(page, 'recovery');
+  const panel = { name: 'Устройства и общий сеанс' };
+  const source = page.getByRole('region', panel);
+  await source.getByRole('button', { name: 'Сделать этот браузер владельцем' }).click();
+  await expect(source).toContainText('Владелец: Браузер (здесь)');
+  const target = await browser.newPage({ baseURL: new URL(page.url()).origin, storageState: await context.storageState() });
+  try {
+    await context.setOffline(true);
+    await target.goto('/#/player');
+    const devices = target.getByRole('region', panel);
+    await expect(devices.getByRole('listitem').filter({ hasText: 'владелец' })).toContainText('не в сети', { timeout: 22_000 });
+    await devices.getByRole('button', { name: 'Слушать здесь', exact: true }).click();
+    await expect(devices).toContainText('Владелец: Браузер (здесь)');
+    await context.setOffline(false);
+    await expect(source).toContainText('Передача завершена');
+    await expect(page.getByRole('button', { name: 'Слушать', exact: true })).toBeVisible();
+    await page.evaluate(() => { location.hash = '/liked'; });
+    await page.getByRole('button', { name: 'Слушать «Browser tone»', exact: true }).click();
+    await page.getByRole('alertdialog', { name: 'Слушать в этом браузере?' })
+      .getByRole('button', { name: 'Слушать локально' }).click({ timeout: 5000 });
+    await openPlayer(page);
+    await expect(source).toContainText('Локальный режим');
+    await expect.poll(async () => Number(await page.getByRole('slider', { name: 'Перемотка', exact: true }).inputValue())).toBeGreaterThan(0);
+    await expect(devices).toContainText('Владелец: Браузер (здесь)');
   } finally {
     await target.close();
   }

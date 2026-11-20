@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { errorMessage } from '../api/client';
+import { ApiError, errorMessage } from '../api/client';
 import { playbackRequest, type PlaybackAck, type PlaybackCommand, type PlaybackControl, type PlaybackSnapshot, type PlaybackView } from '../api/playback';
 import { newEventId } from './plays';
 import { confirmDialog, toast } from './ui';
@@ -15,11 +15,13 @@ interface SharedState {
   view: PlaybackView | null;
   busy: boolean;
   connected: boolean;
+  connectionError: string | null;
   error: string | null;
   enabled: boolean;
   localOnly: boolean;
 }
-let state: SharedState = { view: null, busy: false, connected: false, error: null, enabled: false, localOnly: false };
+const initialState: SharedState = { view: null, busy: false, connected: false, connectionError: null, error: null, enabled: false, localOnly: false };
+let state = initialState;
 const listeners = new Set<() => void>();
 function update(patch: Partial<SharedState>) {
   state = { ...state, ...patch };
@@ -53,7 +55,7 @@ class Runtime {
   private recoveryFence: string | null = null;
 
   constructor(readonly adapter: PlaybackAdapter, private attachAfterHeartbeat = false) {
-    update({ view: null, busy: false, connected: false, error: null, enabled: true, localOnly: false });
+    update({ ...initialState, enabled: true });
     this.timer = window.setInterval(() => {
       const expired = performance.now() - this.lastHeartbeat > 12_000;
       if (expired && !this.leaseLost) {
@@ -63,7 +65,7 @@ class Runtime {
           this.adapter.pause();
           this.prepared = null;
         }
-        update({ connected: false, error: 'Связь с сервером потеряна. Общее воспроизведение приостановлено; продолжите вручную.' });
+        update({ connected: false, connectionError: 'Связь с сервером потеряна. Общее воспроизведение приостановлено; продолжите вручную.' });
       }
       if (this.prepared && Date.now() / 1000 > this.prepared.deadline) {
         this.operation?.abort();
@@ -87,15 +89,25 @@ class Runtime {
   private accept(view: PlaybackView) {
     if (this.ctl.signal.aborted) return;
     const transfer = view.handoff;
-    const recoveryFence = transfer?.recovery && transfer.source === this.id ? transfer.id : null;
-    if (recoveryFence && recoveryFence !== this.recoveryFence) this.adapter.pause();
+    const ownsSession = view.owner === this.id;
+    const recoveryFence = ownsSession && transfer?.recovery && transfer.source === this.id ? transfer.id : null;
+    if ((this.published && !ownsSession) || (recoveryFence && recoveryFence !== this.recoveryFence)) this.adapter.pause();
     this.recoveryFence = recoveryFence;
     if (this.prepared && (!transfer || transfer.id !== this.prepared.id || transfer.phase === 'failed' || transfer.phase === 'aborted' || transfer.phase === 'done')) {
       if (view.owner !== this.id) this.adapter.pause();
       this.prepared = null;
     }
-    this.published = view.owner === this.id;
-    update({ view, connected: true, ...(view.error || transfer?.error ? { error: view.error || transfer?.error || null } : {}) });
+    this.published = ownsSession;
+    update({ view, connected: true, connectionError: null, ...(view.error || transfer?.error ? { error: view.error || transfer?.error || null } : {}) });
+  }
+
+  private reportError(e: unknown, contactFailed = false) {
+    if (this.ctl.signal.aborted) return;
+    if (contactFailed || (e instanceof ApiError && e.status === 0)) {
+      update({ connected: false, connectionError: errorMessage(e) });
+    } else {
+      update({ error: errorMessage(e) });
+    }
   }
 
   private async send(path: Parameters<typeof playbackRequest>[0], body: unknown) {
@@ -157,7 +169,7 @@ class Runtime {
                   if (latest.handoff?.id !== command.handoff_id || latest.handoff.phase !== phase) abort();
                 } else if (latest.owner !== this.id || this.recoveryFence) abort();
               } catch (e) {
-                if (!this.ctl.signal.aborted) update({ connected: false, error: errorMessage(e) });
+                this.reportError(e, true);
               } finally { pulse = null; }
             })();
           }, 2000);
@@ -229,11 +241,11 @@ class Runtime {
             await this.commands(await this.send('claim', { device_id: this.id, state: local, revision: fresh.revision }));
           }
         } catch (e) {
-          if (!this.ctl.signal.aborted) update({ error: errorMessage(e) });
+          this.reportError(e);
         }
       }
     } catch (e) {
-      if (!this.ctl.signal.aborted) update({ connected: false, error: errorMessage(e) });
+      this.reportError(e, true);
     } finally {
       this.nextHeartbeat = performance.now() + 2000;
       this.finishRequest();
@@ -282,7 +294,7 @@ class Runtime {
       } else body = { device_id: this.id, target, revision: expectedRevision, kind: control, ...(value === undefined ? {} : { value }) };
       await this.commands(await this.send(kind, body));
     } catch (e) {
-      if (!this.ctl.signal.aborted) update({ error: errorMessage(e) });
+      this.reportError(e);
     } finally {
       this.finishRequest();
     }
@@ -331,7 +343,7 @@ export function startSharedPlayback(adapter: PlaybackAdapter, account: number) {
   activeAccount = account;
   let localOnly = false;
   try { localOnly = localStorage.getItem(`hm-playback-local-only:${account}`) === 'true'; } catch { /* Optional preference. */ }
-  if (localOnly) update({ view: null, enabled: true, localOnly: true, busy: false, connected: false, error: null });
+  if (localOnly) update({ ...initialState, enabled: true, localOnly: true });
   else runtime = new Runtime(adapter);
 }
 export function stopSharedPlayback() {
@@ -339,7 +351,7 @@ export function stopSharedPlayback() {
   runtime = null;
   activeAdapter = null;
   activeAccount = null;
-  update({ view: null, enabled: false, localOnly: false, connected: false, busy: false, error: null });
+  update(initialState);
 }
 
 /** An explicit local escape is available even when the Hub is unreachable. */
@@ -350,7 +362,7 @@ export function detachPlayback() {
   if (activeAccount !== null) {
     try { localStorage.setItem(`hm-playback-local-only:${activeAccount}`, 'true'); } catch { /* Optional preference. */ }
   }
-  update({ view: null, enabled: true, localOnly: true, connected: false, busy: false, error: null });
+  update({ ...initialState, enabled: true, localOnly: true });
 }
 
 export function attachPlayback() {

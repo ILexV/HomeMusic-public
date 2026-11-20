@@ -5,7 +5,8 @@ import { attachPlayback, claimPlayback, controlPlayback, detachPlayback, handoff
 
 /** Kept outside the local-track branch: an empty phone is still a remote control. */
 export function PlaybackDevices() {
-  const { view, busy, connected, error, enabled, localOnly } = useSharedPlayback();
+  const { view, busy, connected, connectionError, error, enabled, localOnly } = useSharedPlayback();
+  const alert = connectionError ?? error;
   const localTrack = useListen((s) => s.track);
   const [seekValue, setSeekValue] = useState<number | null>(null);
   const [volumeValue, setVolumeValue] = useState<number | null>(null);
@@ -33,12 +34,12 @@ export function PlaybackDevices() {
       {localOnly
         ? <button className="rounded-lg bg-white/10 px-3 py-2 text-sm" onClick={attachPlayback}>Подключиться к общему сеансу</button>
         : <button className="rounded-lg bg-white/10 px-3 py-2 text-sm" onClick={detachPlayback}>Слушать только здесь / Отключиться от общей сессии</button>}
-      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
+      {alert && <p role="alert" className="text-sm text-red-400">{alert}</p>}
       {transfer && <p role="status" className="text-sm text-muted">
         {({ preparing: 'Подготовка устройства…', stopping: 'Остановка источника…', starting: 'Запуск на устройстве…', done: 'Передача завершена', failed: 'Передача не выполнена' } as Record<string, string>)[transfer.phase] ?? transfer.phase}
         {transfer.error ? `: ${transfer.error}` : ''}
       </p>}
-      {transfer?.recovery && <p className="text-sm text-muted">Восстановление после отключения источника. Старое устройство остановлено до явного подтверждения продолжения или новой передачи.</p>}
+      {recoveryFenced && <p className="text-sm text-muted">Восстановление после отключения источника. Старое устройство остановлено до явного подтверждения продолжения или новой передачи.</p>}
       {current && session && <div className="space-y-2">
         <div className="font-medium">{current.artist} — {current.title}</div>
         <p className="text-xs text-muted">{session.playing ? 'Играет' : 'Пауза'} · {session.index + 1} / {session.queue.length} · Повтор: {session.repeat === 'one' ? 'трек' : session.repeat === 'all' ? 'очередь' : 'выключен'} · Перемешивание: {session.shuffle ? 'включено' : 'выключено'}</p>

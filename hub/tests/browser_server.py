@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ACCOUNTS = ("offline", "expiry", "alice", "bob", "handoff", "listener", "pagination", "operator")
+ACCOUNTS = ("offline", "expiry", "alice", "bob", "handoff", "listener", "recovery", "pagination", "operator")
 PASSWORD = "browser-test-password"
 ND = "http://navidrome.browser.test"
 
