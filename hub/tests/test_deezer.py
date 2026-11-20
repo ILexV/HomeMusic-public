@@ -113,6 +113,18 @@ async def test_search_track_page_follows_index_until_the_end(dz: DeezerClient, r
     assert (await dz.search_track_page("Три дня дождя", 4, 4))[1] == 8 and route.call_count == 3
 
 
+@pytest.mark.parametrize(("count", "total", "expected"), [(5, 10, None), (2, 10, 7), (5, None, 10)])
+async def test_search_page_without_next_uses_reported_total(dz, respx_mock, count, total, expected):
+    items = load("search_track")["data"][:count]
+    body = {"data": items}
+    if total is not None:
+        body["total"] = total
+    respx_mock.get(f"{BASE_URL}/search/track").respond(json=body)
+    tracks, next_offset = await dz.search_track_page("Кино", offset=5, limit=5)
+    assert [t.id for t in tracks] == [str(t["id"]) for t in items]
+    assert next_offset == expected
+
+
 async def test_search_tracks_falls_back_to_plain_query(dz: DeezerClient, respx_mock: respx.Router):
     queries: list[str] = []
 

@@ -92,6 +92,25 @@ async def add_track(artist: str, title: str, nd_song_id: str, **kw) -> int:
         return t.id
 
 
+async def test_library_search_finds_substrings_regardless_of_unicode_case(env, monkeypatch):
+    from app.services import svc
+
+    monkeypatch.setattr(svc, "deezer", None)
+    monkeypatch.setattr(svc, "hitmoz_catalog", None)
+    await add_track("Дуэт", "Про кино", "title")
+    await add_track("Оркестр", "Тема", "album", album="КИНОфильмы")
+    await add_track("Трио", "100%_live", "punctuation")
+
+    for query, expected in [
+        ("кино", {"ndK", "title", "album"}), ("КИНО", {"ndK", "title", "album"}),
+        ("%", {"punctuation"}), ("_", {"punctuation"}),
+        ("Кино крови", {"ndK"}),  # no literal phrase; still match words across artist and title
+    ]:
+        response = await env["client"].get("/api/search", params={"q": query})
+        assert response.status_code == 200, response.text
+        assert {t["nd_song_id"] for t in response.json()["library"]} == expected, query
+
+
 async def test_album_songs_are_owned_tracks_with_the_hubs_refs(env):
     r = await env["client"].get("/api/nd/albums/alK")
     assert r.status_code == 200, r.text

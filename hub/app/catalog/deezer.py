@@ -298,14 +298,16 @@ class DeezerClient:
 
         async def produce() -> dict[str, Any]:
             data = await self._get("search/track", {"q": q, "index": offset, "limit": limit})
-            items = list(data.get("data") or [])
-            more = bool(items) and (bool(data.get("next")) or len(items) >= limit)
+            items = data.get("data") or []
+            end = offset + len(items)
+            total = data.get("total")
+            more = data.get("next") or (end < total if isinstance(total, int) and total >= 0 else len(items) >= limit)
             return {
                 "tracks": [map_track(x).model_dump(mode="json") for x in items],
-                "next": offset + len(items) if more else None,
+                "next": end if items and more else None,
             }
 
-        page = await cached(_key("dz:search_page:track", offset, limit, q), self.cfg.ttl_search_s, produce)
+        page = await cached(_key("dz:search_page:track:v2", offset, limit, q), self.cfg.ttl_search_s, produce)
         return [CatalogTrack.model_validate(x) for x in page["tracks"]], page["next"]
 
     async def search_tracks(self, artist: str, title: str, limit: int = 10) -> list[CatalogTrack]:

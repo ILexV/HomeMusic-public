@@ -15,7 +15,10 @@ _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
-def _set_pragmas(dbapi_conn, _record) -> None:
+def _configure_connection(dbapi_conn, _record) -> None:
+    # SQLite's built-in lower() and LIKE only fold ASCII.
+    dbapi_conn.create_function("unicode_casefold", 1, lambda s: s.casefold() if s is not None else None,
+                               deterministic=True)
     cur = dbapi_conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
@@ -29,7 +32,7 @@ def init_engine(db_path: Path | None = None) -> AsyncEngine:
     path = db_path or get_settings().db_path
     path.parent.mkdir(parents=True, exist_ok=True)
     _engine = create_async_engine(f"sqlite+aiosqlite:///{path.as_posix()}", connect_args={"timeout": 30})
-    event.listen(_engine.sync_engine, "connect", _set_pragmas)
+    event.listen(_engine.sync_engine, "connect", _configure_connection)
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
 

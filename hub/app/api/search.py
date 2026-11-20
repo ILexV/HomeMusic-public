@@ -7,7 +7,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,24 +78,27 @@ async def clear_search_history(user: User = Depends(current_user),
 
 
 async def search_library(s: AsyncSession, q: str, limit: int = 20) -> list[Track]:
-    like = f"%{q}%"
+    needle = q.casefold()
+    if not needle:
+        return []
     rows = (
         await s.execute(
             select(Track)
-            .where(or_(Track.title.ilike(like), Track.artist.ilike(like), Track.album.ilike(like)))
+            .where(or_(*(func.instr(func.unicode_casefold(field), needle) > 0
+                         for field in (Track.title, Track.artist, Track.album))))
             .limit(limit)
         )
     ).scalars().all()
     if rows:
         return list(rows)
-    # SQLite LIKE is case-insensitive only for ASCII: fall back to normalized matching in Python
-    nq = normalize_title(q).text
-    if not nq:
+    # No literal phrase: allow normalized words across different fields.
+    words = normalize_title(q).text.split()
+    if not words:
         return []
     out = []
     for t in (await s.execute(select(Track))).scalars():
         hay = normalize_title(f"{t.artist} {t.title} {t.album or ''}").text
-        if all(w in hay for w in nq.split()):
+        if all(w in hay for w in words):
             out.append(t)
             if len(out) >= limit:
                 break
