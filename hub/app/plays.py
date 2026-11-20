@@ -39,6 +39,20 @@ SYNC_EVERY_S = 3600
 FIRST_SYNC_DELAY_S = 120
 
 
+def attempt_trigger(events: Iterable[PlayEvent]) -> str | None:
+    """Resolve provenance within one folded attempt, never across attempts or from a launch."""
+    trigger = None
+    for e in events:
+        if e.play_trigger is None and e.playback_id:
+            # A tagged checkpoint of this same identified attempt is sufficient proof.
+            continue
+        if e.play_trigger not in ("manual", "auto", "repeat") or (trigger and trigger != e.play_trigger):
+            # Unknown legacy events are paired heuristically; conflicts are not evidence either.
+            return None
+        trigger = e.play_trigger
+    return trigger
+
+
 # --- ids -----------------------------------------------------------------------------------------------------
 
 
@@ -269,7 +283,7 @@ async def record_events(s: AsyncSession, user_id: int, raw: Iterable[Any], now: 
         metadata = await _listening_metadata(s, e, nd) if e.kind in ("start", "progress", "interrupted", "error", "skip", "finish") else None
         values = dict(user_id=user_id, event_id=e.event_id, ts=event_time(e.ts, now), kind=e.kind, ref=ref,
                       nd_song_id=nd, position_s=e.position_s, duration_s=e.duration_s, context=e.context,
-                      client=e.client, received_at=now, playback_id=e.playback_id, device_id=e.device_id,
+                      client=e.client, received_at=now, playback_id=e.playback_id, play_trigger=e.play_trigger, device_id=e.device_id,
                       listened_ms=e.listened_ms, track_metadata=metadata, target_type=e.target_type, nd_album_id=e.nd_album_id,
                       nd_artist_id=e.nd_artist_id, target_data=e.target_data, reverts_event_id=e.reverts_event_id,
                       launch_id=e.launch_id, launch_origin=e.launch_origin)

@@ -96,7 +96,7 @@ export function DownloadDetailPage({ id }: { id: number }) {
               )
             )}
             {item.status === 'done' && item.nd_song_id && canPlay() && (
-              <Button small variant="primary" icon="play" onClick={() => playSongs([item.nd_song_id as string])}>
+              <Button small variant="primary" icon="play" onClick={() => playSongs([item.nd_song_id as string], 0)}>
                 Слушать
               </Button>
             )}

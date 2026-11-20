@@ -470,15 +470,15 @@ export function ImportItemsPage({ id, collectionId, match, status }: { id: numbe
   const playable = tracks.filter((x) => x.nd_song_id || x.ref);
   const [busyId, setBusyId] = useState<number | null>(null);
 
-  const play = (from: ImportItemOut) => {
+  const play = (from?: ImportItemOut) => {
     if (canPlayAll()) {
       playMixed(
         playable.map((x) => (x.nd_song_id ? { song_id: x.nd_song_id } : { ref: x.ref as string, title: x.title, artist: x.artist, album: x.album, cover_url: x.cover_url, duration_s: x.duration_s })),
-        Math.max(0, playable.indexOf(from)),
+        from ? playable.indexOf(from) : null,
       );
-    } else if (canPlay() && from.nd_song_id) {
+    } else if (canPlay() && from?.nd_song_id) {
       playList(playable, (x) => x.nd_song_id, from);
-    } else if (from.ref) {
+    } else if (from?.ref) {
       const queue = playable.filter((x) => !x.nd_song_id && x.ref).map(listenItem);
       listen(listenItem(from), queue);
     }
@@ -497,7 +497,7 @@ export function ImportItemsPage({ id, collectionId, match, status }: { id: numbe
         sub={res.data ? `${res.data.total} ${plural(res.data.total, ['строка', 'строки', 'строк'])}` : undefined}
         back={`/import/${id}`}
         right={
-          canPlayAll() && playable.length ? <IconButton icon="play" label="Слушать все" onClick={() => play(playable[0])} className="!text-accent" /> : undefined
+          canPlayAll() && playable.length ? <IconButton icon="play" label="Слушать все" onClick={() => play()} className="!text-accent" /> : undefined
         }
       />
       {match === 'not_found' && <p className="px-4 pb-2 text-sm text-muted">Таких треков нет в каталоге. Нажмите «Выбрать файл» — Хаб поищет по источникам, а вы выберете подходящий.</p>}

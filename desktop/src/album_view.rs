@@ -132,33 +132,30 @@ pub fn connect_album_actions(
     });
 
     let weak = ui.as_weak();
-    ui.on_album_play(move || {
-        if let Some(ui) = weak.upgrade() {
-            ui.invoke_album_play_row(0);
-        }
-    });
-
-    let weak = ui.as_weak();
     let hub_play = hub.clone();
     let queue_play = queue.clone();
     let player_play = player.clone();
     let config_play = config.clone();
     let status_play = status.clone();
     let waves_play = waves.clone();
-    ui.on_album_play_row(move |index| {
+    let play_preview = move |selection: Option<usize>| {
         let Some(ui) = weak.upgrade() else { return };
-        if index < 0 || ui.get_album_busy() || !ui.get_album_error().is_empty() {
+        if ui.get_album_busy() || !ui.get_album_error().is_empty() {
             return;
         }
         let preview = hub_play.album_preview.borrow();
         let Some(preview) = preview.as_ref() else { return };
-        let index = index as usize;
-        if index >= preview.tracks.len() { return; }
+        if selection.unwrap_or(0) >= preview.tracks.len() { return; }
         cancel_queue_load(&ui, &hub_play);
         let album = queue::Queue::from_tracks(ui.get_album_title().to_string(), preview.tracks.clone());
         play_album(&ui, &hub_play, &player_play, &queue_play, &config_play, &status_play,
-            &waves_play, &preview.id, album, index);
+            &waves_play, &preview.id, album, selection);
         ui.set_album_note("Очередь заменена альбомом".into());
+    };
+    let play_all = play_preview.clone();
+    ui.on_album_play(move || play_all(None));
+    ui.on_album_play_row(move |row| {
+        if let Ok(index) = usize::try_from(row) { play_preview(Some(index)); }
     });
 
     let weak = ui.as_weak();
@@ -182,9 +179,9 @@ pub fn connect_album_actions(
 pub(super) fn play_album(
     ui: &AppWindow, hub: &HubState, player: &RefCell<Player>, queue: &RefCell<queue::Queue>,
     config: &navidrome::ServerConfig, status: &str, waves: &Arc<wave::WaveHub>,
-    id: &str, mut album: queue::Queue, index: usize,
+    id: &str, mut album: queue::Queue, selection: Option<usize>,
 ) {
-    if !album.select(index) { return; }
+    let Some(start) = select_album_start(&mut album, selection) else { return; };
     if let Some(item) = queue.borrow().current() {
         note_wave_leave(&player.borrow(), item, hub, false);
     }
@@ -192,7 +189,13 @@ pub(super) fn play_album(
     id.clone_into(&mut hub.album_id.borrow_mut());
     album.inherit_preferences(&queue.borrow());
     *queue.borrow_mut() = album;
-    jump(ui, player, queue, config, status, waves, hub, true);
+    jump(ui, player, queue, config, status, waves, hub, true, start);
+}
+
+fn select_album_start(album: &mut queue::Queue, selection: Option<usize>) -> Option<queue::Start> {
+    if !album.select(selection.unwrap_or(0)) { return None; }
+    album.set_context("album");
+    Some(if selection.is_some() { queue::Start::Manual } else { queue::Start::Auto })
 }
 
 pub(super) fn append_album(
@@ -204,13 +207,29 @@ pub(super) fn append_album(
     if queue.is_empty() {
         let mut album = queue::Queue::from_tracks(name, tracks.collect());
         album.select(0);
+        album.set_context("album");
         album.inherit_preferences(queue);
         *queue = album;
         id.clone_into(&mut hub.album_id.borrow_mut());
         if let Some(item) = queue.current() { crate::show_cover(ui, hub, &item.id); }
     } else {
+        let first = queue.items().len();
         queue.extend(tracks);
+        queue.set_source(first..queue.items().len(), "album");
         if hub.album_id.borrow().as_str() != id { hub.album_id.borrow_mut().clear(); }
     }
     show_queue(ui, queue, hub);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn first_album_row_is_manual_but_play_album_is_auto() {
+        let mut album = queue::Queue::from_path("one", "One", "");
+        assert_eq!(select_album_start(&mut album, None), Some(queue::Start::Auto));
+        assert_eq!(album.context(), "album");
+        assert_eq!(select_album_start(&mut album, Some(0)), Some(queue::Start::Manual));
+        assert_eq!(select_album_start(&mut album, Some(1)), None);
+    }
 }

@@ -3,12 +3,52 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use serde_json::{json, Value};
-use crate::{hub, player::{PlaybackPhase, PlaybackState}, queue::{Item, Queue}, HubState};
+use crate::{hub, player::{PlaybackPhase, PlaybackState}, queue::{Item, Queue, Start}, HubState};
 
 struct Attempt {
     token: Option<u64>, id: String, item: Item, context: String, origin: String,
+    start: Start,
     listened_ms: u64, previous: Option<(Instant, PlaybackState)>, started: bool, terminal: bool,
     checkpoint: Instant,
+}
+
+impl Attempt {
+    fn from_queue(queue: &Queue, wave: &hub::WaveLive, start: Start) -> Option<Self> {
+        let index = queue.index()?;
+        let context = context_at(queue, wave, index);
+        let source = queue.row_source(index).unwrap_or(queue.context());
+        let origin = if context.strip_prefix("wave:") == Some(wave.id.as_str()) { wave.origin.as_str() }
+            else if source.starts_with("mix:") { "mix_page" }
+            else if source.starts_with("playlist:") { "playlist_page" }
+            else if source == "liked" { "liked_page" }
+            else if matches!(source, "album" | "library" | "search") { source }
+            else { "" };
+        Some(Self {
+            token: queue.current_token(), id: hub::event_id(), item: queue.current()?.clone(),
+            start, context, origin: origin.into(), listened_ms: 0, previous: None,
+            started: false, terminal: false, checkpoint: Instant::now(),
+        })
+    }
+
+    fn event(&self, kind: &str, snapshot: Option<&PlaybackState>, device: &str) -> Option<Value> {
+        let snapshot = snapshot.or_else(|| self.previous.as_ref().map(|(_, s)| s));
+        let position = snapshot.map_or(0.0, |s| s.position_s);
+        let duration = snapshot.map_or(self.item.duration_s as f32, |s| s.duration_s);
+        let mut event = hub::wave_event(kind, &self.item.id, &self.item.listen_ref, position, duration, "", &self.origin)?;
+        event["context"] = if self.context.is_empty() { Value::Null } else { json!(self.context) };
+        // Bare contexts identify a surface, not a launch of a list.
+        event["launch_id"] = if (self.context == "liked" || self.context.contains(':')) && self.context.len() <= 64 {
+            json!(self.context)
+        } else { Value::Null };
+        if self.origin.is_empty() { event["launch_origin"] = Value::Null; }
+        if let Some(trigger) = self.start.trigger() { event["play_trigger"] = json!(trigger); }
+        event["playback_id"] = json!(self.id);
+        event["device_id"] = json!(device);
+        event["listened_ms"] = json!(self.listened_ms);
+        event["position_s"] = json!(position.max(0.0).min(86400.0));
+        event["duration_s"] = json!(duration.max(0.0).min(86400.0));
+        Some(event)
+    }
 }
 
 pub(crate) struct State {
@@ -22,8 +62,13 @@ impl Default for State {
 }
 
 pub(crate) fn context(queue: &Queue, hub: &HubState, index: usize) -> String {
+    context_at(queue, &hub.wave.borrow(), index)
+}
+
+fn context_at(queue: &Queue, wave: &hub::WaveLive, index: usize) -> String {
     if let Some(rec) = queue.recommendation(index) { return format!("smart:{}", rec.session); }
-    if hub.wave.borrow().on() { return format!("wave:{}", hub.wave.borrow().id); }
+    if let Some(source) = queue.row_source(index) { return source.to_owned(); }
+    if wave.on() { return format!("wave:{}", wave.id); }
     queue.context().to_owned()
 }
 
@@ -37,17 +82,9 @@ impl State {
         self.emit("interrupted", Some(snapshot), hub);
     }
 
-    pub fn begin(&mut self, queue: &Queue, hub: &HubState) {
+    pub fn begin(&mut self, queue: &Queue, hub: &HubState, start: Start) {
         if self.attempt.as_ref().is_some_and(|a| !a.terminal) { self.emit("interrupted", None, hub); }
-        self.attempt = queue.current().map(|item| Attempt {
-            token: queue.current_token(), id: hub::event_id(), item: item.clone(),
-            context: context(queue, hub, queue.index().unwrap_or(0)),
-            origin: if hub.wave.borrow().on() { hub.wave.borrow().origin.clone() }
-                else if queue.context().starts_with("mix:") { "mix_page".into() }
-                else if queue.context() == "liked" { "liked_page".into() }
-                else { "playlist_page".into() },
-            listened_ms: 0, previous: None, started: false, terminal: false, checkpoint: Instant::now(),
-        });
+        self.attempt = Attempt::from_queue(queue, &hub.wave.borrow(), start);
     }
 
     fn observe(&mut self, snapshot: &PlaybackState) {
@@ -63,18 +100,8 @@ impl State {
     fn emit(&mut self, kind: &str, snapshot: Option<&PlaybackState>, hub: &HubState) {
         let Some(a) = &mut self.attempt else { return };
         if a.terminal { return; }
-        let snapshot = snapshot.or_else(|| a.previous.as_ref().map(|(_, s)| s));
-        let position = snapshot.map_or(0.0, |s| s.position_s);
-        let duration = snapshot.map_or(a.item.duration_s as f32, |s| s.duration_s);
-        if let Some(mut event) = hub::wave_event(kind, &a.item.id, &a.item.listen_ref, position, duration, "", &a.origin) {
-            event["context"] = if a.context.is_empty() { Value::Null } else { json!(a.context) };
-            event["launch_id"] = if a.context.is_empty() { Value::Null } else { json!(a.context) };
-            event["playback_id"] = json!(a.id);
-            event["device_id"] = json!(self.device);
-            event["listened_ms"] = json!(a.listened_ms);
-            event["position_s"] = json!(position.max(0.0).min(86400.0));
-            event["duration_s"] = json!(duration.max(0.0).min(86400.0));
-            if a.context.starts_with("wave:") && hub.wave.borrow().on() {
+        if let Some(event) = a.event(kind, snapshot, &self.device) {
+            if a.context.strip_prefix("wave:").is_some_and(|id| !id.is_empty() && id == hub.wave.borrow().id) {
                 hub.wave.borrow_mut().pending.push(event.clone());
             } else if a.context.starts_with("smart:") {
                 if let Some(modes) = hub.modes.borrow().upgrade() { modes.queue_event(event.clone()); }
@@ -95,11 +122,9 @@ impl State {
     }
 
     pub fn tick(&mut self, snapshot: &PlaybackState, queue: &Queue, hub: &HubState) {
-        if queue.current_token().is_some() && self.attempt.as_ref().is_none_or(|a| a.token != queue.current_token()) {
-            self.begin(queue, hub);
-        }
-        self.observe(snapshot);
-        if self.attempt.as_ref().is_some_and(|a| !a.terminal) {
+        // Selecting/undoing/enqueuing a row without loading it is not a playback attempt.
+        if self.attempt.as_ref().is_some_and(|a| !a.terminal && a.token == queue.current_token()) {
+            self.observe(snapshot);
             if snapshot.phase == PlaybackPhase::Error { self.emit("error", Some(snapshot), hub); }
             else if snapshot.phase == PlaybackPhase::Stopped { self.emit("interrupted", Some(snapshot), hub); }
             else if snapshot.phase == PlaybackPhase::Playing {
@@ -158,6 +183,46 @@ fn listened_delta(previous: &PlaybackState, current: &PlaybackState, elapsed: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_trigger_follows_attempt_not_row_or_surrounding_queue() {
+        let track = |id: &str| Item { id: id.into(), ..Item::file("", "song") };
+        let wave = hub::WaveLive { id: "s".into(), origin: "home_card".into(), ..Default::default() };
+        let mut queue = Queue::from_tracks("wave", vec![track("first"), track("next")]);
+        queue.set_context("wave:s");
+        queue.select(0);
+        queue.play_inserted(track("searched"), "search");
+        let selected = Attempt::from_queue(&queue, &wave, Start::Manual).unwrap();
+        for kind in ["start", "progress", "finish", "skip", "interrupted", "error"] {
+            let event = selected.event(kind, None, "device").unwrap();
+            assert_eq!(event["context"], "search");
+            assert_eq!(event["play_trigger"], "manual");
+            assert_eq!(event["playback_id"], selected.id);
+        }
+
+        // Disk restoration creates a new attempt: row provenance survives, intent does not.
+        let mut restored = Queue::from_tracks("wave", queue.items().to_vec());
+        restored.select(queue.index().unwrap());
+        restored.restore_modes(&queue.modes_snapshot());
+        let resume = Attempt::from_queue(&restored, &wave, Start::Unknown).unwrap();
+        let payload = resume.event("start", None, "device").unwrap();
+        assert_eq!(payload["context"], "search");
+        assert!(payload.get("play_trigger").is_none());
+        assert_ne!(resume.id, selected.id);
+
+        restored.set_repeat(crate::queue::Repeat::One);
+        let start = restored.advance().unwrap();
+        let replay = Attempt::from_queue(&restored, &wave, start).unwrap();
+        assert_eq!(replay.event("start", None, "device").unwrap()["play_trigger"], "repeat");
+        assert_eq!(replay.context, "search");
+        restored.set_repeat(crate::queue::Repeat::Off);
+        let start = restored.advance().unwrap();
+        let next = Attempt::from_queue(&restored, &wave, start).unwrap();
+        let event = next.event("error", None, "device").unwrap();
+        assert_eq!(event["play_trigger"], "auto");
+        assert_eq!(event["context"], "wave:s");
+        assert_eq!(event["launch_origin"], "home_card");
+    }
     fn snapshot(phase: PlaybackPhase, position_s: f32) -> PlaybackState {
         PlaybackState { phase, position_s, duration_s: 100.0, seekable: true, playing: phase == PlaybackPhase::Playing, volume: 1.0 }
     }

@@ -798,6 +798,7 @@ class PlayEventIn(FavoriteTarget):
     ref: str | None = Field(default=None, max_length=64)
     nd_song_id: str | None = Field(default=None, max_length=64)
     playback_id: str | None = Field(default=None, min_length=1, max_length=64)
+    play_trigger: Literal["manual", "auto", "repeat"] | None = None
     device_id: str | None = Field(default=None, min_length=1, max_length=64)
     listened_ms: int | None = Field(default=None, ge=0, le=604800000)
     track_metadata: ListeningMetadata | None = None
@@ -816,6 +817,8 @@ class PlayEventIn(FavoriteTarget):
         playback_kinds = ("start", "progress", "interrupted", "error", "skip", "finish")
         if self.target_type != "track" and self.kind in playback_kinds:
             raise ValueError("playback events require a track")
+        if self.play_trigger is not None and self.kind not in playback_kinds:
+            raise ValueError("play_trigger requires a playback event")
         if (self.playback_id is None) != (self.device_id is None):
             raise ValueError("playback_id and device_id must be provided together")
         if self.kind in ("progress", "interrupted", "error") and (not self.playback_id or self.listened_ms is None):

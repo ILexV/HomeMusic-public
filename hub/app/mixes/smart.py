@@ -35,7 +35,7 @@ from app.catalog.models import CatalogTrack, split_ref
 from app.config import get_settings
 from app.db import session_scope
 from app.matching.normalize import fingerprint
-from app.mixes import build, embedder, smart_order, wave
+from app.mixes import build, embedder, recent_offers, smart_order, wave
 from app.mixes.resolve import library_track
 from app.mixes.taste import TasteTrack, artist_key, build_profile
 from app.mixes.taste_math import V2Profile
@@ -325,6 +325,7 @@ async def _fill(rt: SmartRuntime, slots: list[int]) -> list[tuple[int, build.Can
 
     policy = await load_policy(rt.user_id)
     weights = await adapted_weights(rt.user_id, wave.weights())
+    offered = await recent_offers.load(rt.user_id, now=utcnow(), exclude_smart=rt.sid)
     if isinstance(p, V2Profile):
         cfg = get_settings().cfg.mixes
         for pool in (st.pool, st.out):
@@ -350,9 +351,12 @@ async def _fill(rt: SmartRuntime, slots: list[int]) -> list[tuple[int, build.Can
         build.snapshot_profile(c, p)
         raw = rec_value(rt, c, vectors, pos, neg, neutral)
         multiplier = policy.multiplier(c)
-        value = raw * multiplier if raw >= 0 else raw / multiplier
+        # Same-playlist variety is separate. Apply the shared, bounded spacing term exactly once,
+        # after both the session's adjustments and the temporary artist multiplier, as in Mix/Wave.
+        spacing = recent_offers.penalty(offered, c.track.ref, c.nd_song_id)
+        value = (raw * multiplier if raw >= 0 else raw / multiplier) - spacing
         vals[c.track.ref] = value
-        c.parts.update(temporary_multiplier=multiplier, selection_value=value,
+        c.parts.update(temporary_multiplier=multiplier, recent_offer_penalty=spacing, selection_value=value,
                        playlist_similarity=rt.psim.get(c.key),
                        playlist_sound=PLAYLIST_SOUND * rt.psim.get(c.key, neutral))
         c.explanation = explain_candidate(c)
@@ -409,7 +413,8 @@ async def _save_items(rt: SmartRuntime, picked: list[tuple[int, build.Cand, floa
         async with session_scope() as s:
             nxt = (await s.execute(select(func.coalesce(func.max(SmartItem.position) + 1, 0)).where(
                 SmartItem.session_id == rt.sid))).scalar_one()
-            rows = [dict(session_id=rt.sid, user_id=rt.user_id, handed_at=utcnow(), position=nxt + i, slot=k,
+            now = utcnow()
+            rows = [dict(session_id=rt.sid, user_id=rt.user_id, handed_at=now, position=nxt + i, slot=k,
                          ref=c.track.ref, nd_song_id=c.nd_song_id, fingerprint=wave.fp_of(c)[:1024],
                          artist=(c.track.artist or "")[:256], title=(c.track.title or "")[:256],
                          generator=c.generator[:32], gens=dict(c.gens), familiar=c.familiar, score=c.score,

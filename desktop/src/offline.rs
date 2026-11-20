@@ -478,9 +478,10 @@ impl State {
         }
         let Some(index) = selected_index else { self.cache().status("Локальный файл удалён; обновите список", false, 0); self.cache().send(Command::Refresh); return };
         let mut queue = Queue::from_tracks("Офлайн", items);
+        queue.set_context("library");
         queue.select(index);
         drop(entries);
-        self.ctx.launch_queue(queue);
+        self.ctx.launch_queue(queue, crate::queue::Start::Manual);
     }
 }
 impl PartialEq for Entry {

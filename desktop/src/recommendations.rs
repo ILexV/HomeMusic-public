@@ -75,7 +75,7 @@ pub(crate) fn bind(ctx: &Context, tools: &ToolsWindow) -> Rc<State> {
     tools.on_recommendations_retry_recording(move || { if let Some(s) = weak.upgrade() {
         let same = s.recording.borrow().as_ref().is_some_and(|(_, reference)|
             s.ctx.queue.borrow().current().is_some_and(|item| item.listen_ref == *reference));
-        if same { s.ctx.play_current(); }
+        if same { s.ctx.play_current(crate::queue::Start::Manual); }
         else { s.status("Текущая песня изменилась. Выберите сообщённый трек в очереди."); }
     } });
     if let Some(ui) = ctx.ui.upgrade() {
@@ -440,6 +440,17 @@ fn quality_text(v: &Value) -> String {
     let count = |key: &str| v[key].as_u64().unwrap_or(0);
     let mut out = format!("Попытки: {} · старты: {} · пригодны для оценки: {}\nДослушано: {} ({})\nРанние пропуски: {} ({})\nОшибки воспроизведения: {} · прервано: {}\nНовые песни: {} · лайки новых: {} ({})\nПовторы: {} ({})\n",
         count("attempts"), count("starts"), count("eligible_plays"), count("completed"), rate(&v["completion_rate"]), count("early_skips"), rate(&v["early_skip_rate"]), count("playback_errors"), count("interrupted"), count("new_track_plays"), count("new_track_likes"), rate(&v["new_track_like_rate"]), count("repeats"), rate(&v["repeat_rate"]));
+    if let Some(r) = v.get("offer_repeats") {
+        out.push_str("\nПовторы в подборках\n");
+        if let Some(n) = r["per_50"].as_f64() {
+            let _ = writeln!(out, "{n:.1} на 50 рекомендаций · повторных выдач {} из {}. Трек уже предлагался за предыдущие {} дней.", r["repeats"], r["offers"], r["lookback_days"]);
+        } else {
+            out.push_str("Нет выдач за период.\n");
+        }
+        for note in r["limitations"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let _ = writeln!(out, "{note}");
+        }
+    }
     if let Some(a) = v.get("discovery_adoption") {
         let _ = writeln!(out, "\nКакие открытия прижились за {} дней\nЛайк или хотя бы два самостоятельных прослушивания после открытия. У каждого трека одинаковый срок наблюдения.", a["window_days"]);
         if a["mature"].as_u64() == Some(0) {
@@ -448,6 +459,28 @@ fn quality_text(v: &Value) -> String {
             let _ = writeln!(out, "Прижились: {} из {} ({})", a["adopted"], a["mature"], rate(&a["rate"]));
         }
         let _ = writeln!(out, "Период открытий заканчивается 14 дней назад. Более свежих треков: {} — они ещё не входят в процент.", a["pending"]);
+        if let Some(rows) = a["subtypes"].as_array() {
+            out.push_str("\nК каким открытиям вы возвращаетесь\n");
+            for s in rows {
+                if s["mature"].as_u64() == Some(0) {
+                    let _ = writeln!(out, "{}: пока нет данных", text(s, "title"));
+                } else {
+                    let _ = writeln!(out, "{}: {} из {} ({})", text(s, "title"), s["adopted"], s["mature"], rate(&s["rate"]));
+                }
+            }
+        }
+        if let Some(n) = a["unknown_return_tracks"].as_u64().filter(|&n| n > 0) {
+            let _ = writeln!(out, "У {n} треков есть возвраты без записи о том, как их включили. Эти запуски не считаются ручным выбором.");
+        }
+        if let Some(b) = v.get("discovery_balance") {
+            let _ = writeln!(out, "\nБаланс режима «Незнакомое»\n{}", text(b, "reason"));
+            if b["known_artist_share"].is_number() {
+                let _ = writeln!(out, "Ориентир для новых песен знакомых исполнителей: {} среди открытий.", rate(&b["known_artist_share"]));
+            }
+        }
+        if a["sources"].as_array().is_some_and(|s| !s.is_empty()) {
+            out.push_str("\nПо источникам\n");
+        }
         for s in a["sources"].as_array().into_iter().flatten() {
             let _ = writeln!(out, "{}: {} · вклад {:.2} из {:.2}", text(s, "title"), rate(&s["rate"]),
                 s["adopted"].as_f64().unwrap_or_default(), s["mature"].as_f64().unwrap_or_default());

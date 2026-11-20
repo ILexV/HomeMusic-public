@@ -39,7 +39,7 @@ export function canPlayWave(): boolean {
 
 /** Hands a started wave (the answer of `POST /api/wave/start`) to the app's player. Needs `canPlayWave()`. */
 export function playWave(wave: WaveOut) {
-  bridge()?.playWave?.(JSON.stringify(wave));
+  bridge()?.playWave?.(JSON.stringify({ ...wave, initial_play_trigger: 'auto' }));
 }
 
 /** A track the Hub streams by `ref` (`/api/listen/stream`): a catalog track, or a provider's file ("file:…"). */
@@ -55,7 +55,8 @@ export interface HubItem {
 /** An entry of `playQueue`: a library song by its Navidrome id, or a track the Hub streams. `context` (app 1.5.0+,
  * older apps ignore it) — where the list was played from, for the app's listening events (MIXES.md 3.2);
  * `launch_id` / `launch_origin` — this launch of the list, the same on every entry (INSIGHTS.md 6.5; the app reads
- * them from INSIGHTS stage 5 on, older apps ignore them). */
+ * them from INSIGHTS stage 5 on, older apps ignore them). `initial_play_trigger` is a one-shot instruction
+ * only for opening this queue at its initial index; never reuse it when revisiting a queue entry. */
 type QueueItem = (
   | { song_id: string }
   | { ref: string; title: string; artist: string; album: string | null; cover_url: string | null; duration_s: number | null }
@@ -82,7 +83,7 @@ export function playTracks(list: readonly TrackOut[], from?: TrackOut, context?:
       ? { song_id: t.nd_song_id }
       : hubItem({ ...t, artist: t.artists?.length ? t.artists.join(', ') : t.artist, album: t.album_title }),
   );
-  playQueue(items, from ? Math.max(0, list.indexOf(from)) : 0, context, origin);
+  playQueue(items, from ? list.indexOf(from) : null, context, origin);
 }
 
 /** Plays provider files the Hub streams (the Files tab of the search) in the app's player. Needs `canPlayAll()`. */
@@ -92,7 +93,7 @@ export function playHubItems(list: readonly HubItem[], index: number, context?: 
 
 /** Plays a list of library songs and tracks the Hub streams (an import's playlist) in the app's player. Needs
  * `canPlayAll()`. */
-export function playMixed(list: ReadonlyArray<{ song_id: string } | HubItem>, index: number, context?: string) {
+export function playMixed(list: ReadonlyArray<{ song_id: string } | HubItem>, index: number | null, context?: string) {
   playQueue(
     list.map((t) => ('song_id' in t ? { song_id: t.song_id } : hubItem(t))),
     index,
@@ -100,12 +101,15 @@ export function playMixed(list: ReadonlyArray<{ song_id: string } | HubItem>, in
   );
 }
 
-function playQueue(items: QueueItem[], index: number, context = routeContext(), origin?: LaunchOrigin) {
+function playQueue(items: QueueItem[], selected: number | null, context = routeContext(), origin?: LaunchOrigin) {
   const b = bridge();
   if (!b?.playQueue || items.length === 0) return;
   window.dispatchEvent(new Event(NATIVE_PLAYING_EVENT));
   const launch = newLaunch(context, origin);
-  b.playQueue(JSON.stringify(items.map((it) => ({ ...it, context, launch_id: launch.id, launch_origin: launch.origin }))), index);
+  const choseTrack = selected !== null && selected >= 0 && selected < items.length;
+  const index = choseTrack ? selected : 0;
+  b.playQueue(JSON.stringify(items.map((it, i) => ({ ...it, context, launch_id: launch.id, launch_origin: launch.origin,
+    ...(i === index ? { initial_play_trigger: choseTrack ? 'manual' : 'auto' } : {}) }))), index);
   // The Hub starts picking the files of the first catalog tracks now (it keeps a pick for 30 min and the player's
   // request waits for the same pick), so the first one and the one after it start sooner.
   for (const it of items.slice(index)) {
@@ -129,18 +133,19 @@ export function webPlayerShown(visible: boolean) {
   if (typeof b?.webPlayer === 'function') b.webPlayer(visible);
 }
 
-/** Plays the songs in order, starting at `index`. Ids are Navidrome song ids (`nd_song_id`). */
-export function playSongs(ids: string[], index = 0) {
+/** A selected song by index, or null for the entire list. Legacy `play` takes only unannotated song IDs. */
+export function playSongs(ids: string[], selected: number | null) {
   const b = bridge();
+  if (b?.playQueue) return playQueue(ids.map((song_id) => ({ song_id })), selected);
   if (!b?.play || ids.length === 0) return;
   window.dispatchEvent(new Event(NATIVE_PLAYING_EVENT));
-  b.play(JSON.stringify(ids), Math.min(Math.max(index, 0), ids.length - 1));
+  b.play(JSON.stringify(ids), selected !== null && selected >= 0 && selected < ids.length ? selected : 0);
 }
 
 /** Plays the tracks of `list` that have a Navidrome id, starting at `from` (the first one if `from` has none). */
 export function playList<T>(list: T[], idOf: (t: T) => string | null | undefined, from?: T) {
   const playable = list.filter((t) => !!idOf(t));
-  const start = from === undefined ? 0 : Math.max(0, playable.indexOf(from));
+  const start = from === undefined ? null : playable.indexOf(from);
   playSongs(
     playable.map((t) => idOf(t) as string),
     start,

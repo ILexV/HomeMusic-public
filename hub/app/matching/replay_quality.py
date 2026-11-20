@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from app import discovery_adoption
 from app.matching.quality import recording_quality
+from app.mixes import recent_offers
 from app.mixes.taste_snapshot import Subject
 from app.models import PlayEvent
 from app.recommendations import LEARNING_DAYS, Decision, summarize, wave_snapshot_time, with_learning_window
@@ -15,7 +16,8 @@ from app.recommendations import LEARNING_DAYS, Decision, summarize, wave_snapsho
 def observed_quality(connection, *, user_id: int, until: datetime, days: int = 30,
                      available_at: bool = True) -> dict:
     since = until - timedelta(days=days)
-    earliest = until - timedelta(days=max(days * 2, LEARNING_DAYS), hours=6)
+    span = max(days * 2, max(LEARNING_DAYS, days) + discovery_adoption.WINDOW.days)
+    earliest = until - timedelta(days=span, hours=6)
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     def rows(table):
         # Table names are fixed by this module, never supplied by CLI input.
@@ -41,8 +43,9 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
             continue
         # Quality consumes journal fields, not mutable current favorites or audio state.
         fields = {k: row[k] for k in ("id", "user_id", "event_id", "kind", "ref", "nd_song_id", "client",
-            "context", "position_s", "duration_s", "playback_id", "device_id", "listened_ms", "target_type",
+            "context", "position_s", "duration_s", "playback_id", "play_trigger", "device_id", "listened_ms", "target_type",
             "superseded_scrobble", "reverts_event_id", "launch_origin", "launch_id") if k in row}
+        fields.setdefault("target_type", "track")  # before typed favorites, every journal entry named a track
         history.append(PlayEvent(**fields, ts=at, received_at=received if available_at else at,
                                  target_data=snapshot(row.get("target_data")) or {}))
     events = [e for e in history if e.ts >= earliest]
@@ -93,8 +96,10 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
         for row in connection.execute("SELECT aliases, enriched_at FROM favorite_subjects WHERE target_type = 'track'"):
             if row["enriched_at"] and stamp(row["enriched_at"]) <= until:
                 subjects.append(Subject("track", tuple(snapshot(row["aliases"]) or ())))
+    balance = {}
     result["discovery_adoption"] = discovery_adoption.summarize(user_id, history, decisions, now=until, days=days,
-                                                               subjects=subjects, mix_playlist_ids=mix_playlists)
+        subjects=subjects, mix_playlist_ids=mix_playlists, balance=balance)
+    result["discovery_balance"] = balance
     previous = summarize(user_id, [e for e in events if e.ts < since], decisions, days=days, now=since)
     fields = ("since", "until", "attempts", "eligible_plays", "completed", "early_skips",
               "completion_rate", "early_skip_rate", "policy_cohorts")
@@ -108,6 +113,9 @@ def observed_quality(connection, *, user_id: int, until: datetime, days: int = 3
         row["full_verified"] = bool(row["full_verified"]) if row.get("full_verified") is not None else None
         bindings.append(SimpleNamespace(**row))
     result["recordings"] = recording_quality(bindings, user_id=user_id, since=since, until=until)
+    result["offer_repeats"] = recent_offers.snapshot_report(connection, tables, user_id, days=days, now=until)
+    if result["offer_repeats"] is None:
+        result["limitations"].append("No comparable offer denominator: this snapshot lacks dated playable-offer history.")
     result["unavailable_events"] = unavailable
     result["limitations"].extend([
         "Observed outcomes for the recorded policy only; no outcomes are imputed for the replay/shadow alternative.",

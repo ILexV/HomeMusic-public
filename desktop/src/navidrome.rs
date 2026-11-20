@@ -97,6 +97,7 @@ pub struct LibraryTrack {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryQueue {
     pub name: String,
+    pub context: String,
     pub tracks: Vec<LibraryTrack>,
 }
 
@@ -234,7 +235,7 @@ pub fn load_queue(config: &ServerConfig) -> Result<LibraryQueue, String> {
             } else {
                 playlist_name
             };
-            return Ok(LibraryQueue { name, tracks });
+            return Ok(LibraryQueue { name, tracks, context: format!("playlist:{id}") });
         }
     }
     let tracks = all_tracks(config)?;
@@ -243,6 +244,7 @@ pub fn load_queue(config: &ServerConfig) -> Result<LibraryQueue, String> {
     }
     Ok(LibraryQueue {
         name: "Все треки".into(),
+        context: "library".into(),
         tracks,
     })
 }
@@ -336,7 +338,7 @@ pub fn playlist_by_id(config: &ServerConfig, playlist_id: &str) -> Result<Librar
     if tracks.is_empty() {
         return Err("Navidrome: в плейлисте нет треков".into());
     }
-    Ok(LibraryQueue { name, tracks })
+    Ok(LibraryQueue { name, tracks, context: format!("playlist:{playlist_id}") })
 }
 
 /// Tracks of one album, in the server's order. The name is the album name.
@@ -355,7 +357,7 @@ pub fn album_tracks(config: &ServerConfig, album_id: &str) -> Result<LibraryQueu
     if tracks.is_empty() {
         return Err("Navidrome: в альбоме нет треков".into());
     }
-    Ok(LibraryQueue { name, tracks })
+    Ok(LibraryQueue { name, tracks, context: "album".into() })
 }
 
 /// Resolve an actual song's album identity, not a title match or partial queue.

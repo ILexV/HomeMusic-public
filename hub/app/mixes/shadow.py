@@ -42,7 +42,7 @@ def _without_sound(inputs: build.ReplayInputs, profile: Profile, cfg):
     return rows, pool
 
 
-def _selection(pool, weights, profile, scores, vectors, cfg, mode, source):
+def _selection(pool, weights, profile, scores, vectors, cfg, mode, source, known_artist_share):
     considered = set()
     for i, (c, multiplier, _) in enumerate(pool):
         if i < build.EMBED_CANDIDATES:
@@ -51,7 +51,8 @@ def _selection(pool, weights, profile, scores, vectors, cfg, mode, source):
         else:
             c.sim = None
         build.apply_score(c, weights, profile, multiplier)
-    active, reserve = build.select_songs([c for c, _, _ in pool], mode, cfg.size, cfg.reserve, cfg.max_per_artist)
+    active, reserve = build.select_songs([c for c, _, _ in pool], mode, cfg.size, cfg.reserve, cfg.max_per_artist,
+                                         known_artist_share)
     active = build.order(active, {k: v for k, v in vectors.items() if k in considered})
     return {"active": [c.key for c in active], "reserve": [c.key for c in reserve], "audio_source": source,
             "sound_considered": len(considered), "sound_missing": sorted(considered - scores.keys()),
@@ -83,7 +84,7 @@ def compare(snapshot: TasteSnapshot, inputs: build.ReplayInputs, profiles: dict[
             live = model == active_model
             selections[model] = _selection(pool, inputs.weights, profile, scores if live else {},
                                            inputs.vectors if live else {}, cfg, mode,
-                                           "live_build" if live else "no_alternate_audio")
+                                           "live_build" if live else "no_alternate_audio", inputs.known_artist_share)
         summaries[model] = {
             "local_profile_seeds": [t.key for t in profile.seeds(min(cfg.seeds, 8))],
             "eligible_seeds": [t.key for t in profile.active_seed_pool()][:100] if model == "v2" else None,
@@ -100,6 +101,7 @@ def compare(snapshot: TasteSnapshot, inputs: build.ReplayInputs, profiles: dict[
     b = {r["key"] for r in summaries["v2"]["ranking"]}
     return {"schema": 1, "snapshot_time": utc(now).isoformat(), "timezone": timezone,
             "active_model": active_model, "mode": mode, "source_weights": inputs.weights,
+            "known_artist_share": inputs.known_artist_share,
             "candidate_count": len(inputs.candidates), "total_candidates": inputs.total, "pool_complete": complete,
             "profiles": summaries,
             "policy_versions": {"baseline": "v1", "candidate": "v2"},
@@ -163,7 +165,7 @@ async def sound_diff(report: dict, inputs: build.ReplayInputs, profiles: dict[st
             ranked[model] = sorted(scored, key=lambda r: -r["score"])
             if report["pool_complete"] and vectors is not None:
                 selections[model] = _selection(pool, inputs.weights, profile, scores, vectors, cfg,
-                                               report["mode"], "diagnostic_snapshot")
+                                               report["mode"], "diagnostic_snapshot", inputs.known_artist_share)
         a = {x["key"] for x in ranked["v1"][:20]}
         b = {x["key"] for x in ranked["v2"][:20]}
         report["sound"] = {"status": "ok", "space_id": sound.space_id, "model": sound.model,

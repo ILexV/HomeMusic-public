@@ -40,9 +40,9 @@ impl Context {
         Ok(())
     }
 
-    pub fn play_current(&self) {
+    pub fn play_current(&self, start: crate::queue::Start) {
         if let Some(ui) = self.ui.upgrade() {
-            let _ = crate::play_current(&ui, &self.player, &self.queue, &self.config, &self.waves, &self.hub);
+            let _ = crate::play_current(&ui, &self.player, &self.queue, &self.config, &self.waves, &self.hub, start);
             crate::push_playback(&ui, &self.player.borrow().snapshot());
         }
     }
@@ -50,14 +50,14 @@ impl Context {
 
     pub fn play_current_at(&self, position: f32, paused: bool) -> Result<(), String> {
         let ui = self.ui.upgrade().ok_or_else(|| "Окно плеера закрыто".to_string())?;
-        crate::play_current_at(&ui, &self.player, &self.queue, &self.config, &self.waves, &self.hub, position, paused)
+        crate::play_current_at(&ui, &self.player, &self.queue, &self.config, &self.waves, &self.hub, position, paused, crate::queue::Start::Unknown)
     }
 
-    pub fn launch_queue(&self, mut queue: crate::queue::Queue) {
+    pub fn launch_queue(&self, mut queue: crate::queue::Queue, start: crate::queue::Start) {
         queue.inherit_preferences(&self.queue.borrow());
-        self.replace_queue(queue, true);
+        self.replace_queue(queue, Some(start));
     }
-    pub fn replace_queue(&self, queue: crate::queue::Queue, start: bool) {
+    pub fn replace_queue(&self, queue: crate::queue::Queue, start: Option<crate::queue::Start>) {
         if let Some(ui) = self.ui.upgrade() {
             if let Some(item) = self.queue.borrow().current() {
                 crate::note_wave_leave(&self.player.borrow(), item, &self.hub, false);
@@ -67,8 +67,8 @@ impl Context {
             self.hub.album_id.borrow_mut().clear();
             *self.queue.borrow_mut() = queue;
             self.refresh_queue();
-            if start {
-                self.play_current();
+            if let Some(start) = start {
+                self.play_current(start);
             }
         }
     }

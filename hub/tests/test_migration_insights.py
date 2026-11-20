@@ -30,12 +30,13 @@ def test_insights_upgrade_keeps_old_wave_sessions_and_events(tmp_path):
         assert c.execute("SELECT seed_json,state_json,origin,client,restart_of,taste_model,request_json,next_calls,"
                          "cleared_at FROM wave_sessions").fetchall() == [
             ('{"ref": "dz:1"}', '{"started": 2}', None, None, None, None, None, 0, None)]
-        assert c.execute("SELECT event_id,launch_id,launch_origin FROM play_events").fetchall() == [("e1", None, None)]
+        assert c.execute("SELECT event_id,launch_id,launch_origin,play_trigger FROM play_events").fetchall() == [("e1", None, None, None)]
         c.execute("INSERT INTO wave_items (session_id,user_id,first_handed_at,last_handed_at,position,ref,key,"
                   "generator) VALUES ('old',1,'2026-10-01','2026-10-01',0,'dz:1','dz:1','seed')")
         assert c.execute("SELECT handed_count,familiar,score,artist FROM wave_items").fetchall() == [(1, 0, 0, "")]
         indexes = {r[1] for r in c.execute("SELECT * FROM sqlite_master WHERE type='index'")}
         assert {"ix_wave_sessions_user_created", "ix_play_events_user_launch", "ix_wave_items_session_id"} <= indexes
+        assert {"ix_wave_items_user_last_handed", "ix_smart_items_user_handed"} <= indexes
     command.downgrade(cfg, "6a3d8c2e710f")
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT id,state_json FROM wave_sessions").fetchall() == [("old", '{"started": 2}')]

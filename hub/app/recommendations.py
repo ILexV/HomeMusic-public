@@ -30,6 +30,10 @@ MIN_SAMPLES = 20
 ADAPTATION_TTL_S = 60
 ADAPTATION_CACHE_MAX = 256
 _adaptation_cache: OrderedDict[tuple[Any, int], tuple[float, dict[str, float]]] = OrderedDict()
+# Discover uses 14-day mature outcomes, so a few hours of staleness are preferable to
+# re-folding the account's complete discovery history on each Wave batch.
+DISCOVERY_TTL_S = 6 * 60 * 60
+_discovery_cache: OrderedDict[tuple[Any, int], tuple[float, float | None]] = OrderedDict()
 
 
 @dataclass(eq=False, frozen=True)
@@ -335,10 +339,16 @@ def with_learning_window(result: dict, events: list[PlayEvent], decisions: list[
 
 async def quality(s: AsyncSession, user_id: int, days: int = 30, *, now: datetime | None = None) -> dict:
     now = now or utcnow()
-    events, decisions = await load_data(s, user_id, now, max(LEARNING_DAYS, days * 2))
+    from app import discovery_adoption
+    from app.mixes import recent_offers
+    span = max(days * 2, max(LEARNING_DAYS, days) + discovery_adoption.WINDOW.days)
+    events, decisions = await load_data(s, user_id, now, span)
     result = summarize(user_id, events, decisions, days=days, now=now)
-    from app.discovery_adoption import report as discovery_adoption
-    result["discovery_adoption"] = await discovery_adoption(s, user_id, events, decisions, now=now, days=days)
+    balance = {}
+    result["discovery_adoption"] = await discovery_adoption.report(s, user_id, events, decisions, now=now,
+                                                                  days=days, balance=balance)
+    result["discovery_balance"] = balance
+    result["offer_repeats"] = await recent_offers.report(s, user_id, days=days, now=now)
     # The names alone populate empty report rows; never reconstruct historical credit from current weights.
     from app.config import get_settings
     with_learning_window(result, events, decisions, user_id=user_id, now=now,
@@ -366,6 +376,34 @@ async def quality(s: AsyncSession, user_id: int, days: int = 30, *, now: datetim
 def clear_adaptation_cache() -> None:
     """Explicit test/reset hook; engine identity also isolates database lifecycles."""
     _adaptation_cache.clear()
+    _discovery_cache.clear()
+
+
+async def discovery_share(user_id: int) -> float | None:
+    """Discover-only target for the known-artist share of *new* slots; None preserves score order."""
+    key = (engine(), user_id)
+    cached = _discovery_cache.get(key)
+    if cached is not None and cached[0] > monotonic():
+        _discovery_cache.move_to_end(key)
+        return cached[1]
+    from app import discovery_adoption
+    now = utcnow()
+    share = None
+    async with session_scope() as s:
+        recent, decisions = await load_data(s, user_id, now, LEARNING_DAYS + discovery_adoption.WINDOW.days)
+        # Handouts upper-bound mature distinct discoveries. If either group cannot qualify,
+        # don't load the full journal; legacy snapshots never supply a missing subtype.
+        offers = Counter(d.decision_json["novelty"] for d in decisions if isinstance(d.decision_json, dict)
+                         and d.decision_json.get("novelty") in ("new_track_known_artist", "new_artist"))
+        if min(offers["new_track_known_artist"], offers["new_artist"]) >= MIN_SAMPLES:
+            balance = {}
+            await discovery_adoption.report(s, user_id, recent, decisions, now=now, days=LEARNING_DAYS, balance=balance)
+            share = balance["known_artist_share"]
+    _discovery_cache[key] = (monotonic() + DISCOVERY_TTL_S, share)
+    _discovery_cache.move_to_end(key)
+    while len(_discovery_cache) > ADAPTATION_CACHE_MAX:
+        _discovery_cache.popitem(last=False)
+    return share
 
 
 async def adapted_weights(user_id: int, base: dict[str, float]) -> dict[str, float]:

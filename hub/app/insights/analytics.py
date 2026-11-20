@@ -19,6 +19,7 @@ from app.mixes.taste import artist_key
 from app.mixes.taste_snapshot import PLAYBACK_KINDS
 from app.mixes.wave import generator_title
 from app.models import DownloadItem, User
+from app.plays import attempt_trigger
 
 MAX_DAYS = 3 * 366
 DEFAULT_DAYS = 30
@@ -76,22 +77,22 @@ def _gen_block(offered: Counter, matched: list[tuple[str, Attempt]], liked: Coun
 
 
 def _adopted(h: History, kind: str, inside) -> int:
-    """Tracks first heard from a mix / the wave in the period that got an own ♥ or ≥ 2 listens in self-chosen
-    contexts afterwards (INSIGHTS.md 5)."""
+    """Tracks first heard from the mix/wave, then liked or deliberately chosen at least twice."""
     first: dict[str, Attempt] = {}
     for a in h.attempts:
         if a.heard_at is not None and a.key not in first:
             first[a.key] = a
-    out = 0
-    for key, a in first.items():
-        if source(a) != kind or not inside(a.heard_at):
-            continue
-        later = [x for x in h.attempts if x.key == key and x.heard_at and x.heard_at > a.heard_at and
-                 source(x) in SELF_SELECTED]
-        liked = any(m.kind == "like" and m.ts > a.heard_at and launches.mark_aliases(h, m) & a.aliases
-                    for m in h.marks)
-        out += liked or len(later) >= 2
-    return out
+    cohort = {key: a for key, a in first.items() if source(a) == kind and inside(a.heard_at)}
+    manual = Counter()
+    for x in h.attempts:
+        discovery = cohort.get(x.key)
+        if (discovery and x.started_at > discovery.heard_at and x.heard_at is not None and
+                x.heard_outcome_at is not None and manual[x.key] < 2 and source(x) in SELF_SELECTED and
+                attempt_trigger(x.events) == "manual"):
+            manual[x.key] += 1
+    return sum(manual[key] >= 2 or any(
+        m.kind == "like" and m.ts > a.heard_at and launches.mark_aliases(h, m) & a.aliases for m in h.marks
+    ) for key, a in cohort.items())
 
 
 async def listening(s: AsyncSession, user: User, start: date, end: date, timezone: str, now: datetime,

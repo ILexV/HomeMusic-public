@@ -230,7 +230,7 @@ registerSmart({
   listStarted(context) {
     generation++;
     session = null;
-    listPage = (context === 'playlist' || context === 'liked') && page && (page.context === 'liked') === (context === 'liked') ? page : null;
+    listPage = page?.context === context ? page : null;
   },
   canStart() {
     if (!STANDALONE || !smartEnabled()) return false;

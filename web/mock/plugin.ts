@@ -975,7 +975,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
       ...empty, days, since, until, metric_version: 'mock-empty', provenance: 'dev mock without listening history',
       starts: 0, playback_errors: 0, interrupted: 0, new_track_plays: 0, new_track_likes: 0, repeats: 0,
       new_track_like_rate: null, repeat_rate: null, sources: [], limitations: ['Демонстрационный режим: истории прослушиваний нет.'],
+      offer_repeats: { offers: 0, repeats: 0, per_50: null, lookback_days: 7, limitations: [] },
+      discovery_balance: { days: 90, min_per_subtype: 20, known_artist_share: null, reason: 'Пока недостаточно открытий с полным сроком наблюдения.' },
       discovery_adoption: { window_days: 14, mature: 0, adopted: 0, pending: 0, rate: null, sources: [], limitations: [],
+        unknown_return_tracks: 0, subtypes: [
+          { id: 'new_track_known_artist', title: 'Новая песня знакомого исполнителя', mature: 0, adopted: 0, rate: null },
+          { id: 'new_artist', title: 'Новый исполнитель', mature: 0, adopted: 0, rate: null },
+        ],
         cohort_since: new Date(Date.parse(since) - 14 * 86400_000).toISOString(),
         cohort_until: new Date(Date.parse(until) - 14 * 86400_000).toISOString() },
       comparison: {

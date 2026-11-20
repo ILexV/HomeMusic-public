@@ -68,7 +68,7 @@ export function playAll(list: readonly TrackOut[], opts: { shuffle?: boolean; co
   if (!list.length) return;
   if (canPlayAll()) {
     const q = opts.shuffle ? shuffled(list) : list;
-    playTracks(q, q[0], opts.context);
+    playTracks(q, undefined, opts.context);
   } else listenAll(list.map(listenTrack), opts);
 }
 
@@ -134,7 +134,7 @@ export function TrackRow({
     : () => listen(listenTrack(track), queue?.map(listenTrack));
   const songId = track.owned && canPlay() ? track.nd_song_id : null;
   // owned: the app's player; in a browser there is none, so the page plays the library file
-  const play = all ? listenHere : songId ? (onPlay ?? (() => playSongs([songId]))) : track.owned && !canPlay() ? listenHere : undefined;
+  const play = all ? listenHere : songId ? (onPlay ?? (() => playSongs([songId], 0))) : track.owned && !canPlay() ? listenHere : undefined;
   const rowPlays = STANDALONE && (!track.owned || (!(link && track.album_ref) && !!play));
   const playLabel = playing ? `Пауза «${track.title}»` : `Слушать «${track.title}»`;
   const sub = [track.artists?.length ? track.artists.join(', ') : track.artist, showAlbum ? track.album_title : null].filter(Boolean).join(' · ');

@@ -272,9 +272,9 @@ async def test_events_of_a_recommendation_get_the_smart_context_and_teach_the_se
     plan = await start(c, ids)
     sid = plan["session_id"]
     first, second = plan["recs"][0], plan["recs"][1]
-    own_event = ev("finish", "", nd=plan["own"][0], context="playlist")
-    early = ev("start", first["ref"])
-    stored_first = {**ev("start", second["ref"]), "context": "queue"}
+    own_event = {**ev("finish", "", nd=plan["own"][0], context="playlist"), "play_trigger": "manual"}
+    early = {**ev("start", first["ref"]), "play_trigger": "auto"}
+    stored_first = {**ev("start", second["ref"]), "context": "queue", "play_trigger": "repeat"}
     assert (await c.post("/api/plays/events", json={"events": [stored_first]})).status_code == 200
 
     r = await c.post(f"/api/smart-shuffle/{sid}/next", json={
@@ -287,6 +287,8 @@ async def test_events_of_a_recommendation_get_the_smart_context_and_teach_the_se
     contexts = {e.ref: e.context for e in rows if e.ref}
     assert contexts[first["ref"]] == contexts[second["ref"]] == f"smart:{sid}"  # also the one stored under "queue"
     assert {e.context for e in rows if e.nd_song_id == plan["own"][0]} == {"playlist"}  # an own song keeps its list
+    triggers = {e.event_id: e.play_trigger for e in rows}
+    assert [triggers[e["event_id"]] for e in (own_event, early, stored_first)] == ["manual", "auto", "repeat"]
     # the early skip counted against the artist in this session
     assert smart._rt[sid].state.skips.get(smart.artist_key(first["artist"])) == 1
 
@@ -397,7 +399,7 @@ async def test_every_run_brings_a_fresh_set(env, monkeypatch) -> None:
     elsewhere = {r["ref"] for r in (await start(c, ids, context="liked"))["recs"]}
 
     assert len(first) == len(second) == 3 and not first & second
-    assert elsewhere == first  # what another context was offered does not count
+    assert elsewhere == first  # only the small shared spacing term applies outside the same context
 
 
 async def test_a_scarce_pool_repeats_rather_than_leave_a_place_empty(env, monkeypatch) -> None:

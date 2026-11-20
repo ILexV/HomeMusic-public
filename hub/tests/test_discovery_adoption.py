@@ -51,8 +51,8 @@ def test_first_heard_once_with_frozen_source_and_verified_aliases_across_offers(
         "generator_contributions": {"a": 3, "b": 1}}})
     later = decision("dz:1", "smart:s", at=HEARD + DAY, source="c")
     events = [event(None, nd_song_id="song"), event("dz:1", at=HEARD + DAY, context="smart:s"),
-              event("nd:song", at=HEARD + 2 * DAY, context="search", launch_id="search"),
-              event(None, at=HEARD + 3 * DAY, context="search", launch_id="search", nd_song_id="song"),
+              event("nd:song", at=HEARD + 2 * DAY, context="search", launch_id="search", play_trigger="manual"),
+              event(None, at=HEARD + 3 * DAY, context="search", launch_id="search", nd_song_id="song", play_trigger="manual"),
               event("dz:2", context="wave:w"), event("old"), event("old", at=HEARD - 200 * DAY, context="artist")]
     ds = [later, d, decision("dz:2", "wave:w", source="b"), decision("old")]
     out = report(reversed(events), ds, subjects=[Subject("track", ("ref:dz:1", "nd:song"))])
@@ -107,16 +107,44 @@ def test_causal_likes_frozen_at_each_deadline_with_provenance_and_real_state_cha
 
 @pytest.mark.parametrize("other,flags", [
     ("queue", {}), (None, {}), ("continuous", {}), ("wave:w", {}), ("smart:s", {}), ("mix:1", {}),
-    ("playlist:generated", {}), ("search", {"launch_origin": "mix_page_track"}),
+    ("playlist", {}), ("playlist:generated", {}), ("search", {"launch_origin": "mix_page_track"}),
     ("library", {"launch_id": "wave:w"}), ("artist", {"kind": "skip", "listened_ms": 300}),
     ("search", {"received_at": NOW + TICK}), ("search", {"at": HEARD + 14 * DAY + TICK}),
+    ("playlist:mine", {"play_trigger": "auto"}), ("liked", {"play_trigger": "repeat"}),
 ])
 def test_one_heard_organic_plus_retry_and_nonqualifying_second_is_not_adoption(other, flags):
-    first = event("x", at=HEARD + DAY, context="search", playback_id="own", listened_ms=31000)
-    retry = event("x", at=HEARD + DAY + TICK, context="search", playback_id="own", listened_ms=31000)
-    second = event("x", **{"at": HEARD + 2 * DAY, "context": other, **flags})
+    first = event("x", at=HEARD + DAY, context="search", playback_id="own", listened_ms=31000, play_trigger="manual")
+    retry = event("x", at=HEARD + DAY + TICK, context="search", playback_id="own", listened_ms=31000, play_trigger="manual")
+    second = event("x", **{"at": HEARD + 2 * DAY, "context": other, "play_trigger": "manual", **flags})
     out = report([event("x"), first, retry, second], [decision("x")], mix_playlist_ids=["generated"])
     assert (out["mature"], out["adopted"], out["rate"]) == (1, 0, 0.)
+    assert out["unknown_return_tracks"] == 0
+
+
+def test_unknown_returns_count_distinct_mature_tracks_only_and_never_undo_explicit_likes():
+    refs = ("legacy", "liked", "excluded", "pending")
+    rows = [event(ref, at=NOW - 3 * DAY if ref == "pending" else HEARD) for ref in refs]
+    for day in (1, 2):
+        for ref in refs:
+            at = (NOW - 3 * DAY if ref == "pending" else HEARD) + day * DAY
+            rows.append(event(ref, at=at, context="smart:s" if ref == "excluded" else "search", playback_id=None))
+    rows.append(event("liked", "like", at=HEARD + DAY))
+    out = report(rows, [decision(ref) for ref in refs])
+    assert (out["mature"], out["adopted"], out["pending"], out["unknown_return_tracks"]) == (3, 1, 1, 2)
+
+
+@pytest.mark.parametrize("playback_id,last_trigger,adopted,unknown", [
+    ("id", None, 1, 0),              # evidence belongs to one identified attempt
+    ("id", "auto", 0, 1),            # conflict is not confirmed intent
+    (None, None, 0, 1),              # no inference across unkeyed legacy events
+    (None, "manual", 1, 0),
+])
+def test_return_uses_attempt_not_just_terminal_or_list(playback_id, last_trigger, adopted, unknown):
+    rows = [event("x"), event("x", at=HEARD + DAY, context="liked", play_trigger="manual"),
+            event("x", "start", HEARD + 2 * DAY, "playlist:own", playback_id=playback_id, play_trigger="manual"),
+            event("x", at=HEARD + 2 * DAY + TICK, context="playlist:own", playback_id=playback_id, play_trigger=last_trigger)]
+    out = report(rows, [decision("x")], mix_playlist_ids=["generated"])
+    assert (out["adopted"], out["unknown_return_tracks"]) == (adopted, unknown)
 
 
 async def test_quality_loads_first_listen_and_prior_marks_beyond_its_learning_window(hub_env, db_file):
@@ -172,5 +200,97 @@ async def test_no_report_queries_for_offers_without_a_heard_candidate(hub_env, d
                 out = await load_report(s, 1, journal, ds, now=NOW, days=7)
                 assert (out["mature"], out["pending"], out["rate"]) == (0, 0, None)
             assert queries == []
+    finally:
+        await dispose()
+
+
+KNOWN_ARTIST = "new_track_known_artist"
+NEW_ARTIST = "new_artist"
+
+
+def test_subtype_fractions_use_first_frozen_decision_and_keep_legacy_separate():
+    kinds = {"a": KNOWN_ARTIST, "b": KNOWN_ARTIST, "c": NEW_ARTIST, "legacy": None}
+    ds = [decision(ref, decision_json={"novelty": k} if k else {}) for ref, k in kinds.items()]
+    ds.append(decision("legacy", context="wave:w", at=HEARD + DAY, decision_json={"novelty": NEW_ARTIST}))
+    rows = [event(ref) for ref in kinds] + [event("legacy", at=HEARD + 2 * DAY, context="wave:w"),
+        event("a", "like", at=HEARD + DAY), event("legacy", "like", at=HEARD + DAY)]
+    out = report(rows, ds)
+    assert [(r["id"], r["adopted"], r["mature"], r["rate"]) for r in out["subtypes"]] == [
+        (KNOWN_ARTIST, 1, 2, .5), (NEW_ARTIST, 0, 1, 0.), ("unknown", 1, 1, 1.)]
+
+
+@pytest.mark.parametrize("n_known,n_new,winner,expected", [
+    (0, 0, None, None), (19, 100, NEW_ARTIST, None), (100, 19, KNOWN_ARTIST, None),
+    (21, 45, None, None), (20, 20, KNOWN_ARTIST, .55), (20, 20, NEW_ARTIST, .45),
+    (80, 100, KNOWN_ARTIST, .6), (100, 80, NEW_ARTIST, .4),
+])
+def test_balance_requires_both_mature_cohorts_and_shrinks_the_difference(n_known, n_new, winner, expected):
+    rows, ds = [], []
+    for kind, n in ((KNOWN_ARTIST, n_known), (NEW_ARTIST, n_new)):
+        for i in range(n):
+            ref = f"{kind}:{i}"
+            rows.append(event(ref))
+            ds.append(decision(ref, decision_json={"novelty": kind}))
+            if kind == winner:
+                rows.append(event(ref, "like", at=HEARD + DAY))
+    balance = {}
+    out = report(rows, ds, balance=balance)
+    assert [r["mature"] for r in out["subtypes"]] == [n_known, n_new]
+    assert all(r["rate"] is None for r in out["subtypes"] if not r["mature"])
+    if expected is None:
+        assert balance["known_artist_share"] is None
+    else:
+        assert balance["known_artist_share"] == pytest.approx(expected)
+    assert balance["days"] == 90 and balance["min_per_subtype"] == 20 and balance["reason"]
+
+
+async def test_fixed_window_balance_matches_offline_and_cached_selection(hub_env, db_file, monkeypatch):
+    from app import recommendations
+    from app.db import dispose, init_engine, session_scope
+    from app.matching.replay_quality import observed_quality
+    from app.mixes.evaluate import readonly_db
+    from app.models import Mix, MixItem, User
+
+    init_engine(db_file)
+    monkeypatch.setattr(recommendations, "utcnow", lambda: NOW)
+    # Inside the mature 90-day cohort, outside the last 90 wall-clock days and the 7-day report.
+    at = NOW - 100 * DAY
+    try:
+        async with session_scope() as s:
+            u = User(nd_username="balance", nd_password_enc="x")
+            s.add(u)
+            await s.flush()
+            uid = u.id
+            s.add(Mix(id=1, user_id=uid, title="mix", mode="discover", created_at=at - DAY))
+            await s.flush()
+            for i in range(40):
+                ref = f"dz:{i}"
+                subtype = KNOWN_ARTIST if i < 20 else NEW_ARTIST
+                s.add(MixItem(mix_id=1, position=i, ref=ref, generator="ytm_radio",
+                              features_json={"novelty": subtype}, offered_at=at))
+                s.add(event(ref, user_id=uid, at=at))
+                if i < 20:
+                    s.add(event(ref, "like", user_id=uid, at=at + DAY))
+            # This track has two eligible legacy returns: insufficient evidence for either a win or a loss.
+            s.add_all([event("dz:39", user_id=uid, context="search", at=at + j * DAY) for j in (1, 2)])
+            await s.flush()
+            q = await recommendations.quality(s, uid, now=NOW, days=7)
+            assert not q["discovery_adoption"]["mature"] and q["discovery_balance"]["known_artist_share"] is None
+            s.add(event("dz:39", "like", user_id=uid, at=at + 3 * DAY))
+        async with session_scope() as s:
+            q = await recommendations.quality(s, uid, now=NOW, days=7)
+        with readonly_db(db_file) as db:
+            offline = observed_quality(db, user_id=uid, until=NOW, days=7)
+        assert offline["discovery_balance"] == q["discovery_balance"]
+        assert offline["discovery_adoption"] == q["discovery_adoption"]
+        share = q["discovery_balance"]["known_artist_share"]
+        assert share == pytest.approx(.5475)
+        assert await recommendations.discovery_share(uid) == share
+        assert await recommendations.discovery_share(uid + 1) is None
+        async def unexpected(*args):
+            pytest.fail("cached Discover selection reloaded account history")
+        monkeypatch.setattr(recommendations, "load_data", unexpected)
+        assert await recommendations.discovery_share(uid) == share
+        assert await recommendations.discovery_share(uid + 1) is None
     finally:
         await dispose()

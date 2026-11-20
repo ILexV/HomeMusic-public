@@ -201,7 +201,7 @@ impl State {
                                     self.ctx.queue.borrow_mut().remove(at);
                                     if current {
                                         if advanced && self.ctx.queue.borrow().current().is_some() {
-                                            self.ctx.play_current();
+                                            self.ctx.play_current(crate::queue::Start::Auto);
                                             if !was_playing { self.ctx.player.borrow_mut().set_paused(true); }
                                         } else { self.ctx.player.borrow_mut().stop(); }
                                     }

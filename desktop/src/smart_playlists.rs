@@ -226,8 +226,9 @@ impl State {
                     tracks.len(), if tracks.is_empty() { ". Измените правила." } else { "" }).into());
                 if play && !tracks.is_empty() {
                     let mut queue = crate::queue_from_playables(&name, &tracks);
+                    queue.set_context("library");
                     queue.select(0);
-                    self.ctx.launch_queue(queue);
+                    self.ctx.launch_queue(queue, crate::queue::Start::Auto);
                 }
             }
         }

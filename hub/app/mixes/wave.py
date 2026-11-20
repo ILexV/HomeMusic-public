@@ -50,7 +50,7 @@ from app.mixes.resolve import catalog_track, library_track
 from app.mixes.taste import Profile, TasteTrack, artist_key, build_profile, skip_weight
 from app.mixes.taste_math import V2Profile, saturation
 from app.mixes.taste_snapshot import Subject, TasteEvent, playback_attempts
-from app.models import DownloadBatch, DownloadItem, PlayEvent, Track, User, WaveItem, WaveSession, utcnow
+from app.models import DownloadBatch, DownloadItem, PlayEvent, Track, User, WaveItem, WaveReoffer, WaveSession, utcnow
 from app.services import svc
 
 log = logging.getLogger(__name__)
@@ -578,9 +578,16 @@ def value(c: build.Cand, st: State, vectors: dict[str, list[float]], pos: list[f
     return (v * multiplier if v >= 0 else v / multiplier) - c.recent_offer_penalty
 
 
+def _familiar_share(st: State, mode: str) -> float:
+    preference = st.preferences.get("discovery")
+    return {"familiar": build.MODES["favorites"], "new": build.MODES["discover"]}.get(
+        preference, build.MODES.get(mode, build.MODES["normal"]))
+
+
 def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: int = BATCH,
          queued: set[str] = frozenset(), first: build.Cand | None = None,
-         values: dict[str, float] | None = None, eligible: set[str] | None = None) -> list[build.Cand]:
+         values: dict[str, float] | None = None, eligible: set[str] | None = None,
+         known_artist_share: float | None = None) -> list[build.Cand]:
     """The next `n`: the best by `value` keeping the mode's familiar share, an artist at most once in `ARTIST_GAP`
     tracks (counting the played ones; the artist of a wave by an artist — once in `SEED_ARTIST_GAP`); with nothing else left, the gap gives way (never the same artist twice in a
     row). «Не нравится» set since the candidate came in drops it. `queued` — refs the client has ahead already.
@@ -593,8 +600,7 @@ def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: i
     if values is not None:
         values.update((c.track.ref, vals[id(c)]) for c in pool)
     ranked = sorted(pool, key=lambda c: -vals[id(c)])
-    share = {"familiar": 0.8, "new": 0.1}.get(st.preferences.get("discovery"),
-                                               build.MODES.get(mode, build.MODES["normal"]))
+    share = _familiar_share(st, mode)
     out: list[build.Cand] = [first] if first is not None else []
     recent = [x.artist for x in st.played]
     while len(out) < n and ranked:
@@ -617,7 +623,41 @@ def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: i
                 best = next((c for c in spaced if c.novelty in build.DISCOVERIES and c.novelty != best.novelty), best)
         ranked.remove(best)
         out.append(best)
+    if share == build.MODES["discover"] and known_artist_share is not None and ranked:
+        _tilt_discover(st, out, ranked, recent, vals, queued, first, known_artist_share)
     return out
+
+
+def _tilt_discover(st: State, out: list[build.Cand], unused: list[build.Cand], recent: list[str],
+                   values: dict[int, float], queued: set[str], first: build.Cand | None, share: float) -> None:
+    """Trade only neutral new picks for unused eligible candidates. Neither queue nor seed moves."""
+    seq = recent + [c.artist for c in out]
+    offset = st.started - st.started_familiar
+    for start in range(0, len(out), BATCH):
+        end = min(start + BATCH, len(out))
+        discoveries = [c for c in out[start:end] if c is not first and c.novelty in build.DISCOVERIES]
+        preferred, budget = build.discovery_budget(discoveries, share, offset)
+        offset += len(discoveries)
+        if not budget:
+            continue
+        replaceable = (j for j in range(start, end) if out[j] is not first and out[j].track.ref not in queued
+                       and out[j].novelty in build.DISCOVERIES and out[j].novelty != preferred)
+        for i in sorted(replaceable, key=lambda j: (values[id(out[j])], -j)):
+            pos = len(recent) + i
+            for c in unused:
+                if c.novelty != preferred:
+                    continue
+                artist = c.artist
+                gap = SEED_ARTIST_GAP if artist == st.seed_artist else ARTIST_GAP
+                # Check *both* sides: changing a picked slot cannot invalidate a later neutral pick's spacing.
+                if artist in seq[max(0, pos - gap + 1):pos] or artist in seq[pos + 1:pos + gap]:
+                    continue
+                out[i], seq[pos] = c, artist
+                unused.remove(c)
+                budget -= 1
+                break
+            if not budget:
+                break
 
 
 def _disliked(c: build.Cand, p: Profile) -> bool:
@@ -1245,10 +1285,10 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
     vectors = await _vectors(rt)
     source_weights = await recommendations.adapted_weights(rt.user_id, weights())
     candidates = [*st.out.values(), *st.pool.values()]
-    offered = await recent_offers.load(rt.user_id, now=utcnow(), exclude_session=sid)
+    offered = await recent_offers.load(rt.user_id, now=utcnow(), exclude_wave=sid)
     for c in candidates:
         c.parts = build.score_parts(c, source_weights, rt.profile)
-        c.recent_offer_penalty = (0.0 if "seed" in c.gens else
+        c.recent_offer_penalty = (0.0 if "seed" in c.gens or c.track.ref in queued else
                                   recent_offers.penalty(offered, c.track.ref, c.nd_song_id))
         c.parts["recent_offer_penalty"] = c.recent_offer_penalty
         c.score = c.parts["total"]
@@ -1259,8 +1299,10 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
     eligible = {c.track.ref for c in candidates if not policy.blocked(c) and not _disliked(c, rt.profile)
                 and not (rt.blocked and rt.blocked(c))}
     values: dict[str, float] = {}
+    share = (await recommendations.discovery_share(rt.user_id)
+             if _familiar_share(st, rt.mode) == build.MODES["discover"] else None)
     reserve = pick(st, rt.profile, rt.mode, vectors, n=PREPARE_POOL, queued=queued, first=first,
-                   values=values, eligible=eligible)
+                   values=values, eligible=eligible)  # neutral reserve: apply the nudge once, among ready tracks
     st.more_to_prepare = len(reserve) == PREPARE_POOL and len(eligible) > len(reserve)
     refs = {c.track.ref: f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in reserve}
     statuses = await listen.prepare_full(rt.user_id, list(dict.fromkeys(refs.values())), timeout_s=2.0)
@@ -1276,13 +1318,15 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
         await _save(sid, rt)
         raise WaveError(409, "Полная запись начального трека недоступна; другой трек не подставлен")
     tracks = ([] if first is not None and first.track.ref not in ready else
-              pick(st, rt.profile, rt.mode, vectors, queued=queued, first=first, values=values, eligible=ready))
+              pick(st, rt.profile, rt.mode, vectors, queued=queued, first=first, values=values, eligible=ready,
+                   known_artist_share=share))
     if tracks and first is not None:
         st.awaiting_seed = None
     for ref in list(st.out):
         st.pool[ref] = st.out.pop(ref)
     for c in tracks:
         c.parts["selection_value"] = values.get(c.track.ref)
+        c.parts["known_artist_share"] = share
         c.explanation = recommendations.explain_candidate(c)
         if c.gens.get("seed") == 0:
             c.explanation.insert(0, "Выбран начальным треком волны")
@@ -1304,7 +1348,8 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
     await _save(sid, rt)
     try:
         async with session_scope() as s:
-            await save_items(s, sid, rt.user_id, tracks, values)
+            # Reordering/confirming an upcoming track the client still holds is not a new exposure.
+            await save_items(s, sid, rt.user_id, [c for c in tracks if c.track.ref not in queued], values)
     except Exception:
         log.exception("wave %s: handed out tracks not recorded", sid)
     listen.warm_light([f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in tracks])
@@ -1313,13 +1358,19 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
 
 async def save_items(s: AsyncSession, sid: str, user_id: int, tracks: list[build.Cand],
                      values: dict[str, float], now: datetime | None = None) -> None:
-    """Record the first decision immutably; handing out the same track updates only its exposure count/time."""
+    """Record a genuine handout without changing its first decision or losing known repeat timestamps."""
     if not tracks:
         return
     now = now or utcnow()
     refs = [c.track.ref for c in tracks]
-    have = set((await s.execute(select(WaveItem.ref).where(WaveItem.session_id == sid,
-                                                          WaveItem.ref.in_(refs)))).scalars())
+    existing = (await s.execute(select(WaveItem.ref, WaveItem.id, WaveItem.first_handed_at, WaveItem.last_handed_at)
+                                .where(WaveItem.session_id == sid, WaveItem.ref.in_(refs)))).all()
+    have = {row.ref for row in existing}
+    # Only the old middle timestamps are otherwise lost on upsert. Never synthesize one from handed_count.
+    displaced = [dict(item_id=row.id, handed_at=row.last_handed_at) for row in existing
+                 if row.first_handed_at < row.last_handed_at < now]
+    if displaced:
+        await s.execute(sqlite_insert(WaveReoffer).values(displaced).on_conflict_do_nothing())
     nxt = (await s.execute(select(func.coalesce(func.max(WaveItem.position) + 1, 0))
                            .where(WaveItem.session_id == sid))).scalar_one()
     rows = []
@@ -1338,7 +1389,8 @@ async def save_items(s: AsyncSession, sid: str, user_id: int, tracks: list[build
             nxt += 1
     q = sqlite_insert(WaveItem).values(rows)
     await s.execute(q.on_conflict_do_update(index_elements=["session_id", "ref"], set_={
-        "handed_count": WaveItem.handed_count + 1, "last_handed_at": q.excluded.last_handed_at}))
+        "handed_count": WaveItem.handed_count + 1, "last_handed_at": q.excluded.last_handed_at},
+        where=q.excluded.last_handed_at > WaveItem.last_handed_at))
 
 
 async def settle(sid: str) -> None:

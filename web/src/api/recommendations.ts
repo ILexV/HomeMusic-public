@@ -32,9 +32,13 @@ export interface RecommendationQuality {
   early_skip_rate: number | null;
   new_track_like_rate: number | null;
   repeat_rate: number | null;
+  offer_repeats?: { offers: number; repeats: number; per_50: number | null; lookback_days: number; limitations: string[] };
+  discovery_balance?: { days: number; min_per_subtype: number; known_artist_share: number | null; reason: string };
   discovery_adoption: {
     window_days: number; mature: number; adopted: number; pending: number; rate: number | null;
     cohort_since: string; cohort_until: string; limitations: string[];
+    subtypes?: Array<{ id: string; title: string; mature: number; adopted: number; rate: number | null }>;
+    unknown_return_tracks?: number;
     sources: Array<{ id: string; title: string; mature: number; adopted: number; rate: number | null }>;
   };
   sources: Array<{ id: string; title: string; attempts: number; completed: number; early_skips: number;

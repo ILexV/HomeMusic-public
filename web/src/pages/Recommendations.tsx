@@ -20,10 +20,16 @@ export function RecommendationQualityPage() {
     <PageHeader title="Качество рекомендаций" />
     <div className="space-y-4 px-4 pb-6">
       <Segmented label="Период качества" value={days} onChange={setDays} options={[{ value: '7', label: '7 дней' }, { value: '30', label: '30 дней' }, { value: '90', label: '90 дней' }]} />
-      <p className="text-sm text-muted">Только ваши реальные прослушивания рекомендаций. Предложенные, но не включённые треки не обучают подбор.</p>
+      <p className="text-sm text-muted">Данные только вашего аккаунта. Повторы в подборках считаем по предложенным трекам, а возвраты к песням — по прослушиваниям и лайкам.</p>
       <div className="flex flex-wrap gap-4 text-sm text-accent"><Link to="/recommendations/pauses">Временные паузы</Link><Link to="/releases">Новые релизы</Link></div>
       {res.loading ? <Loading /> : res.error ? <ErrorState text={res.error} onRetry={() => res.reload()} /> : d && <>
         {!d.attempts && <Notice kind="info">Пока нет прослушиваний рекомендаций за этот период. Включите волну или микс — статистика появится после прослушивания.</Notice>}
+        {d.offer_repeats && <section className="space-y-1 rounded-xl bg-surface p-4">
+          <h2 className="text-lg font-bold">Повторы в подборках</h2>
+          <p className="text-lg font-semibold tabular-nums">{d.offer_repeats.per_50 === null ? 'Нет выдач за период' : `${credit.format(d.offer_repeats.per_50)} на 50 рекомендаций`}</p>
+          {d.offer_repeats.offers > 0 && <p className="text-sm">Из {d.offer_repeats.offers} выдач в {d.offer_repeats.repeats} случаях трек уже предлагался за предыдущие {d.offer_repeats.lookback_days} дней. Это выдачи, а не прослушивания.</p>}
+          {d.offer_repeats.limitations.map((note) => <p key={note} className="text-xs text-muted">{note}</p>)}
+        </section>}
         {d.discovery_adoption && <section className="space-y-2 rounded-xl bg-surface p-4">
           <h2 className="text-lg font-bold">Какие открытия прижились за {d.discovery_adoption.window_days} дней</h2>
           <p className="text-sm">Считаем трек, если после открытия вы поставили лайк или сами включили его хотя бы дважды.</p>
@@ -31,6 +37,20 @@ export function RecommendationQualityPage() {
             ? <p className="text-lg font-semibold tabular-nums">{rate(d.discovery_adoption.rate)} · {d.discovery_adoption.adopted} из {d.discovery_adoption.mature}</p>
             : <p className="text-sm text-muted">Пока нет треков с полным сроком наблюдения.</p>}
           <p className="text-xs text-muted">Период открытий ({days} дн.) заканчивается {d.discovery_adoption.window_days} дней назад. Более свежих треков: {d.discovery_adoption.pending} — они ещё не входят в процент.</p>
+          {d.discovery_adoption.subtypes && <>
+            <h3 className="pt-2 font-semibold">К каким открытиям вы возвращаетесь</h3>
+            <ul className="divide-y divide-border text-sm">{d.discovery_adoption.subtypes.map((s) =>
+              <li key={s.id} className="flex items-baseline justify-between gap-3 py-1"><span>{s.title}</span>
+                <span className="shrink-0 tabular-nums">{s.mature ? `${rate(s.rate)} · ${s.adopted} из ${s.mature}` : 'Пока нет данных'}</span></li>
+            )}</ul>
+          </>}
+          {!!d.discovery_adoption.unknown_return_tracks && <p className="text-xs text-muted">У {d.discovery_adoption.unknown_return_tracks} треков были возвраты без записи о том, как их включили. Такие запуски не считаются ручным выбором.</p>}
+          {d.discovery_balance && <div className="border-l-2 border-accent pl-3 text-sm">
+            <h3 className="font-semibold">Баланс режима «Незнакомое»</h3>
+            <p>{d.discovery_balance.reason}</p>
+            {d.discovery_balance.known_artist_share !== null && <p>Ориентир для новых песен знакомых исполнителей: {rate(d.discovery_balance.known_artist_share)} среди открытий.</p>}
+          </div>}
+          {d.discovery_adoption.sources.length > 0 && <h3 className="pt-2 font-semibold">По источникам</h3>}
           {d.discovery_adoption.sources.length > 0 && <ul className="divide-y divide-border text-sm">
             {d.discovery_adoption.sources.map((s) => <li className="flex justify-between gap-2 py-1" key={s.id}>
               <span>{s.title}</span><span className="tabular-nums">{rate(s.rate)} · вклад {credit.format(s.adopted)} из {credit.format(s.mature)}</span>

@@ -128,6 +128,7 @@ class ReplayInputs:
     total: int
     weights: dict[str, float]
     vectors: dict[str, list[float]]  # actual coordinates used by order(), including its missing-vector fallback
+    known_artist_share: float | None = None  # frozen at build time; None means score-led selection
 
 
 @dataclass
@@ -672,18 +673,66 @@ def _take_new(pool: list[Cand], n: int, per: dict[str, int], cap: int, mode: str
     return out + _take(pool, n - len(out), per, cap)
 
 
-def select_songs(cands: list[Cand], mode: str, size: int, reserve: int, cap: int) -> tuple[list[Cand], list[Cand]]:
+def discovery_budget(group: Iterable[Cand], share: float, offset: int = 0) -> tuple[str, int]:
+    """A soft target, not a quota. Relative to score-led picks, only nudge towards the better-adopted
+    subtype by |share - .5| of discovery slots, keeping both represented. Offset accumulates fractional
+    slots across short Wave batches (rounding a tiny delta afresh on every /next would never apply it).
+    """
+    preferred = NEW_TRACK_KNOWN_ARTIST if share > .5 else NEW_ARTIST
+    n = k = 0
+    for c in group:
+        if c.novelty in DISCOVERIES:
+            n += 1
+            k += c.novelty == preferred
+    strength = abs(share - .5)
+    # Round half-slots symmetrically despite binary rounding around e.g. .6 - .5.
+    def slots(x: float) -> int:
+        return math.floor(round(x, 10) + .5)
+    budget = slots((offset + n) * strength) - slots(offset * strength)
+    distance = min(n - 1, slots(n * (.5 + strength))) - k
+    return preferred, max(0, min(budget, distance))
+
+
+def _tilt_discover(group: list[Cand], preferred_pool: list[Cand], per: dict[str, int], cap: int, share: float) -> None:
+    preferred, budget = discovery_budget(group, share)
+    if not budget:
+        return
+    # Keep all neutral familiar/unknown picks, and never borrow another group's reserved representative.
+    for i in sorted(range(len(group)), key=lambda i: (group[i].score, -i)):
+        old = group[i]
+        if old.novelty not in DISCOVERIES or old.novelty == preferred:
+            continue
+        per[old.artist] -= 1
+        replacement = _take(preferred_pool, 1, per, cap)
+        if replacement:
+            group[i] = replacement[0]
+            budget -= 1
+            if not budget:
+                break
+        else:
+            per[old.artist] += 1
+
+
+def select_songs(cands: list[Cand], mode: str, size: int, reserve: int, cap: int,
+                 known_artist_share: float | None = None) -> tuple[list[Cand], list[Cand]]:
     """The mix's songs by the mode's shares (a pool that runs short is made up by the other) and the reserve."""
     fam = sorted((c for c in cands if c.familiar), key=lambda c: -c.score)
     new = sorted((c for c in cands if not c.familiar), key=lambda c: -c.score)
     n_fam = round(size * MODES.get(mode, MODES["normal"]))
     per: dict[str, int] = {}
     a_fam = _take(fam, n_fam, per, cap)
+    reserve_familiar = round(reserve * MODES.get(mode, MODES["normal"]))
     a_new = _take_new(new, size - len(a_fam), per, cap, mode)
     a_fam += _take(fam, size - len(a_fam) - len(a_new), per, cap)
-    r_fam = _take(fam, round(reserve * MODES.get(mode, MODES["normal"])), per, cap)
+    r_fam = _take(fam, reserve_familiar, per, cap)
     r_new = _take_new(new, reserve - len(r_fam), per, cap, mode)
     r_fam += _take(fam, reserve - len(r_fam) - len(r_new), per, cap)
+    if mode == "discover" and known_artist_share is not None:
+        preferred = NEW_TRACK_KNOWN_ARTIST if known_artist_share > .5 else NEW_ARTIST
+        leftovers = [c for c in new if c.novelty == preferred]
+        if leftovers:
+            for group in (a_new, r_new):
+                _tilt_discover(group, leftovers, per, cap, known_artist_share)
     return a_fam + a_new, sorted(r_fam + r_new, key=lambda c: -c.score)
 
 
@@ -803,7 +852,7 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
                 *, capture_replay: bool = False) -> Built:
     cfg = get_settings().cfg.mixes
     from app.recommendation_policy import load_policy
-    from app.recommendations import adapted_weights, explain_candidate
+    from app.recommendations import adapted_weights, discovery_share, explain_candidate
 
     weights = await adapted_weights(p.user_id, cfg.weights)
     policy = await load_policy(p.user_id)
@@ -840,7 +889,9 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
     vectors = await sound(p, kept[:EMBED_CANDIDATES], stats)
     for c in kept:
         apply_score(c, weights, p, policy.multiplier(c))
-    active, reserve = select_songs(kept, mode, cfg.size, cfg.reserve, cfg.max_per_artist)
+    share = await discovery_share(p.user_id) if mode == "discover" else None
+    stats["known_artist_share"] = share
+    active, reserve = select_songs(kept, mode, cfg.size, cfg.reserve, cfg.max_per_artist, share)
     active = order(active, vectors)
     for c in active + reserve:
         snapshot_profile(c, p)
@@ -861,7 +912,7 @@ async def build(p: Profile, mode: str, gens: dict[str, Gen] | None = None,
             ReplayCandidate(replace(c, familiar=False, novelty=None, score=0, parts=None, known=None, explanation=[]),
                             policy.blocked(c), policy.multiplier(c))
             for c in islice(cands.values(), 500))
-        replay = ReplayInputs(captured, len(cands), dict(weights), vectors)
+        replay = ReplayInputs(captured, len(cands), dict(weights), vectors, share)
     return Built(active=active, reserve=reserve, title=title, description=description, stats=stats, replay=replay)
 
 

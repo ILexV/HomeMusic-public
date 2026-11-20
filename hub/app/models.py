@@ -391,6 +391,7 @@ class PlayEvent(Base):
     reverts_event_id: Mapped[str | None] = mapped_column(String(64))
     mirror_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     playback_id: Mapped[str | None] = mapped_column(String(64))
+    play_trigger: Mapped[str | None] = mapped_column(String(8))
     device_id: Mapped[str | None] = mapped_column(String(64))
     listened_ms: Mapped[int | None] = mapped_column()
     track_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -541,7 +542,8 @@ class WaveItem(Base):
 
     __tablename__ = "wave_items"
     __table_args__ = (UniqueConstraint("session_id", "ref", name="uq_wave_items_session_ref"),
-                      Index("ix_wave_items_user_first_handed", "user_id", "first_handed_at"))
+                      Index("ix_wave_items_user_first_handed", "user_id", "first_handed_at"),
+                      Index("ix_wave_items_user_last_handed", "user_id", "last_handed_at"))
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("wave_sessions.id", ondelete="CASCADE"), index=True)
@@ -562,6 +564,15 @@ class WaveItem(Base):
     sim: Mapped[float | None] = mapped_column(Float)
     value: Mapped[float | None] = mapped_column(Float)  # `wave.value` the pick ranked it by (none: the seed)
     decision_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class WaveReoffer(Base):
+    """Known handouts strictly between a Wave item's immutable first and current last offer."""
+
+    __tablename__ = "wave_reoffers"
+
+    item_id: Mapped[int] = mapped_column(ForeignKey("wave_items.id", ondelete="CASCADE"), primary_key=True)
+    handed_at: Mapped[datetime] = mapped_column(DateTime, primary_key=True)
 
 
 class SmartSession(Base):
@@ -592,7 +603,8 @@ class SmartItem(Base):
     """A recommendation a smart shuffle handed out, once per session (analytics; `state` follows the user)."""
 
     __tablename__ = "smart_items"
-    __table_args__ = (UniqueConstraint("session_id", "ref", name="uq_smart_items_session_ref"),)
+    __table_args__ = (UniqueConstraint("session_id", "ref", name="uq_smart_items_session_ref"),
+                      Index("ix_smart_items_user_handed", "user_id", "handed_at"))
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("smart_sessions.id", ondelete="CASCADE"), index=True)

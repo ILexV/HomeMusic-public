@@ -341,7 +341,7 @@ async def test_listening_counts_mix_and_wave_recommendations_and_adoption(hub):
 
     m = hub["ids"]["anna"]
     await listeners(hub["ids"])
-    # the mix's new song (dz:300, skipped) later played twice from an album: adopted
+    # An early mix skip does not make the later album listens a return to a discovery.
     await add(attempt(m, NOW - timedelta(hours=6), "dz:300", context="album", device="dev2"),
               attempt(m, NOW - timedelta(hours=5), "dz:300", context="album", device="dev2"))
     async with session_scope() as s:
@@ -357,6 +357,23 @@ async def test_listening_counts_mix_and_wave_recommendations_and_adoption(hub):
     assert {g["generator"]: g["offered"] for g in wave["by_generator"]} == {"favorites": 1, "ytm_radio": 1}
     assert mix["adopted"] == 0  # dz:300 was skipped in the mix: first heard from an album
     assert got["quality"]["reconstructed_waves"] == 1
+
+
+async def test_adopted_requires_two_manual_returns_even_on_a_personal_album(hub):
+    from app.db import session_scope
+    from app.insights import analytics
+    from app.models import User
+
+    uid = hub["ids"]["anna"]
+    for i, trigger in enumerate(("manual", "auto", "repeat", None)):
+        ref = f"dz:return{i}"
+        at = NOW - timedelta(days=2, minutes=i * 3)
+        await add(attempt(uid, at, ref, context="wave:w", launch_id="wave:w"),
+                  attempt(uid, at + timedelta(days=1), ref, context="album", launch_id="album-launch", play_trigger="manual"),
+                  attempt(uid, at + timedelta(hours=30), ref, context="album", launch_id="album-again", play_trigger=trigger))
+    async with session_scope() as s:
+        report = await analytics.listening(s, await s.get(User, uid), date(2026, 3, 1), NOW.date(), TZ, NOW)
+    assert report["recommendations"]["wave"]["adopted"] == 1
 
 
 # --- the API ------------------------------------------------------------------------------------------------------

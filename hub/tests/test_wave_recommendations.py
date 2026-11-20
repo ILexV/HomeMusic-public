@@ -93,6 +93,62 @@ def test_discovery_and_provenance_survive_without_permanent_mutation():
     assert st.started == 0 and not p.tracks
 
 
+@pytest.mark.parametrize("target,known_first,known", [
+    (.6, False, 2), (.4, False, 1), (None, False, 1),
+    (.4, True, 3), (.6, True, 4), (None, True, 4),
+])
+def test_discover_focus_tilts_only_eligible_new_slots(target, known_first, known):
+    songs = [cand(i, score=2 if i < 10 else 1) for i in range(20)]
+    for i, c in enumerate(songs):
+        c.novelty = "new_track_known_artist" if (i < 10) == known_first else "new_artist"
+    st = state(*songs)
+    p = profile()
+    st.preferences["discovery"] = "new"
+    picked = wave.pick(st, p, "normal", {}, known_artist_share=target)
+    assert sum(c.novelty == "new_track_known_artist" for c in picked) == known
+    assert len(picked) == 5
+    # A queued winner is not displaced; the explicit seed stays first; ineligible songs never return.
+    eligible = {c.track.ref for c in songs[:13]}
+    p.disliked_ids.add(songs[12].track.ref)
+    picked = wave.pick(st, p, "discover", {}, known_artist_share=target,
+                       first=songs[4], queued={songs[1].track.ref}, eligible=eligible)
+    assert picked[:2] == [songs[4], songs[1]]
+    assert all(c.track.ref in eligible - p.disliked_ids for c in picked)
+    st.preferences["discovery"] = "familiar"
+    assert wave.pick(st, p, "discover", {}, known_artist_share=target) == wave.pick(st, p, "discover", {})
+
+
+def test_tiny_wave_tilt_accrues_without_breaking_the_artist_gap():
+    songs = [cand(i, score=2) for i in range(10)] + [cand(10), cand(11, artist="Артист 1"), cand(12)]
+    for c in songs:
+        c.novelty = "new_artist" if c.score == 2 else "new_track_known_artist"
+    st, p = state(*songs), profile()
+    neutral = wave.pick(st, p, "discover", {})
+    assert wave.pick(st, p, "discover", {}, known_artist_share=.51) == neutral
+    st.started = 47  # a one-point shift earns one slot in this batch, not one slot in *every* five
+    picked = wave.pick(st, p, "discover", {}, known_artist_share=.51)
+    assert {c.track.ref for c in picked} - {c.track.ref for c in neutral} == {"dz:12"}
+    assert len({c.artist for c in picked}) == len(picked)
+
+
+async def test_wave_only_reads_discovery_policy_when_effective_focus_is_new(env, monkeypatch):
+    await history(env["admin"])
+    fake_sources(monkeypatch, [tr(5000 + i) for i in range(25)])
+    calls = []
+    async def target(uid):
+        calls.append(uid)
+        return .55
+    monkeypatch.setattr(recommendations, "discovery_share", target)
+    c = env["client"]
+    body = (await c.post("/api/wave/start", json={"mode": "discover", "preferences": {"discovery": "familiar"}})).json()
+    assert not calls
+    path = f"/api/wave/{body['session_id']}/next"
+    response = await c.post(path, json={"played": [], "queued": [], "preferences": {"discovery": "new"}})
+    assert response.status_code == 200 and calls == [env["admin"]]
+    response = await c.post(path, json={"played": [], "queued": [], "preferences": {"discovery": "familiar"}})
+    assert response.status_code == 200 and calls == [env["admin"]]
+
+
 async def test_ready_reserve_skips_failed_and_holds_pending_without_taste(env, monkeypatch):
     await history(env["admin"])
     at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=9)

@@ -7,7 +7,7 @@ import { RecommendationExplanation } from '../components/Recommendations';
 import { Button, Cover, ErrorState, IconButton, PageHeader, ProgressBar, Segmented, SkeletonRows, Spinner, cx } from '../components/ui';
 import { fmtLength, plural } from '../lib/format';
 import { useAsync, useDebounced, useInterval } from '../lib/hooks';
-import { listen } from '../lib/listen';
+import { listenAll } from '../lib/listen';
 import { canPlay, canPlayAll, playList, playTracks } from '../lib/player';
 import { Link, goBack, navigate } from '../lib/router';
 import { useSession } from '../lib/session';
@@ -165,7 +165,7 @@ export function MixPage({ id }: { id: number }) {
           ? tracks.some((t) => t.owned && t.nd_song_id)
             ? () => playOld()
             : null
-          : () => listen(listenTrack(tracks[0]), tracks.map(listenTrack), context, 'mix_page');
+          : () => listenAll(tracks.map(listenTrack), { context, origin: 'mix_page' });
 
   const setMode = async (mode: MixMode) => {
     if (mode === settings.mode) return;

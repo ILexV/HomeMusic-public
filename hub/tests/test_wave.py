@@ -290,7 +290,7 @@ async def test_a_wave_hands_out_five_and_learns_from_what_was_played(env, monkey
 
     first = tracks[0]
     r = await c.post(f"/api/wave/{sid}/next", json={
-        "played": [ev("start", first["ref"]), ev("finish", first["ref"], 200)],
+        "played": [{**ev("start", first["ref"]), "play_trigger": "auto"}, {**ev("finish", first["ref"], 200), "play_trigger": "auto"}],
         "queued": [t["ref"] for t in tracks[1:]]})
     assert r.status_code == 200, r.text
     w2 = r.json()
@@ -303,6 +303,7 @@ async def test_a_wave_hands_out_five_and_learns_from_what_was_played(env, monkey
         events = list((await s.execute(select(PlayEvent).where(PlayEvent.user_id == me))).scalars())
         dl = (await s.execute(select(DownloadItem).where(DownloadItem.status == "queued"))).scalar_one()
     assert {e.context for e in events if e.ref == first["ref"]} == {f"wave:{sid}"}
+    assert {e.play_trigger for e in events if e.ref == first["ref"]} == {"auto"}
     # played to its end: downloaded quietly (not in «Загрузки»)
     assert dl.query_json["meta"]["track_ref"] == first["ref"] and dl.query_json["wave"] == {"session": sid}
     assert quiet(dl.query_json)
@@ -316,7 +317,7 @@ async def test_an_event_sent_through_plays_first_gets_the_wave_context(env, monk
     await history(env["admin"])
     fake_sources(monkeypatch, [tr(5000 + i) for i in range(10)])
     w = (await c.post("/api/wave/start", json={})).json()
-    e = {**ev("start", w["tracks"][0]["ref"]), "context": "other"}
+    e = {**ev("start", w["tracks"][0]["ref"]), "context": "other", "play_trigger": "manual"}
     assert (await c.post("/api/plays/events", json={"events": [e]})).status_code == 200
 
     r = await c.post(f"/api/wave/{w['session_id']}/next", json={"played": [e]})
@@ -325,6 +326,7 @@ async def test_an_event_sent_through_plays_first_gets_the_wave_context(env, monk
     async with session_scope() as s:
         row = (await s.execute(select(PlayEvent).where(PlayEvent.event_id == e["event_id"]))).scalar_one()
     assert row.context == f"wave:{w['session_id']}"
+    assert row.play_trigger == "manual"
 
 
 async def test_the_answer_replaces_the_queue(env, monkeypatch) -> None:
@@ -691,7 +693,7 @@ async def test_an_old_session_is_cleared_to_a_summary_not_deleted(env, monkeypat
     assert wave.State.load(cleared.state_json).started == 3
 
 
-async def test_handed_out_tracks_are_recorded_once_and_counted_again(env, monkeypatch) -> None:
+async def test_handed_out_tracks_are_recorded_once_and_queue_sync_is_not_an_offer(env, monkeypatch) -> None:
     c = env["client"]
     await history(env["admin"])
     fake_sources(monkeypatch, [tr(5000 + i) for i in range(30)])
@@ -711,7 +713,7 @@ async def test_handed_out_tracks_are_recorded_once_and_counted_again(env, monkey
 
     items = {x.ref: x for x in await wave_items(sid)}
     again = set(second) & set(first)
-    assert again and all(items[ref].handed_count == 2 for ref in again)
+    assert again and all(items[ref].handed_count == 1 for ref in again)
     assert items[first[0]].handed_count == 1  # played: not handed out again
     assert sorted(items[ref].position for ref in set(second) - set(first)) == list(range(5, 5 + len(set(second) - set(first))))
     assert (await wave_row(sid)).next_calls == 1

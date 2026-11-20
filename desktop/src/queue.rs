@@ -10,6 +10,21 @@ pub enum Repeat { #[default] Off, All, One }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shuffle { #[default] Off, Ordinary, Smart }
 
+/// The action that started this attempt, not a property of the queued track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start { Manual, Auto, Repeat, Unknown }
+
+impl Start {
+    pub fn trigger(self) -> Option<&'static str> {
+        match self {
+            Self::Manual => Some("manual"),
+            Self::Auto => Some("auto"),
+            Self::Repeat => Some("repeat"),
+            Self::Unknown => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Recommendation {
     pub session: String,
@@ -57,6 +72,7 @@ struct RemovedRow {
     index: usize,
     original_index: Option<usize>,
     recommendation: Option<Recommendation>,
+    source: Option<std::sync::Arc<str>>,
     was_current: bool,
 }
 
@@ -71,6 +87,8 @@ pub struct Queue {
     rows: Vec<u64>,
     original: Option<Vec<u64>>,
     recommendations: HashMap<u64, Recommendation>,
+    // A song inserted from a different surface does not belong to the list around it.
+    sources: HashMap<u64, std::sync::Arc<str>>,
     removed: Option<RemovedRow>,
     repeat: Repeat,
     shuffle: Shuffle,
@@ -85,6 +103,7 @@ impl Queue {
             rows: (0..items.len()).map(|_| next_revision()).collect(),
             original: None,
             recommendations: HashMap::new(),
+            sources: HashMap::new(),
             removed: None,
             repeat: Repeat::Off,
             shuffle: Shuffle::Off,
@@ -212,13 +231,14 @@ impl Queue {
         let item = self.items.remove(index);
         let row = self.rows.remove(index);
         let recommendation = self.recommendations.remove(&row);
+        let source = self.sources.remove(&row);
         let original_index = self.original.as_mut().and_then(|order| {
             let at = order.iter().position(|id| *id == row)?;
             order.remove(at);
             Some(at)
         });
         self.removed = undoable.then_some(RemovedRow {
-            item, row, index, original_index, recommendation, was_current: removed_current,
+            item, row, index, original_index, recommendation, source, was_current: removed_current,
         });
         self.index = self.index.and_then(|current| {
             if current > index {
@@ -259,6 +279,7 @@ impl Queue {
         if let Some(rec) = removed.recommendation {
             self.recommendations.insert(removed.row, rec);
         }
+        if let Some(source) = removed.source { self.sources.insert(removed.row, source); }
         self.revision = next_revision();
         if let Some(current) = self.index {
             // The player keeps its current occurrence, including a successor
@@ -298,9 +319,10 @@ impl Queue {
     }
 
     /// Put a track after the current one and make it current. An idle queue starts with it.
-    pub fn play_inserted(&mut self, item: Item) -> bool {
+    pub fn play_inserted(&mut self, item: Item, source: &str) -> bool {
         let at = self.index.map(|index| index + 1).unwrap_or(0);
         self.insert_next(item);
+        self.set_source(at..at + 1, source);
         self.select(at)
     }
 
@@ -321,8 +343,11 @@ impl Queue {
     }
 
     /// Natural EOF (including preload promotion) respects repeat-one.
-    pub fn advance(&mut self) -> bool {
-        self.next_index(true).is_some_and(|i| self.select(i))
+    pub fn advance(&mut self) -> Option<Start> {
+        let next = self.next_index(true)?;
+        let repeats = self.index.is_some_and(|i| next <= i);
+        self.select(next);
+        Some(if repeats { Start::Repeat } else { Start::Auto })
     }
 
     pub fn peek_next(&self) -> Option<&Item> {
@@ -355,7 +380,19 @@ impl Queue {
     /// Only the actual launch source may provide this, never a display title.
     pub fn set_context(&mut self, context: impl Into<String>) {
         let context = context.into();
-        self.context = if context == "liked" || ["playlist:", "mix:", "wave:"].iter().any(|prefix| context.strip_prefix(*prefix).is_some_and(|id| !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_whitespace))) { context } else { String::new() };
+        self.context = if valid_context(&context) { context } else { String::new() };
+        self.revision = next_revision();
+    }
+
+    pub fn row_source(&self, index: usize) -> Option<&str> {
+        self.sources.get(self.rows.get(index)?).map(AsRef::as_ref)
+    }
+
+    pub fn set_source(&mut self, indices: std::ops::Range<usize>, context: &str) {
+        if context == self.context || !valid_context(context) { return; }
+        let Some(rows) = self.rows.get(indices).filter(|rows| !rows.is_empty()) else { return };
+        let source = std::sync::Arc::<str>::from(context);
+        self.sources.extend(rows.iter().map(|&id| (id, source.clone())));
         self.revision = next_revision();
     }
 
@@ -491,6 +528,7 @@ impl Queue {
             "repeat": match self.repeat { Repeat::Off => 0, Repeat::All => 1, Repeat::One => 2 },
             "shuffle": match self.shuffle { Shuffle::Off => 0, Shuffle::Ordinary => 1, Shuffle::Smart => 2 },
             "smart_enabled": self.smart_enabled, "context": self.context,
+            "sources": self.rows.iter().enumerate().filter_map(|(i, id)| self.sources.get(id).map(|s| json!([i, &**s]))).collect::<Vec<_>>(),
             "original": self.original.as_ref().map(|ids| ids.iter().filter_map(|id| self.row_index(*id)).collect::<Vec<_>>()),
             "recommendations": self.rows.iter().enumerate().filter_map(|(i, id)| self.recommendations.get(id).map(|r| json!({"index": i, "session": r.session, "label": r.label}))).collect::<Vec<_>>()
         })
@@ -501,6 +539,13 @@ impl Queue {
         self.shuffle = match value["shuffle"].as_u64() { Some(1) => Shuffle::Ordinary, Some(2) => Shuffle::Smart, _ => Shuffle::Off };
         self.smart_enabled = value["smart_enabled"].as_bool().unwrap_or(true);
         self.set_context(value["context"].as_str().unwrap_or(""));
+        if let Some(sources) = value["sources"].as_array() {
+            for row in sources {
+                if let (Some(i), Some(s)) = (row[0].as_u64().and_then(|v| usize::try_from(v).ok()), row[1].as_str()) {
+                    if i < self.rows.len() { self.set_source(i..i+1, s); }
+                }
+            }
+        }
         if let Some(indices) = value["original"].as_array() {
             let mut seen = HashSet::new();
             self.original = Some(indices.iter().filter_map(|v| usize::try_from(v.as_u64()?).ok())
@@ -540,6 +585,12 @@ impl Queue {
     }
 }
 
+fn valid_context(context: &str) -> bool {
+    matches!(context, "liked" | "album" | "library" | "search")
+        || ["playlist:", "mix:", "wave:"].iter().any(|prefix|
+            context.strip_prefix(*prefix).is_some_and(|id| !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_whitespace)))
+}
+
 fn count_label(count: usize) -> String {
     let n = count as u64;
     let word = match n % 100 {
@@ -575,23 +626,25 @@ mod tests {
         q.select(2);
         let token = q.current_token();
         assert!(q.peek_next().is_none());
-        assert!(!q.advance());
+        assert_eq!(q.advance(), None);
         assert_eq!(q.current_token(), token);
         q.set_repeat(Repeat::One);
         assert_eq!(q.peek_next(), q.current());
-        assert!(q.advance());
+        assert_eq!(q.advance(), Some(Start::Repeat));
         assert_ne!(q.current_token(), token);
         assert!(!q.next());
         q.set_repeat(Repeat::All);
         assert_eq!(q.peek_next().unwrap().id, "a");
-        assert!(q.advance());
+        assert_eq!(q.advance(), Some(Start::Repeat));
         assert_eq!(q.index(), Some(0));
         assert!(q.prev());
         assert_eq!(q.index(), Some(2));
+        q.select(0);
+        assert_eq!(q.advance(), Some(Start::Auto));
         let mut empty = Queue::from_tracks("", vec![]);
         empty.set_repeat(Repeat::All);
         assert!(empty.peek_next().is_none());
-        assert!(!empty.advance());
+        assert_eq!(empty.advance(), None);
         assert!(!empty.prev());
     }
 
@@ -749,7 +802,7 @@ mod tests {
     fn an_inserted_track_plays_after_the_current_one() {
         let mut queue = sample();
         assert!(queue.select(0));
-        assert!(queue.play_inserted(item("z", "Новый", 10)));
+        assert!(queue.play_inserted(item("z", "Новый", 10), "search"));
         assert_eq!(queue.current().unwrap().id, "z");
         assert_eq!(queue.items()[0].id, "a");
         assert_eq!(queue.items()[1].id, "z");
@@ -999,12 +1052,12 @@ mod tests {
     #[test]
     fn play_inserted_still_selects_front_when_idle_or_empty() {
         let mut idle = sample();
-        assert!(idle.play_inserted(item("z", "New", 10)));
+        assert!(idle.play_inserted(item("z", "New", 10), "search"));
         assert_eq!(idle.index(), Some(0));
         assert_eq!(idle.current().unwrap().id, "z");
         assert_eq!(idle.items()[1].id, "a");
         let mut empty = Queue::from_tracks("", vec![]);
-        assert!(empty.play_inserted(item("z", "New", 10)));
+        assert!(empty.play_inserted(item("z", "New", 10), "search"));
         assert_eq!(empty.index(), Some(0));
         assert_eq!(empty.current().unwrap().id, "z");
     }

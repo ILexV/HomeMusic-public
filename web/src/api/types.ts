@@ -895,6 +895,8 @@ export interface HealthOut {
 // --- listening data (MIXES.md 3.2) -----------------------------------------------------------------
 
 export type PlayKind = 'start' | 'progress' | 'interrupted' | 'error' | 'skip' | 'finish' | 'like' | 'unlike' | 'dislike' | 'undislike';
+/** Why this particular playback attempt began, independent of the launch of its list. */
+export type PlayTrigger = 'manual' | 'auto' | 'repeat';
 
 export interface PlayEventIn {
   target_type?: FavoriteType;
@@ -909,6 +911,7 @@ export interface PlayEventIn {
   ref?: string | null;
   nd_song_id?: string | null;
   playback_id?: string | null;
+  play_trigger?: PlayTrigger | null;
   device_id?: string | null;
   listened_ms?: number | null;
   track_metadata?: { title?: string; album?: string; artist_credit?: string; artists?: { name: string; ref?: string }[]; duration_s?: number | null; isrc?: string; year?: number } | null;

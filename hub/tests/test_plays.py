@@ -94,20 +94,24 @@ async def post(c: httpx.AsyncClient, *events: dict) -> dict:
 
 async def test_checkpoints_are_cumulative_and_retries_are_idempotent(env):
     c = env["client"]
-    attempt = dict(ref="dz:100", playback_id="attempt-1", device_id="device-1")
+    attempt = dict(ref="dz:100", playback_id="attempt-1", device_id="device-1", play_trigger="manual")
     start = ev("start", listened_ms=0, **attempt)
     first = ev("progress", listened_ms=10000, **attempt)
     later = ev("progress", listened_ms=22000, **attempt)
     terminal = ev("interrupted", listened_ms=25000, **attempt)
     assert (await post(c, start, later, first, terminal, later))["accepted"] == 4
-    assert (await post(c, first, terminal))["duplicates"] == 2
+    assert (await post(c, {**first, "play_trigger": "auto"}, terminal))["duplicates"] == 2
     rows = [x for x in await stored() if x.playback_id == "attempt-1"]
     assert max(x.listened_ms for x in rows) == 25000
     assert {x.device_id for x in rows} == {"device-1"}
+    assert {x.play_trigger for x in rows} == {"manual"}
     assert (await post(c, ev("progress", ref="dz:100", listened_ms=10)))["rejected"]
     assert (await post(c, ev("finish", ref="dz:100", position_s=100)))["accepted"] == 1
     legacy = next(x for x in await stored() if x.position_s == 100)
-    assert legacy.listened_ms is None and legacy.playback_id is None
+    assert legacy.listened_ms is None and legacy.playback_id is None and legacy.play_trigger is None
+    response = await post(c, ev("finish", ref="dz:100", play_trigger="repeat"),
+                          ev("finish", ref="dz:100", play_trigger="search"), ev("like", ref="dz:100", play_trigger="manual"))
+    assert response["accepted"] == 1 and [r["index"] for r in response["rejected"]] == [1, 2]
 
 
 async def test_listening_metadata_survives_library_deletion(env):

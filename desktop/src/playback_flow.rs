@@ -41,14 +41,15 @@ impl State {
                     crate::note_departure(&snapshot, item, &ctx.hub, true);
                 }
             }
-            let moved = ctx.queue.borrow_mut().advance();
+            let start = ctx.queue.borrow_mut().advance();
             crate::maybe_extend_wave(&ctx.hub, &ctx.queue.borrow());
             self.prepared = None;
-            if moved {
+            if let Some(start) = start {
                 if adopted {
+                    ctx.hub.listening.borrow_mut().begin(&ctx.queue.borrow(), &ctx.hub, start);
                     self.refresh_promoted(ctx);
                 } else {
-                    ctx.play_current();
+                    ctx.play_current(start);
                 }
             } else if promoted.is_some() {
                 // The user removed the predicted successor before native promotion was observed.

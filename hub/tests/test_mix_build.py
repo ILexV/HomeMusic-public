@@ -162,7 +162,8 @@ def test_mode_shares(mode: str, familiar: int) -> None:
 
 
 @pytest.mark.parametrize("rare", ["new_track_known_artist", "new_artist"])
-def test_discover_keeps_both_kinds_in_active_and_reserve_despite_score_gap(rare):
+@pytest.mark.parametrize("share", [None, .4, .6])
+def test_discover_keeps_both_kinds_in_active_and_reserve_despite_score_gap(rare, share):
     common = next(kind for kind in b.DISCOVERIES if kind != rare)
     pool = [cand(i, familiar=True) for i in range(6)]
     for i in range(60):
@@ -170,11 +171,25 @@ def test_discover_keeps_both_kinds_in_active_and_reserve_despite_score_gap(rare)
         c.novelty = rare if i >= 58 else common
         pool.append(c)
 
-    active, reserve = b.select_songs(pool, "discover", 30, 10, 2)
+    active, reserve = b.select_songs(pool, "discover", 30, 10, 2, share)
     for group, familiar in ((active, 3), (reserve, 1)):
         assert sum(c.familiar for c in group) == familiar
         assert {c.novelty for c in group if not c.familiar} == b.DISCOVERIES
         assert sum(c.novelty == rare for c in group) == 1
+
+
+@pytest.mark.parametrize("share", [.4, .6])
+def test_subtype_quota_stays_inside_artist_cap_and_does_not_reduce_the_familiar_quota(share):
+    pool = [cand(i, familiar=True) for i in range(10)]
+    for i in range(60):
+        # Increasing this low-ranked subtype's share may not exhaust its single artist's cap in active.
+        c = cand(i + 100, artist="Repeated" if i < 30 else f"Other {i}", score=i)
+        c.novelty = b.NEW_TRACK_KNOWN_ARTIST if i < 30 else b.NEW_ARTIST
+        pool.append(c)
+    active, reserve = b.select_songs(pool, "discover", 20, 10, 2, share)
+    assert [sum(c.familiar for c in group) for group in (active, reserve)] == [2, 1]
+    assert [sum(c.novelty == b.NEW_TRACK_KNOWN_ARTIST for c in group) for group in (active, reserve)] == [1, 1]
+    assert (len(active), len(reserve)) == (20, 10)
 
 
 def test_at_most_two_songs_of_an_artist() -> None:
@@ -440,3 +455,40 @@ async def test_shadow_replays_live_active_and_reserve_with_adapted_policy(db, mo
         assert rows["dz:2"]["contributions"]["generator_weights"] == {"favorites": 1.25}
         selection = report["selection"]["models"][name]
         assert "dz:1" not in selection["active"] + selection["reserve"]
+
+
+@pytest.mark.parametrize("share", [.4, .6])
+@pytest.mark.parametrize("known_first", [False, True])
+async def test_live_and_shadow_selection_use_the_same_frozen_discover_target(db, monkeypatch, share, known_first):
+    from app import recommendations
+    from app.mixes.shadow import compare, profiles_for
+    from app.mixes.taste_snapshot import TasteSnapshot
+
+    calls = []
+    async def target(uid):
+        calls.append(uid)
+        return share
+    monkeypatch.setattr(recommendations, "discovery_share", target)
+    cfg = b.get_settings().cfg.mixes
+    monkeypatch.setattr(cfg, "size", 20)
+    monkeypatch.setattr(cfg, "reserve", 10)
+    familiar_ids = range(40) if known_first else range(40, 80)
+    p = profile(known(999, played_days_ago=8), listens={f"Артист {i}": 6 for i in familiar_ids})
+    sources = gens(ytm_radio=[tr(i) for i in range(80)])
+    snapshot = TasteSnapshot(1)
+    built = await b.build(p, "discover", sources, capture_replay=True)
+    report = compare(snapshot, built.replay, profiles_for(snapshot, p, "UTC"), active_model="v1",
+                     mode="discover", timezone="UTC", cfg=cfg)
+    assert report["known_artist_share"] == built.stats["known_artist_share"] == share
+    replay = report["selection"]["models"]["v1"]
+    for attr, size in (("active", 20), ("reserve", 10)):
+        tracks = getattr(built, attr)
+        # With ample supply raw ranking heavily favours just one kind. An account signal may shift at most
+        # two active picks and one reserve pick vs neutral; it must not undo an already-favoured native ranking.
+        neutral = size - 1 if known_first else 1
+        delta = 0 if (share > .5) == known_first else round(size * .1) * (1 if share > .5 else -1)
+        assert sum(c.novelty == b.NEW_TRACK_KNOWN_ARTIST for c in tracks) == neutral + delta
+        assert replay[attr] == [c.key for c in tracks]
+    normal = await b.build(p, "normal", sources)
+    assert all((c.novelty == b.NEW_TRACK_KNOWN_ARTIST) == known_first for c in normal.active)
+    assert calls == [p.user_id]  # neither alternate profiles nor non-Discover builds re-read account history

@@ -241,3 +241,34 @@ def test_observed_replay_keeps_unknown_policy_audio_and_adjacent_sample_sizes(db
     assert report["recordings"]["observations"] == 0 and report["recordings"]["rate"] is None
     assert report["unavailable_events"] == 1
     assert report["comparison"]["current"]["since"] == report["comparison"]["previous"]["until"]
+
+
+def test_discovery_replay_reads_only_recorded_trigger_even_on_partial_old_schemas(tmp_path):
+    from app.matching.replay_quality import observed_quality
+
+    path = tmp_path / "historical.sqlite"
+    first = NOW - timedelta(days=18)
+    with sqlite3.connect(path) as c:
+        c.executescript("""
+            CREATE TABLE play_events (id INTEGER PRIMARY KEY, user_id INTEGER, event_id TEXT, kind TEXT,
+                ts TEXT, received_at TEXT, ref TEXT, client TEXT, context TEXT);
+            CREATE TABLE smart_sessions (id TEXT, user_id INTEGER);
+            CREATE TABLE smart_items (session_id TEXT, user_id INTEGER, ref TEXT, handed_at TEXT, familiar INTEGER);
+            INSERT INTO smart_sessions VALUES ('s',1);
+        """)
+        c.execute("INSERT INTO smart_items VALUES ('s',1,'dz:1',?,0)", (first.isoformat(),))
+        for i, context in enumerate(("smart:s", "search", "playlist:mine")):
+            at = (first + timedelta(days=i)).isoformat()
+            c.execute("INSERT INTO play_events(user_id,event_id,kind,ts,received_at,ref,client,context) "
+                      "VALUES(1,?,'finish',?,?,'dz:1','desktop',?)", (str(i), at, at, context))
+
+    def adoption():
+        with readonly_db(path) as c:
+            out = observed_quality(c, user_id=1, until=NOW, days=7)["discovery_adoption"]
+            return out["mature"], out["adopted"], out["unknown_return_tracks"]
+
+    assert adoption() == (1, 0, 1)
+    with sqlite3.connect(path) as c:
+        c.execute("ALTER TABLE play_events ADD play_trigger TEXT")
+        c.execute("UPDATE play_events SET play_trigger='manual' WHERE context!='smart:s'")
+    assert adoption() == (1, 1, 0)

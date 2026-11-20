@@ -106,7 +106,7 @@ pub fn connect_queue_actions(
                 clear_track(&ui);
                 ui.set_error(String::new().into());
             } else {
-                let _ = play_current(&ui, &playback, &items, &config, &waves, &state);
+                let _ = play_current(&ui, &playback, &items, &config, &waves, &state, crate::queue::Start::Auto);
                 if !was_playing {
                     playback.borrow_mut().set_paused(true);
                 }

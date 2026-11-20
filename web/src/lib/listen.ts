@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { api, errorMessage, isAbort, listenStreamUrl } from '../api/client';
-import type { LaunchOrigin, ListenOut } from '../api/types';
+import type { LaunchOrigin, ListenOut, PlayTrigger } from '../api/types';
 import { startDownload } from './actions';
 import { hubEvents } from './events';
 import { NATIVE_PLAYING_EVENT, canPlayAll, pauseNative, webPlayerShown } from './player';
@@ -161,7 +161,7 @@ const RESTART_AFTER_S = 3;
 const FINISH_SHARE = 0.9;
 
 /** The track being played, as reported to the Hub: `started` once its `start` was sent. */
-type OpenPlay = { ref: string; context: string; launch: Launch; started: boolean; playbackId: string; listenedMs: number; anchor: number | null; account: number | null; ndSongId?: string | null };
+type OpenPlay = { ref: string; context: string; trigger: PlayTrigger | null; launch: Launch; started: boolean; playbackId: string; listenedMs: number; anchor: number | null; account: number | null; ndSongId?: string | null };
 let played: OpenPlay | null = null;
 let OPEN_PLAY_KEY = (() => {
   try {
@@ -189,19 +189,23 @@ function accrue(p: OpenPlay) {
   }
 }
 
+function attemptFields(p: OpenPlay) {
+  return { context: p.context, play_trigger: p.trigger, playback_id: p.playbackId, device_id: deviceId,
+    account: p.account, launch_id: p.launch.id, launch_origin: p.launch.origin };
+}
+
 function checkpoint() {
   const p = played;
   if (!p?.started) return;
   accrue(p);
-  const snapshot = { ref: p.ref, context: p.context, playback_id: p.playbackId, device_id: deviceId,
-    listened_ms: Math.round(p.listenedMs), nd_song_id: p.ndSongId, track_metadata: metadata(), account: p.account, updated_ms: Date.now(),
-    launch_id: p.launch.id, launch_origin: p.launch.origin };
+  const snapshot = { ...attemptFields(p), ref: p.ref, listened_ms: Math.round(p.listenedMs),
+    nd_song_id: p.ndSongId, track_metadata: metadata(), updated_ms: Date.now() };
   try { localStorage.setItem(OPEN_PLAY_KEY, JSON.stringify(snapshot)); } catch (e) { console.error('Could not persist listening checkpoint', e); }
   playEvent('progress', { ref: p.ref, nd_song_id: p.ndSongId }, snapshot);
 }
 
 type SavedPlay = { ref: string; context: string; playback_id: string; device_id: string; listened_ms: number;
-  nd_song_id?: string | null; account?: number | null; updated_ms?: number; launch_id?: string | null; launch_origin?: LaunchOrigin | null };
+  play_trigger?: PlayTrigger | null; nd_song_id?: string | null; account?: number | null; updated_ms?: number; launch_id?: string | null; launch_origin?: LaunchOrigin | null };
 
 function recover(key: string) {
   try {
@@ -263,7 +267,7 @@ window.addEventListener('pageshow', (event) => {
   if (sessionAccount !== null) startSharedPlayback(sharedAdapter, sessionAccount);
   const t = state.track;
   if (t) {
-    played = { ref: t.ref, context: state.context, launch: listLaunch, started: false, playbackId: newEventId(), listenedMs: 0, anchor: null, account: listeningAccount() };
+    played = newAttempt(t, null);
     reportStart();
   }
 });
@@ -272,6 +276,11 @@ window.addEventListener('pageshow', (event) => {
 let listContext = 'other';
 /** The launch of the playing list: its tracks' events carry it (INSIGHTS.md 6.5). */
 let listLaunch: Launch = newLaunch(listContext);
+
+function newAttempt(track: ListenTrack, trigger: PlayTrigger | null): OpenPlay {
+  return { ref: track.ref, context: track.rec ? `smart:${track.rec.session}` : listContext, trigger, launch: listLaunch,
+    started: false, playbackId: newEventId(), listenedMs: 0, anchor: null, account: listeningAccount() };
+}
 
 function metadata() {
   const t = state.track;
@@ -287,7 +296,7 @@ function reportStart() {
   p.started = true;
   p.ndSongId = state.info.nd_song_id;
   p.anchor = performance.now();
-  playEvent('start', { ref: p.ref, nd_song_id: p.ndSongId }, { context: p.context, playback_id: p.playbackId, device_id: deviceId, listened_ms: 0, track_metadata: metadata(), account: p.account, launch_id: p.launch.id, launch_origin: p.launch.origin });
+  playEvent('start', { ref: p.ref, nd_song_id: p.ndSongId }, { ...attemptFields(p), listened_ms: 0, track_metadata: metadata() });
   checkpoint();
 }
 
@@ -300,7 +309,8 @@ function reportEnd(ended = false, failed = false, interrupted = false) {
   const duration = state.duration || state.track.duration_s || 0;
   const position = ended ? duration : state.position;
   const kind = interrupted ? 'interrupted' : failed ? 'error' : ended || (duration > 0 && p.listenedMs >= duration * 1000 * FINISH_SHARE) ? 'finish' : 'skip';
-  const persisted = playEvent(kind, { ref: p.ref, nd_song_id: p.ndSongId }, { position_s: position, duration_s: duration || null, context: p.context, playback_id: p.playbackId, device_id: deviceId, listened_ms: Math.round(p.listenedMs), track_metadata: metadata(), account: p.account, launch_id: p.launch.id, launch_origin: p.launch.origin });
+  const persisted = playEvent(kind, { ref: p.ref, nd_song_id: p.ndSongId }, { ...attemptFields(p), position_s: position,
+    duration_s: duration || null, listened_ms: Math.round(p.listenedMs), track_metadata: metadata() });
   if (persisted) try { localStorage.removeItem(OPEN_PLAY_KEY); } catch (e) { console.error('Could not close listening checkpoint', e); }
 }
 
@@ -344,9 +354,9 @@ function el(): HTMLAudioElement {
   // the same element plays on: it was unlocked by the first tap, so the next track may start without one
   a.addEventListener('ended', () => {
     reportEnd(true);
-    if (state.repeat === 'one') start(state.queue, state.index, true);
-    else if (hasNext(state)) start(state.queue, state.index + 1, true);
-    else if (state.repeat === 'all' && !onWave()) start(state.queue, 0, true);
+    if (state.repeat === 'one') start(state.queue, state.index, 'repeat', true);
+    else if (hasNext(state)) start(state.queue, state.index + 1, 'auto', true);
+    else if (state.repeat === 'all' && !onWave()) start(state.queue, 0, 'repeat', true);
     else set({ phase: 'ended' });
   });
   a.addEventListener('error', () => {
@@ -372,15 +382,14 @@ function play(a: HTMLAudioElement) {
   });
 }
 
-/** `auto`: reached by the previous track ending; a track that can't be played is then skipped. */
-function start(queue: readonly ListenTrack[], index: number, auto = false, position = 0, autoplay = true) {
+/** A natural transition also skips unplayable successors; a button or list launch still reports the error. */
+function start(queue: readonly ListenTrack[], index: number, trigger: PlayTrigger | null, skipUnavailable = false, position = 0, autoplay = true) {
   if (!applyingShared && !localPlaybackAllowed()) return;
   occurrence = newEventId();
   const track = queue[index];
   const a = el();
   reportEnd();
-  // a recommendation of the smart shuffle reports under its session, the playlist's own songs under their list
-  played = { ref: track.ref, context: track.rec ? `smart:${track.rec.session}` : listContext, launch: listLaunch, started: false, playbackId: newEventId(), listenedMs: 0, anchor: null, account: listeningAccount() };
+  played = newAttempt(track, trigger);
   resolving?.abort();
   const ctl = new AbortController();
   resolving = ctl;
@@ -410,7 +419,7 @@ function start(queue: readonly ListenTrack[], index: number, auto = false, posit
     (e: unknown) => {
       if (isAbort(e) || resolving !== ctl) return;
       reportEnd(false, true);
-      if (auto && hasNext(state)) return void start(state.queue, state.index + 1, true);
+      if (skipUnavailable && hasNext(state)) return void start(state.queue, state.index + 1, 'auto', true);
       set({ phase: 'error', error: errorMessage(e) });
       a.pause();
     },
@@ -513,11 +522,11 @@ export function touchTrack(ref: string) {
 /** Tap on a catalog track: starts it (with `queue`, the list it belongs to, playing on after it), or
  * pauses/resumes it if it is the current one. `origin` — where the list was launched (by default by `context`). */
 export function listen(track: ListenTrack, queue?: readonly ListenTrack[], context?: string, origin?: LaunchOrigin) {
-  if (state.track?.ref === track.ref && state.phase !== 'error') return toggle();
-  startList(track, queue, context, origin);
+  if (state.track?.ref === track.ref && state.phase !== 'error' && state.phase !== 'ended') return toggle();
+  startList(track, 'manual', queue, context, origin);
 }
 
-function startList(track: ListenTrack, queue?: readonly ListenTrack[], context?: string, origin?: LaunchOrigin) {
+function startList(track: ListenTrack, trigger: PlayTrigger, queue?: readonly ListenTrack[], context?: string, origin?: LaunchOrigin) {
   if (!applyingShared && !localPlaybackAllowed()) return;
   listContext = context ?? routeContext();
   listLaunch = newLaunch(listContext, origin);
@@ -530,7 +539,7 @@ function startList(track: ListenTrack, queue?: readonly ListenTrack[], context?:
   if (state.shuffle && !listContext.startsWith('wave:') && list.length > 1) {
     unshuffled = list;
     set({ smart: false });
-    start([list[at], ...shuffled(list.filter((_, i) => i !== at))], 0);
+    start([list[at], ...shuffled(list.filter((_, i) => i !== at))], 0, trigger);
     // the smart shuffle chosen and this list is a playlist / «Понравившиеся»: the Hub orders it and puts recommendations
     // in, a moment after the tapped track has started (the plain shuffle plays until then)
     if (smartChosen && smartHooks?.canStart()) {
@@ -540,7 +549,7 @@ function startList(track: ListenTrack, queue?: readonly ListenTrack[], context?:
   } else {
     unshuffled = null;
     set({ smart: false });
-    start(list, at);
+    start(list, at, trigger);
   }
 }
 
@@ -549,7 +558,7 @@ export function listenAll(list: readonly ListenTrack[], opts: { shuffle?: boolea
   if (!list.length) return;
   if (opts.shuffle !== undefined) setModes({ shuffle: opts.shuffle });
   // starts over even when the first track is the one playing (listen() would pause it)
-  startList(state.shuffle ? list[Math.floor(Math.random() * list.length)] : list[0], list, opts.context, opts.origin);
+  startList(state.shuffle ? list[Math.floor(Math.random() * list.length)] : list[0], 'auto', list, opts.context, opts.origin);
 }
 
 // --- the queue: shuffle, repeat, «Играть следующим», «В очередь» -----------------------------------------
@@ -616,7 +625,7 @@ export function restoreListening(account: number | null) {
       : newLaunch(saved.context);
     set({ shuffle: saved.shuffle === true, smart: saved.smart === true, repeat: saved.repeat === 'all' || saved.repeat === 'one' ? saved.repeat : 'off' });
     // Restored queues never resume behind an existing remote owner or after a lost lease.
-    start(saved.queue, saved.index, false, saved.position, false);
+    start(saved.queue, saved.index, null, false, saved.position, false);
     smartHooks?.restored();
   } catch { /* Ignore an incomplete or obsolete snapshot. */ }
 }
@@ -733,7 +742,7 @@ export function insertAfterOwn(items: ReadonlyArray<{ after: string; track: List
   }
   if (!added) return;
   set({ queue });
-  if (state.phase === 'ended' && hasNext(state)) start(state.queue, state.index + 1, true);
+  if (state.phase === 'ended' && hasNext(state)) start(state.queue, state.index + 1, 'auto', true);
   else if (state.phase !== 'error') prefetchNext();
 }
 
@@ -753,7 +762,7 @@ export function cycleRepeat() {
 /** «Играть следующим»: right after the current track (when nothing plays, they start now). */
 export function playNext(tracks: readonly ListenTrack[]) {
   if (!tracks.length) return;
-  if (!state.track) return listen(tracks[0], tracks);
+  if (!state.track) return startList(tracks[0], 'auto', tracks);
   const added = tracks.map((t) => ({ ...t })); // own objects: the same track may be in the queue twice
   set({ queue: [...state.queue.slice(0, state.index + 1), ...added, ...state.queue.slice(state.index + 1)] });
   prefetchNext();
@@ -762,10 +771,10 @@ export function playNext(tracks: readonly ListenTrack[]) {
 /** «Добавить в очередь»: after the last track (when nothing plays, they start now). */
 export function addToQueue(tracks: readonly ListenTrack[]) {
   if (!tracks.length) return;
-  if (!state.track) return listen(tracks[0], tracks);
+  if (!state.track) return startList(tracks[0], 'auto', tracks);
   const ended = state.phase === 'ended';
   set({ queue: [...state.queue, ...tracks.map((t) => ({ ...t }))] });
-  if (ended) start(state.queue, state.index + 1, true);
+  if (ended) start(state.queue, state.index + 1, 'auto', true);
   else prefetchNext();
 }
 
@@ -790,8 +799,8 @@ export function moveInQueue(from: number, to: number) {
 
 /** A tap on a track of the queue: it plays now, the queue stays as it is. */
 export function playQueueAt(index: number) {
-  if (index === state.index) return toggle();
-  if (index >= 0 && index < state.queue.length) start(state.queue, index);
+  if (index === state.index && state.phase !== 'ended' && state.phase !== 'error') return toggle();
+  if (index >= 0 && index < state.queue.length) start(state.queue, index, 'manual');
 }
 
 /** More tracks of a list were loaded (search results): if it is the list playing, it plays on through them too. */
@@ -809,7 +818,7 @@ export function replaceUpcoming(list: readonly ListenTrack[]) {
   if (!state.track) return;
   const ended = state.phase === 'ended';
   set({ queue: [...state.queue.slice(0, state.index + 1), ...list] });
-  if (ended && hasNext(state)) start(state.queue, state.index + 1, true);
+  if (ended && hasNext(state)) start(state.queue, state.index + 1, 'auto', true);
   else if (state.phase !== 'error') prefetchNext();
 }
 
@@ -818,18 +827,19 @@ export const hasPrev = (s: ListenState) => s.index > 0;
 
 /** Plays the next track of the queue; false at its end. */
 export function next(): boolean {
-  if (hasNext(state)) start(state.queue, state.index + 1);
-  else if (state.repeat === 'all' && state.track && !onWave()) start(state.queue, 0);
+  if (hasNext(state)) start(state.queue, state.index + 1, 'auto');
+  else if (state.repeat === 'all' && state.track && !onWave()) start(state.queue, 0, 'auto');
   else return false;
   return true;
 }
 
 /** ⏮: back to the start of the track, or (near its start) the previous track. */
 export function prev() {
-  if (hasPrev(state) && (state.position < RESTART_AFTER_S || state.phase === 'error')) start(state.queue, state.index - 1);
+  if (hasPrev(state) && (state.position < RESTART_AFTER_S || state.phase === 'error')) start(state.queue, state.index - 1, 'auto');
+  else if (state.track && state.phase === 'ended') start(state.queue, state.index, 'auto');
   else if (state.track) {
     seek(0);
-    if (state.phase === 'ended' || state.phase === 'paused') resume();
+    if (state.phase === 'paused') resume();
   }
 }
 
@@ -849,7 +859,7 @@ export function retryRecording(ref: string) {
   if (state.track?.ref !== ref) return;
   reportEnd(false, false, true);
   refreshed = null;
-  start(state.queue, state.index);
+  start(state.queue, state.index, null);
 }
 
 function resume() {
@@ -857,8 +867,7 @@ function resume() {
   const a = audio;
   const track = state.track;
   if (!a || !track) return;
-  if (state.phase === 'error') return start(state.queue, state.index);
-  if (state.phase === 'ended') return start(state.queue, state.index);
+  if (state.phase === 'error' || state.phase === 'ended') return start(state.queue, state.index, null);
   set({ phase: state.info || state.position ? 'loading' : 'resolving' });
   play(a);
 }
@@ -971,7 +980,7 @@ const sharedAdapter = {
             && JSON.stringify(current.queue) === JSON.stringify(snapshot.queue);
           a.pause();
           if (command.kind === 'prepare' || !sameQueue) {
-            start(snapshot.queue.map((track) => ({ ...track, ref: track.ref || `nd:${track.nd_song_id}` })), snapshot.index, false, snapshot.position, false);
+            start(snapshot.queue.map((track) => ({ ...track, ref: track.ref || `nd:${track.nd_song_id}` })), snapshot.index, null, false, snapshot.position, false);
           } else seek(snapshot.position);
           occurrence = snapshot.occurrence;
           mustLoad = true;
@@ -996,7 +1005,7 @@ const sharedAdapter = {
             else throw new Error('Достигнут конец очереди');
           } else if (command.kind === 'prev' && hasPrev(state) && a.currentTime < RESTART_AFTER_S) index--;
           if (command.kind !== 'play' || state.phase === 'error' || state.phase === 'ended') {
-            start(state.queue, index, false, 0, false);
+            start(state.queue, index, command.kind === 'next' || command.kind === 'prev' ? 'auto' : null, false, 0, false);
           }
           mustLoad = true;
           shouldPlay = true;

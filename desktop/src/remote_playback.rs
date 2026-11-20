@@ -342,17 +342,17 @@ impl State {
             "start" => self.start_prepared(&command),
             "stop" | "pause" => { self.ctx.player.borrow_mut().set_paused(true); Ok(false) }
             "play" => {
-                if self.ctx.player.borrow().is_idle() { self.ctx.play_current(); }
+                if self.ctx.player.borrow().is_idle() { self.ctx.play_current(crate::queue::Start::Unknown); }
                 else { self.ctx.player.borrow_mut().set_paused(false); }
                 Ok(true)
             }
             "next" => {
-                if self.ctx.queue.borrow_mut().next() { self.ctx.play_current(); Ok(true) }
+                if self.ctx.queue.borrow_mut().next() { self.ctx.play_current(crate::queue::Start::Auto); Ok(true) }
                 else { Err("Конец очереди".into()) }
             }
             "prev" => {
                 if self.ctx.player.borrow().snapshot().position_s > 3.0 { self.ctx.seek(0.0); }
-                else if self.ctx.queue.borrow_mut().prev() { self.ctx.play_current(); }
+                else if self.ctx.queue.borrow_mut().prev() { self.ctx.play_current(crate::queue::Start::Auto); }
                 else { self.ctx.seek(0.0); }
                 Ok(true)
             }
@@ -397,7 +397,7 @@ impl State {
         queue.restore_modes(&json!({"repeat": match text(snapshot, "repeat") { "all" => 1, "one" => 2, _ => 0 },
             "shuffle": if snapshot["shuffle"].as_bool().unwrap_or(false) { 1 } else { 0 }}));
         self.ctx.player.borrow_mut().stop();
-        self.ctx.replace_queue(queue, false);
+        self.ctx.replace_queue(queue, None);
         *self.occurrence.borrow_mut() = (self.ctx.queue.borrow().current_token(), text(snapshot, "occurrence").to_owned());
         self.ctx.player.borrow_mut().set_volume(snapshot["volume"].as_f64().unwrap_or(1.0) as f32);
         self.ctx.play_current_at(snapshot["position"].as_f64().unwrap_or(0.0) as f32, true)?;

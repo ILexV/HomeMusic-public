@@ -1,6 +1,7 @@
 import { api, ApiError } from '../api/client';
 import type { FavoriteTarget, LaunchOrigin, PlayEventIn, PlayKind } from '../api/types';
 import { canSendPlayEvent, typedFavoritesSupported } from './capabilities';
+import { matchPath } from './router';
 
 /** Listening events for mixes and «Моя волна» (MIXES.md 3.2): what the page's own player plays, skips and plays to
  * the end, and ♥ / «Не нравится» set here. They gather for a few seconds and go to the Hub in one batch
@@ -82,6 +83,8 @@ export function routeContext(): string {
   if (path.startsWith('/album/') || path.startsWith('/library/') || path.startsWith('/lib/album/')) return 'album';
   if (path.startsWith('/artist/') || path.startsWith('/lib/artist/')) return 'artist';
   if (path.startsWith('/search')) return 'search';
+  const playlist = matchPath('/playlist/:id', path);
+  if (playlist && playlist.id.length <= 64) return `playlist:${playlist.id}`;
   if (path.startsWith('/playlist')) return 'playlist';
   if (path.startsWith('/liked')) return 'liked';
   if (path.startsWith('/player')) return 'queue';
@@ -102,6 +105,7 @@ const SCREEN_ORIGINS = new Set(['album', 'artist', 'playlist', 'liked', 'search'
 export function launchOrigin(context: string): LaunchOrigin | null {
   if (context.startsWith('mix:')) return 'mix_page_track';
   if (context.startsWith('wave:')) return 'wave';
+  if (context.startsWith('playlist:')) return 'playlist';
   return SCREEN_ORIGINS.has(context) ? context : null;
 }
 
@@ -123,7 +127,9 @@ export function onPlayEvent(fn: (e: PlayEventIn) => void): () => void {
 export function playEvent(
   kind: PlayKind,
   target: PlayTarget,
-  extra: { position_s?: number | null; duration_s?: number | null; context?: string | null; event_id?: string; ts?: string; reverts_event_id?: string; playback_id?: string; device_id?: string; listened_ms?: number; track_metadata?: PlayEventIn['track_metadata']; account?: number | null; launch_id?: string | null; launch_origin?: LaunchOrigin | null } = {},
+  extra: Partial<Pick<PlayEventIn, 'position_s' | 'duration_s' | 'context' | 'event_id' | 'ts' |
+    'reverts_event_id' | 'playback_id' | 'play_trigger' | 'device_id' | 'listened_ms' | 'track_metadata' |
+    'launch_id' | 'launch_origin'>> & { account?: number | null } = {},
 ) {
   if (!target.ref && !target.nd_song_id && !target.nd_album_id && !target.nd_artist_id) return false;
   const round = (x?: number | null) => (x == null || !Number.isFinite(x) ? null : Math.round(x * 10) / 10);
@@ -140,6 +146,7 @@ export function playEvent(
     ref: target.ref ?? null,
     nd_song_id: target.nd_song_id ?? null,
     playback_id: extra.playback_id,
+    play_trigger: extra.play_trigger,
     device_id: extra.device_id,
     listened_ms: extra.listened_ms,
     track_metadata: extra.track_metadata,

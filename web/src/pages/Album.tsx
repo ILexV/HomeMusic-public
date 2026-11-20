@@ -1,16 +1,15 @@
 import { useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { TrackOut } from '../api/types';
-import { TrackRow, listenTrack } from '../components/catalog';
+import { TrackRow, playAll } from '../components/catalog';
 import { LikeButton } from '../components/LikeButton';
 import { PlaylistPicker, type PlaylistPick } from '../components/pickers';
 import { Button, Cover, ErrorState, ExplicitBadge, IconButton, Loading, OwnedBadge } from '../components/ui';
 import { startDownload } from '../lib/actions';
 import { useHubEvent } from '../lib/events';
-import { listen } from '../lib/listen';
 import { fmtLength, recordTypeLabel, tracksWord, yearOf } from '../lib/format';
 import { useAsync } from '../lib/hooks';
-import { canPlay, canPlayAll, playList, playTracks } from '../lib/player';
+import { canPlay, canPlayAll, playList } from '../lib/player';
 import { Link, enc, goBack } from '../lib/router';
 import { attempt, toast } from '../lib/ui';
 
@@ -66,14 +65,7 @@ export function AlbumPage({ refId }: { refId: string }) {
   const playable = canPlay() && !canPlayAll() ? owned.filter((t) => t.nd_song_id) : [];
   const play = (from?: TrackOut) => playList(playable, (t) => t.nd_song_id, from);
   // The whole album (own files and the rest from sources): in the app's player (1.2.0+), in a browser in the page.
-  const listenAll =
-    tracks.length === 0
-      ? null
-      : canPlayAll()
-        ? () => playTracks(tracks)
-        : !canPlay()
-          ? () => listen(listenTrack(tracks[0]), tracks.map(listenTrack))
-          : null;
+  const listenAll = tracks.length && (canPlayAll() || !canPlay()) ? () => playAll(tracks) : null;
 
   const markDownloading = (refs: Set<string>) =>
     res.setData((prev) => (prev ? { ...prev, tracks: (prev.tracks ?? []).map((t) => (refs.has(t.ref) ? { ...t, downloading: true } : t)) } : prev));

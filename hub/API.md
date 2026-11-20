@@ -87,7 +87,7 @@ early_skips, likes, dislikes, familiar {started, heard}, new {started, heard}, b
 offered, started, heard, finished, early_skips, liked}], adopted}, wave {launches, restarts, by_origin, by_seed_kind,
 started, heard, finished, early_skips, likes, dislikes, by_generator, adopted}}` — `offered`: a mix generator's songs
 among the active ones of mixes built in the period, a wave generator's handed-out tracks (`wave_items`); `adopted`:
-tracks first heard from a mix/the wave in the period that later got an own ♥ or ≥ 2 listens in self-chosen contexts
+tracks first heard from a mix/the wave in the period that later got an own ♥ or ≥ 2 confirmed manual listens in self-chosen contexts
 (`album, playlist, search, artist, liked, library`); `quality {events_without_context, events_without_playback,
 scrobbles, legacy_finishes, inferred_launches, inferred_playlist_mixes, reconstructed_waves, first_event_at}`.
 
@@ -257,6 +257,7 @@ Handoff is prepare-paused → source stop acknowledgment with final position →
 | `kind` | `start` (sound began), `progress`, `interrupted`, `error`, `skip`, `finish`, `like`, `unlike`, `dislike`, `undislike` |
 | `ref` / `nd_song_id` | the track: catalog ref (`dz:…`, `hm:…`, `file:…`) and/or Navidrome song id — at least one, else rejected. The Hub fills in the other where it knows it (the library file's Deezer id, the download or import that brought it) |
 | `playback_id`, `device_id`, `listened_ms` | Optional pair of IDs identifies one attempt on one installation; cumulative measured milliseconds are never summed across checkpoints. `progress`/`interrupted`/`error` require all three. `listening_checkpoints_v1` advertises support |
+| `play_trigger` | Optional on a playback attempt. `manual` = the listener selected this specific track; `auto` = list start, queue advance or transport Next/Previous; `repeat` = automatic repeat. Missing/null is unknown, including older clients and unproven restores/handoffs. It describes how the attempt began, not the screen (`context`) or the reason it ended. |
 | `track_metadata` | Optional snapshot of title, album, artist credit and explicit artists with IDs, duration, ISRC, year and genre. Hub fills missing values from library or catalog cache and records field-level provenance. `primary_nd_artist_id` preserves the primary Navidrome artist ID independently of a possibly composite credit. Unknown fields remain unknown |
 | `position_s`, `duration_s` | seconds (0…86400): where the player was and the track's length (for `skip`/`finish`) |
 | `context` | ≤ 128: `mix:<id>`, `wave:<session>`, `smart:<session>` (a recommendation of the smart shuffle), `album`, `playlist`, `search`, `liked`, `artist`, `queue`, `other` |
@@ -416,7 +417,7 @@ All routes require authentication and operate on the current account. Cross-acco
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/recommendations/quality?days=30` | `days`: 7, 30 or 90. `{days,since,until,attempts,starts,eligible_plays,completed,early_skips,playback_errors,interrupted,new_track_plays,new_track_likes,repeats,completion_rate,early_skip_rate,new_track_like_rate,repeat_rate,sources,discovery_adoption,limitations,metric_version,provenance,policy_cohorts,comparison,recordings}` |
+| GET | `/api/recommendations/quality?days=30` | `days`: 7, 30 or 90. `{days,since,until,attempts,starts,eligible_plays,completed,early_skips,playback_errors,interrupted,new_track_plays,new_track_likes,repeats,completion_rate,early_skip_rate,new_track_like_rate,repeat_rate,sources,offer_repeats,discovery_adoption,discovery_balance,limitations,metric_version,provenance,policy_cohorts,comparison,recordings}` |
 | GET | `/api/recommendations/explain?context=wave:…&ref=…&nd_song_id=…` | `{reasons: string[]}` from the owned recorded mix/wave/smart decision. Supply ref and/or song ID; both must identify that item. Missing historical snapshot returns an empty list. |
 | GET | `/api/recommendations/pauses` | `{items:[{id,action,label,expires_at,ref,nd_song_id,artist}]}`; integer IDs, UTC expiry, active entries only. |
 | POST | `/api/recommendations/pauses` | `{action:today|week|less_artist,ref?,nd_song_id?}` → `201`, one item. Identity/artist are resolved server-side; repeated equivalent active action returns the existing item. |
@@ -427,12 +428,15 @@ All routes require authentication and operate on the current account. Cross-acco
 | POST | `/api/recording-feedback` | `{ref,binding}` → `{id,ref,message}`. Excludes that provider file for this user and track, not the musical taste. `404` for another account/ref or unknown binding; `409` for stale, unserved, changed or unidentifiable recordings. Repeating the same report is idempotent |
 | DELETE | `/api/recording-feedback/{id}` | `204`, revoke an owned report; `404` otherwise. Does not delete any audio or alter other users' choices |
 
-Rates are fractions, null without a denominator. Only attributable mix/wave/smart playback attempts count,
-not recommendations offered. Errors, interruptions and unfinished attempts are excluded from taste outcomes.
+Outcome rates are fractions, null without a denominator. The main playback counters use attributable mix/wave/smart playback attempts, not recommendations offered. Errors, interruptions and unfinished attempts are excluded from taste outcomes. `offer_repeats` separately measures exposures.
 Legacy events without `playback_id` use bounded grouping and are explicitly disclosed in `limitations`.
 `sources` retains integer winner-only period counts (`attempts`, `completed`, `early_skips`, `playback_errors`, `new_track_likes`) and 90-day `learning_samples`. Each `effective_*` count distributes the same observation across its saved positive source contributions; no usable split falls back to the recorded leader (`fallback_attempts` in the selected period). `effective_learning_samples` and the active `multiplier` use 90 days, at least 20 effective eligible outcomes per source, shrinkage and bounds `[0.75,1.25]`. Below threshold the multiplier is 1.0. `winner_only_multiplier` is the comparison under the previous accounting. Cached per account for at most 60 seconds; applies to new mix/wave/smart choices.
 
-`discovery_adoption` contains `window_days` (14), `cohort_since`, `cohort_until`, `mature`, `adopted`, `pending`, `rate`, `sources` and `limitations`. The period selects discoveries over 7/30/90 days ending 14 days ago. Each discovery gets exactly 14 days to earn a still-active like or two subsequent deliberate listens. Newer discoveries are pending, not failures. One track counts once per account; rows by source split its credit (`id,title,mature,adopted,rate`). Missing denominators return null. Informational only; never an input to ranking.
+`offer_repeats` describes offers rather than playback: `offers`, `repeats`, `lookback_days` (7), `per_50` (`50 * repeats / offers`, null without offers), `by_surface` (offer counts for `mix`, `wave`, `smart`), `wave_undated_handouts`, and `limitations`. A repeat is an observed recommendation for a recording offered to this account within the preceding week, even on another surface. Historical Wave reoffers without a known timestamp are not assigned an invented date.
+
+`discovery_adoption` contains `window_days` (14), `cohort_since`, `cohort_until`, `mature`, `adopted`, `pending`, `rate`, `sources`, `subtypes`, `unknown_return_tracks` and `limitations`. The period selects discoveries over 7/30/90 days ending 14 days ago. Each discovery gets exactly 14 days to earn a still-active like or two subsequent confirmed manual listens outside recommendations. Unknown triggers are not inferred from context. `unknown_return_tracks` counts mature tracks with otherwise eligible returns whose trigger could not be confirmed. Newer discoveries are pending, not failures. One track counts once per account; source rows split its credit (`id,title,mature,adopted,rate`); subtype rows use the saved subtype, not the current profile. Rates are null without a denominator.
+
+`discovery_balance` explains Discover-mode selection: `days` (90 mature days), `min_per_subtype`, `known_artist_share` (nullable target among discovery slots, not among all tracks) and `reason`. No override when evidence is sparse or the difference is too small. This adjusts the balance between known-artist discoveries and new-artist discoveries; it does not train source multipliers or change the familiar-track quota.
 `explanation: string[]` is also included in mix/wave/smart tracks; it reflects saved score components and session
 preferences, never a fresh catalog/profile guess.
 New decision snapshots save `novelty` as `familiar_track`, `new_track_known_artist`, or `new_artist`. The latter two count as discoveries. Replaying a decision never guesses a missing subtype from the current profile; a saved historical `familiar=false` can still establish that the track was new. Repeating a new-format Wave handout does not reclassify the original decision.

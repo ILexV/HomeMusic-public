@@ -24,8 +24,9 @@ const fileTrack = (c: Candidate): ListenTrack & HubItem => ({
 
 /** Plays the files of one search from `c` on: in the app's player (1.2.0+), else in the page. */
 export function listenFiles(list: readonly Candidate[], c: Candidate) {
-  const tracks = list.map(fileTrack);
-  const i = Math.max(0, list.indexOf(c));
+  const at = list.indexOf(c);
+  const tracks = at >= 0 ? list.map(fileTrack) : [fileTrack(c)];
+  const i = Math.max(0, at);
   if (canPlayAll()) playHubItems(tracks, i);
   else listen(tracks[i], tracks);
 }

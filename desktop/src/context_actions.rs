@@ -46,7 +46,15 @@ pub(super) fn bind(ui: &AppWindow, ctx: &Context) {
         let Some(item) = item else { return };
         crate::cancel_queue_load(&ui, &state.hub);
         let mut queue = state.queue.borrow_mut();
-        let was_empty = place_new_track(&mut queue, item, placement);
+        let mix;
+        let context = match list {
+            TrackList::Album => "album",
+            TrackList::Catalog => "search",
+            TrackList::Home if state.hub.pane.get() == home::Pane::Liked => "liked",
+            TrackList::Home => { mix = format!("mix:{}", state.hub.mix.borrow().id); &mix }
+            TrackList::Queue => unreachable!(),
+        };
+        let was_empty = place_new_track(&mut queue, item, placement, context);
         if was_empty {
             if let Some(item) = queue.current() { crate::show_cover(&ui, &state.hub, &item.id); }
         }
@@ -108,12 +116,21 @@ fn home_track(hub: &HubState, source: usize) -> Option<queue::Item> {
 
 // Selecting the first addition makes an empty queue ready for Play; it does
 // not start the player. A nonempty queue keeps its current occurrence intact.
-fn place_new_track(queue: &mut queue::Queue, item: queue::Item, placement: TrackPlacement) -> bool {
+fn place_new_track(queue: &mut queue::Queue, item: queue::Item, placement: TrackPlacement, source: &str) -> bool {
     let was_empty = queue.is_empty();
-    match placement {
-        TrackPlacement::Next => queue.insert_next(item),
-        TrackPlacement::End => queue.extend(std::iter::once(item)),
-    }
+    let at = match placement {
+        TrackPlacement::Next => {
+            let at = queue.index().map_or(0, |i| i + 1);
+            queue.insert_next(item);
+            at
+        }
+        TrackPlacement::End => {
+            let at = queue.items().len();
+            queue.extend(std::iter::once(item));
+            at
+        }
+    };
+    queue.set_source(at..at + 1, source);
     if was_empty { queue.select(0); }
     was_empty
 }
@@ -129,7 +146,7 @@ pub(super) fn apply_card_album(
     if request.play { ui.set_queue_busy(false); }
     match result {
         Ok(library) if request.play => album_view::play_album(ui, hub, player, queue, config, status,
-            waves, &request.id, crate::library_to_queue(library), 0),
+            waves, &request.id, crate::library_to_queue(library), None),
         Ok(library) => {
             let count = library.tracks.len();
             album_view::append_album(ui, hub, player, &mut queue.borrow_mut(), &request.id,
@@ -150,8 +167,10 @@ mod tests {
         let mut queue = queue::Queue::from_tracks("", vec![track("first"), track("playing"), track("old tail")]);
         queue.select(1);
         let token = queue.current_token();
-        assert!(!place_new_track(&mut queue, track("next"), TrackPlacement::Next));
-        assert!(!place_new_track(&mut queue, track("tail"), TrackPlacement::End));
+        assert!(!place_new_track(&mut queue, track("next"), TrackPlacement::Next, "mix:daily"));
+        assert!(!place_new_track(&mut queue, track("tail"), TrackPlacement::End, "album"));
+        assert_eq!(queue.row_source(2), Some("mix:daily"));
+        assert_eq!(queue.row_source(4), Some("album"));
         assert_eq!(queue.current_token(), token);
         assert_eq!(queue.items().iter().map(|item| item.path.as_str()).collect::<Vec<_>>(),
             ["first", "playing", "next", "old tail", "tail"]);
@@ -161,7 +180,7 @@ mod tests {
     fn either_placement_makes_an_empty_queue_ready_for_play() {
         for placement in [TrackPlacement::Next, TrackPlacement::End] {
             let mut queue = queue::Queue::from_tracks("", Vec::new());
-            assert!(place_new_track(&mut queue, queue::Item::file("one", "One"), placement));
+            assert!(place_new_track(&mut queue, queue::Item::file("one", "One"), placement, "search"));
             assert_eq!(queue.current().unwrap().path, "one");
         }
     }
