@@ -407,6 +407,24 @@ class DeezerClient:
 
         return await self._cached_model(f"dz:track:{id_}", self.cfg.ttl_album_s, CatalogTrack, produce)
 
+    async def get_track_credits(self, id_: str) -> list[dict]:
+        """Unlike the compact track record, keep the IDs of *all* named contributors."""
+        async def produce() -> list[dict]:
+            track = await self._get(f"track/{id_}")
+            artists = [track.get("artist") or {}, *sorted(track.get("contributors") or [],
+                       key=lambda a: a.get("role", "Main") != "Main")]
+            out = []
+            seen = set()
+            for artist in artists:
+                name = (artist.get("name") or "").strip()
+                ref = make_ref("dz", artist["id"]) if artist.get("id") else None
+                if name and (ref or name) not in seen:
+                    out.append({"name": name, "ref": ref})
+                    seen.add(ref or name)
+            return out
+
+        return await cached(f"dz:track_credits:{id_}", self.cfg.ttl_album_s, produce)
+
     async def preview_url(self, id_: str | int) -> str | None:
         """Fresh 30 s MP3 preview link (not cached: the links are signed and expire within hours)."""
         return (await self._get(f"track/{id_}")).get("preview") or None

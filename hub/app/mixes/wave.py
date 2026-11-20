@@ -275,8 +275,7 @@ def generators(p: Profile, seed: CatalogTrack | None, seed_artist: dict[str, Any
                seeds: list[TasteTrack]) -> dict[str, build.Gen]:
     """The sources of a new session's pool: the seed's radios, or the mix's generators for the profile."""
     if seed is not None:
-        gens = build.generators(p, [taste_of(seed)])
-        out = {k: gens[k] for k in ("ytm_radio", "lastfm_similar", "yandex_similar")}
+        out = build.track_generators([taste_of(seed)])
         if seed.artist_ref and seed.artist_ref.startswith("dz:"):
             out["deezer_radio"] = lambda: artist_radio(seed.artist_ref or "")
         return out
@@ -1024,6 +1023,73 @@ async def _catalog_artist(name: str, songs: list[CatalogTrack]) -> str | None:
     return next((a.ref for a in found.artists if artist_key(a.name) == key), None)
 
 
+async def track_seed(ref: str, user: User | None, *, playback: bool = False) -> CatalogTrack:
+    """Resolve a recording for both browsing and playback, without opening a session."""
+    if ref.startswith("nd:"):
+        sid = ref[3:]
+        async with session_scope() as s:
+            row = (await s.execute(select(Track).where(Track.nd_song_id == sid).limit(1))).scalar_one_or_none()
+            track = library_track(row) if row is not None else None
+        if track is not None:
+            if track.source == "dz" and (full := await catalog_track(track.ref)) is not None:
+                return full
+            return track
+        # A song scanned directly by Navidrome need not have a Hub import row.
+        if user is not None:
+            from app.auth import user_navidrome
+
+            nd = user_navidrome(user)
+            try:
+                song = await nd.get_song(sid)
+            except Exception as e:
+                raise WaveError(404, "Песни нет в библиотеке") from e
+            finally:
+                await nd.aclose()
+            if song.get("id") == sid and song.get("title") and song.get("artist"):
+                if playback:
+                    from app import listen
+                    listen.remember_scanned_song(song)
+                return CatalogTrack(ref=ref, source="nd", id=sid, title=song["title"], artist=song["artist"],
+                                    artists=[song["artist"]], album_title=song.get("album"), duration_s=song.get("duration"))
+        raise WaveError(404, "Песни нет в библиотеке")
+    if ref.startswith("file:"):
+        from app import listen
+
+        c = await listen.file_candidate(ref)
+        if c is None or not c.artist.strip() or not c.title.strip():
+            raise WaveError(404, "Файл не найден: повторите поиск")
+        return CatalogTrack(ref=ref, source="file", id=c.provider_id, title=c.title, artist=c.artist,
+                            artists=[c.artist], album_title=c.album, duration_s=c.duration_s,
+                            explicit=c.explicit, cover_url=c.cover_url, cover_small_url=c.cover_url)
+    if ref.startswith("dz:") and ref[3:] and (track := await catalog_track(ref)) is not None:
+        return track
+    if ref.startswith("hm:") and svc.hitmoz_catalog is not None:
+        try:
+            track = await svc.hitmoz_catalog.get_track(ref[3:])
+        except Exception as e:
+            raise WaveError(502, "Каталог hitmoz недоступен") from e
+        if track is not None:
+            return track
+    raise WaveError(404, "Трек не найден в каталоге")
+
+
+async def similar_tracks(user: User, ref: str) -> list[CatalogTrack]:
+    """Only seed-based metadata. Do not create a wave, hand out offers, or prepare audio."""
+    seed = await track_seed(ref, user)
+    limit = 12
+    gens = build.track_generators([taste_of(seed)], limit=limit)
+    results = await build.run_generators({
+        name: (lambda fn=fn: asyncio.wait_for(fn(), timeout=15)) for name, fn in gens.items()
+    })
+    if all(r.error for r in results):
+        raise WaveError(503, "Источники похожих песен сейчас недоступны")
+    seed_fp = fingerprint(seed.artist, seed.title)
+    cands = [c for c in build.merge(results).values() if c.track.ref != seed.ref and fp_of(c) != seed_fp]
+    # Prefer agreement among sources, then the closest provider rank.
+    cands.sort(key=lambda c: (-len(c.gens), min(c.gens.values())))
+    return [c.track for c in cands[:limit]]
+
+
 async def _seed(seed: dict[str, Any], user: User | None = None) -> tuple[CatalogTrack | None, dict[str, Any] | None]:
     """The track or the artist a wave starts from."""
     if seed.get("by_artist"):
@@ -1048,30 +1114,10 @@ async def _seed(seed: dict[str, Any], user: User | None = None) -> tuple[Catalog
             if track and track.artist_ref:
                 return await _seed({"artist_ref": track.artist_ref}, user)
         raise WaveError(404, "Исполнитель трека не найден")
-    if nd := seed.get("nd_song_id"):
-        async with session_scope() as s:
-            t = (await s.execute(select(Track).where(Track.nd_song_id == nd).limit(1))).scalar_one_or_none()
-            lt = library_track(t) if t is not None else None
-        if lt is None:
-            raise WaveError(404, "Песни нет в библиотеке")
-        if lt.source == "dz" and (full := await catalog_track(lt.ref)) is not None:
-            lt = full  # the artist's ref for its radio
-        return lt, None
+    if sid := seed.get("nd_song_id"):
+        return await track_seed(f"nd:{sid}", user, playback=True), None
     if ref := seed.get("ref"):
-        if ref.startswith("nd:"):
-            return await _seed({"nd_song_id": ref[3:]}, user)
-        if ref.startswith("file:"):
-            from app import listen
-
-            c = await listen.file_candidate(ref)
-            if c is None or not c.artist.strip() or not c.title.strip():
-                raise WaveError(404, "Файл не найден: повторите поиск")
-            return CatalogTrack(ref=ref, source="file", id=c.provider_id, title=c.title, artist=c.artist,
-                                artists=[c.artist], album_title=c.album, duration_s=c.duration_s,
-                                explicit=c.explicit, cover_url=c.cover_url, cover_small_url=c.cover_url), None
-        if not ref.startswith("dz:") or (t := await catalog_track(ref)) is None:
-            raise WaveError(404, "Трек не найден в каталоге")
-        return t, None
+        return await track_seed(ref, user, playback=True), None
     if (ref := seed.get("artist_ref")) and svc.deezer is not None:
         try:
             a = await svc.deezer.get_artist(split_ref(ref)[1])
@@ -1156,7 +1202,8 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
     async with rt.lock:
         first = None
         if seed_track is not None:
-            first = build.Cand(track=seed_track, gens={"seed": 0})
+            first = build.Cand(track=seed_track, gens={"seed": 0},
+                               nd_song_id=seed_track.id if seed_track.source == "nd" else None)
             await build.link_library({seed_track.ref: first})
             if _disliked(first, profile):
                 raise WaveError(409, "Начальный трек исключён из рекомендаций")

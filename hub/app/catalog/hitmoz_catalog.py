@@ -18,6 +18,7 @@ from app.providers.hitmoz import (
     parse_artist_page,
     parse_search_albums,
     parse_search_artists,
+    parse_track_page,
     yandex_size,
 )
 
@@ -77,6 +78,25 @@ class HitmozCatalog:
 
     def __init__(self, provider: HitmozProvider):
         self.provider = provider
+
+    async def get_track(self, track_id: str) -> CatalogTrack | None:
+        """Metadata of an exact track page; no audio URL is opened."""
+        if not track_id.isascii() or not track_id.isdecimal():
+            return None
+
+        async def produce():
+            html, base = await self.provider.fetch_page(f"/song/{track_id}")
+            row = parse_track_page(html, base)
+            artist, title = row["artist"], row["title"]
+            if row["id"] != track_id or not artist or not title:
+                return None
+            return CatalogTrack(ref=make_ref("hm", track_id), source="hm", id=track_id, title=title,
+                                artist=artist, artists=_split_artists(artist), duration_s=row["duration_s"],
+                                artist_ref=make_ref("hm", row["artist_id"]) if row["artist_id"] else None,
+                                explicit=row["explicit"], cover_url=row["cover_url"]).model_dump(mode="json")
+
+        data = await cached(f"hm:track:{track_id}", TTL_S, produce)
+        return CatalogTrack.model_validate(data) if data else None
 
     async def _search_html(self, q: str) -> tuple[str, str]:
         return await self.provider.fetch_page("/search", params={"q": " ".join(q.split())})

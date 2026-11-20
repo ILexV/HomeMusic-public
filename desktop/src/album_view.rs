@@ -47,6 +47,28 @@ pub fn open_album(
     });
 }
 
+pub(super) fn show_explore_album(ctx: &crate::feature_context::Context, id: &str, catalog: bool, title: &str, artist: &str) {
+    let Some(ui) = ctx.ui.upgrade() else { return };
+    if id.is_empty() { return; }
+    if ui.get_mode() == crate::Mode::Mini { ui.invoke_set_mode(1); }
+    if !catalog {
+        open_album(&ui, &ctx.hub, &ctx.config, id, title, artist, id);
+        return;
+    }
+    let ticket = begin_preview(&ui, &ctx.hub, title, artist, "");
+    if let Some(preview) = ctx.hub.album_preview.borrow_mut().as_mut() {
+        id.clone_into(&mut preview.catalog_ref);
+    }
+    ui.set_album_can_download(true);
+    let client = Arc::clone(&ctx.hub.hub);
+    let events = Arc::clone(&ctx.hub.events);
+    let reference = id.to_owned();
+    std::thread::spawn(move || {
+        let result = client.catalog_album(&reference).map(|v| (String::new(), Tracks::Catalog(v)));
+        push_event(&events, HubEvent::AlbumLoaded { ticket, result });
+    });
+}
+
 pub(super) fn open_song_album(ui: &AppWindow, hub: &HubState, config: &navidrome::ServerConfig, song_id: &str) {
     if song_id.is_empty() { return; }
     let ticket = begin_preview(ui, hub, "Альбом", "", song_id);
@@ -145,6 +167,8 @@ fn show_rows(ui: &AppWindow, hub: &HubState, album: queue::Queue, owned: impl It
         title: item.title.as_str().into(),
         meta: if owned { item.artist.as_str().into() } else { format!("Не скачан · {}", item.artist).into() },
         liked: crate::track_liked(&marks, item),
+        song_id: if owned { item.id.as_str() } else { "" }.into(),
+        identified: !item.id.is_empty() || !item.listen_ref.is_empty(),
         duration: row_duration(item).into(),
         ..QueueItem::default()
     }).collect::<Vec<_>>();

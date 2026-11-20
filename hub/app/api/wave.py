@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import PlayEventsOut, WaveNextIn, WaveOut, WaveStartIn, WaveTrackOut
+from app.api.schemas import PlayEventsOut, TrackOut, WaveNextIn, WaveOut, WaveStartIn, WaveTrackOut
 from app.auth import current_user
 from app.db import get_session
 from app.library.owned import annotate_tracks
@@ -40,6 +40,22 @@ async def wave_out(s: AsyncSession, b: wave.Batch, user_id: int) -> WaveOut:
     return WaveOut(session_id=b.session_id, title=b.title, mode=b.mode,  # type: ignore[arg-type]
                    seed=b.seed, tracks=tracks, pending=b.pending, recorded=recorded,
                    preferences=b.preferences, preferences_status=b.preferences_status, preparation=b.preparation)
+
+
+@router.get("/similar", response_model=list[TrackOut])
+async def similar(ref: str = Query(min_length=4, max_length=64, pattern=r"^(nd|dz|hm|file):.+$"),
+                  user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
+    """Metadata for songs similar to this one; never starts playback or a wave."""
+    try:
+        tracks = await wave.similar_tracks(user, ref)
+    except wave.WaveError as e:
+        raise HTTPException(e.status, str(e)) from e
+    rows = await annotate_tracks(s, tracks, user.id)
+    for row in rows:
+        if row.source == "nd":
+            row.owned = True
+            row.nd_song_id = row.id
+    return rows
 
 
 @router.post("/start", response_model=WaveOut)

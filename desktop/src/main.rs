@@ -3,6 +3,8 @@
 mod album_view;
 mod commands;
 mod context_actions;
+mod discography;
+mod similar_tracks;
 mod eq;
 mod eq_presets;
 mod home;
@@ -41,7 +43,7 @@ use player::{Player, PlayerOptions};
 use queue::Start;
 use slint::ComponentHandle;
 use slint::Model;
-use album_view::{apply_album_result, close_album, connect_album_actions, open_album};
+use album_view::{apply_album_result, close_album, connect_album_actions, open_album, show_explore_album};
 use queue_actions::connect_queue_actions;
 use mix_actions::{fetch_mix, poll_mix, rebuild_mix, save_taste, set_mix_mode, toggle_taste};
 
@@ -391,7 +393,8 @@ fn main() -> Result<(), slint::PlatformError> {
         hub: hub_state.clone(),
         waves: waves.clone(),
     };
-    context_actions::bind(&ui, &feature_context);
+    let explore = ExploreWindow::new()?;
+    context_actions::bind(&ui, &feature_context, &explore);
     let _audio_features = audio_features::bind(&feature_context, &tools);
     let _queue_modes = queue_modes::bind(&feature_context, &tools);
     *hub_state.modes.borrow_mut() = Rc::downgrade(&_queue_modes);
@@ -406,7 +409,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let player_window = ui.as_weak();
     ui.on_open_tools(move || {
         if let (Some(ui), Some(tools)) = (player_window.upgrade(), tools_weak.upgrade()) {
-            let _ = show_settings(&ui, &tools);
+            let _ = show_centered(&ui, &tools);
         }
     });
     show_status(&ui, &player.borrow(), &hub_state, &config_status);
@@ -1363,7 +1366,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let (Some(ui), Some(tools)) = (player_window.upgrade(), settings.upgrade()) {
                 if ui.window().winit_window().await.is_err() { return; }
                 tools.set_active_panel(7);
-                let _ = show_settings(&ui, &tools);
+                let _ = show_centered(&ui, &tools);
             }
         }).map_err(|e| slint::PlatformError::Other(e.to_string()))?;
     }
@@ -1372,13 +1375,13 @@ fn main() -> Result<(), slint::PlatformError> {
     result
 }
 
-fn show_settings(ui: &AppWindow, tools: &ToolsWindow) -> Result<(), slint::PlatformError> {
+fn show_centered(ui: &AppWindow, dialog: &impl ComponentHandle) -> Result<(), slint::PlatformError> {
     use slint::winit_030::{winit::dpi::PhysicalPosition, WinitWindowAccessor};
 
-    let was_visible = tools.window().is_visible();
-    tools.show()?;
+    let was_visible = dialog.window().is_visible();
+    dialog.show()?;
     let monitor = ui.window().with_winit_window(|window| window.current_monitor()).flatten();
-    tools.window().with_winit_window(|window| {
+    dialog.window().with_winit_window(|window| {
         if !was_visible {
             if let Some(monitor) = monitor {
                 let origin = monitor.position();
@@ -2584,7 +2587,7 @@ fn pick_home_row(
                 push_playback(ui, &player.snapshot());
                 show_status(ui, &player, hub, status);
             } else if !hub.wave_busy.get() {
-                begin_wave(ui, hub, String::new(), "home_card");
+                begin_wave(ui, hub, None, "home_card");
             }
         }
         "mix" => {
@@ -2599,7 +2602,7 @@ fn pick_home_row(
         "album" => open_album(ui, hub, config, &row.key, &row.title, "", &row.cover_id),
         "radio" => {
             if !hub.wave_busy.get() {
-                begin_wave(ui, hub, row.key.clone(), "radio");
+                begin_wave(ui, hub, Some(hub::WaveSeed::Artist(row.key.clone())), "radio");
             }
         }
         "playlist" => open_saved_playlist(ui, hub, config, &row.key),
@@ -2642,16 +2645,16 @@ fn pick_home_row(
     refresh_home(ui, hub, player.borrow().snapshot().playing || playing);
 }
 
-fn begin_wave(ui: &AppWindow, hub: &HubState, artist_id: String, origin: &'static str) {
+fn begin_wave(ui: &AppWindow, hub: &HubState, seed: Option<hub::WaveSeed>, origin: &'static str) {
     cancel_queue_load(ui, hub);
     let ticket = hub.queue_generation.get();
     hub.wave_busy.set(true);
     let client = Arc::clone(&hub.hub);
     let events = Arc::clone(&hub.events);
-    let personal = origin == "home_card";
+    let personal = seed.is_none();
     let preferences = hub.wave_start_preferences.replace(hub::neutral_preferences());
     std::thread::spawn(move || {
-        let mut result = client.wave_start(&artist_id, origin, &preferences);
+        let mut result = client.wave_start(seed.as_ref(), origin, &preferences);
         for _ in 0..2 {
             let Ok(batch) = &result else { break };
             if !batch.tracks.is_empty() || !batch.pending || batch.session_id.is_empty() { break; }
@@ -3038,6 +3041,7 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
                 current: is_current,
                 liked: track_liked(&marks, item),
                 song_id: item.id.as_str().into(),
+                identified: !item.id.is_empty() || !item.listen_ref.is_empty(),
                 can_move_next: !is_current && index != current.map_or(0, |i| i + 1),
                 can_move_end: index + 1 < queue.items().len(),
             }

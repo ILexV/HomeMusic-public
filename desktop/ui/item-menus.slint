@@ -5,6 +5,9 @@ export enum TrackPlacement { next, end }
 // wheel events and keyboard input still go to the controls underneath.
 export global ItemActions {
     callback place-track(TrackList, int, TrackPlacement);
+    callback artist-albums(TrackList, int);
+    callback similar-tracks(TrackList, int);
+    callback track-wave(TrackList, int);
     callback open-song-album(string);
     callback load-album(string, bool); // album ID; true replaces and starts playback
 }
@@ -17,6 +20,7 @@ export component TrackMenu inherits ContextMenuArea {
     in property <bool> can-next: true;
     in property <bool> can-end: true;
     in property <string> song-id;
+    in property <bool> identified;
     Menu {
         MenuItem {
             title: "Играть следующим";
@@ -31,6 +35,18 @@ export component TrackMenu inherits ContextMenuArea {
         if root.song-id != "" : MenuItem {
             title: "Открыть альбом";
             activated => { ItemActions.open-song-album(root.song-id); }
+        }
+        if root.identified : MenuItem {
+            title: "Альбомы исполнителя";
+            activated => { ItemActions.artist-albums(root.list, root.source); }
+        }
+        if root.identified : MenuItem {
+            title: "Найти похожие";
+            activated => { ItemActions.similar-tracks(root.list, root.source); }
+        }
+        if root.identified : MenuItem {
+            title: "Волна по треку";
+            activated => { ItemActions.track-wave(root.list, root.source); }
         }
     }
 }

@@ -366,6 +366,113 @@ async def test_dislikes_during_the_wave_keep_tracks_and_artists_out(env, monkeyp
     assert tracks[2]["ref"] not in [t["ref"] for t in got]
 
 
+async def test_similar_browsing_is_seeded_read_only_and_uses_library_ids(env, monkeypatch) -> None:
+    from app import listen
+    from app.db import session_scope
+    from app.mixes import sources
+    from app.models import DownloadItem, PlayEvent, WaveItem, WaveSession
+    from tests.test_mixes import add_track
+
+    client, nd = env["client"], env["nd"]
+    for n in (51, 52, 53):
+        await add_track(n, deezer=n != 53)
+    # A directly scanned Navidrome song has no import record of its own.
+    nd.songs["external"] = {"id": "external", "artist": "Свой 51", "title": "Песня 51"}
+    nd.songs["other"] = {"id": "other", "artist": "Другой", "title": "Другая"}
+    calls = []
+
+    def hit(n):
+        return sources.Hit(artist=f"Свой {n}", title=f"Песня {n}", duration_s=200)
+
+    async def radio(artist, title):
+        calls.append((artist, title))
+        return [hit(51), hit(52)] if title == "Песня 51" else []
+
+    async def similar(artist, title, duration):
+        calls.append((artist, title))
+        return [hit(53), hit(52)] if title == "Песня 51" else []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("metadata browsing must not start a wave, prepare media or prefetch audio")
+
+    monkeypatch.setattr(sources, "ytm_radio", radio)
+    monkeypatch.setattr(sources, "yandex_similar", similar)
+    monkeypatch.setattr(sources, "lastfm_configured", lambda: False)
+    monkeypatch.setattr(wave, "start", forbidden)
+    for name in ("prepare_full", "warm_light", "prefetch", "choose", "remember_scanned_song"):
+        monkeypatch.setattr(listen, name, forbidden)
+
+    r = await client.get("/api/wave/similar", params={"ref": "nd:external"})
+    assert r.status_code == 200, r.text
+    assert [(t["ref"], t["nd_song_id"]) for t in r.json()] == [("dz:52", "nd52"), ("nd:nd53", "nd53")]
+    assert calls == [("Свой 51", "Песня 51")] * 2
+    assert (await client.get("/api/wave/similar", params={"ref": "nd:other"})).json() == []
+    assert calls[-2:] == [("Другой", "Другая")] * 2
+    assert (await client.get("/api/wave/similar")).status_code == 422
+    assert (await client.get("/api/wave/similar", params={"ref": "nd:missing"})).status_code == 404
+    async with session_scope() as s:
+        for model in (WaveSession, WaveItem, DownloadItem, PlayEvent):
+            assert not (await s.scalars(select(model))).first()
+    assert nd.writes == 0
+
+
+async def test_similar_reports_failed_sources_separately_from_an_empty_answer(env, monkeypatch) -> None:
+    from app.mixes import sources
+
+    async def unavailable(*args):
+        raise sources.SourceDown("offline")
+
+    monkeypatch.setattr(sources, "ytm_radio", unavailable)
+    monkeypatch.setattr(sources, "yandex_similar", unavailable)
+    monkeypatch.setattr(sources, "lastfm_configured", lambda: False)
+    r = await env["client"].get("/api/wave/similar", params={"ref": "dz:100"})
+    assert r.status_code == 503, r.text
+
+
+async def test_similar_menu_starts_a_real_wave_for_a_directly_scanned_song(env, hub_env, monkeypatch) -> None:
+    from app import listen
+    from app.db import session_scope
+    from app.models import WaveSession
+
+    path = hub_env / "library" / "Live" / "Selected.flac"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"selected recording")
+    nd = env["nd"]
+    nd.songs["scan"] = {"id": "scan", "title": "Selected", "artist": "Live", "path": "/music/Live/Selected.flac"}
+    fake_sources(monkeypatch, [tr(5000 + i) for i in range(10)])
+    requested = []
+
+    async def prepare(user_id, refs, *, timeout_s):
+        requested.extend(refs)
+        choice = await listen.choose("nd:scan", full_only=True)
+        assert choice.kind == "library" and choice.path == path
+        return {ref: "ready" for ref in refs}
+
+    monkeypatch.setattr(listen, "prepare_full", prepare)
+    r = await env["client"].post("/api/wave/start", json={"seed": {"ref": "nd:scan"},
+                                                          "origin": "track_menu", "client": "desktop"})
+    assert r.status_code == 200, r.text
+    w = r.json()
+    assert w["session_id"] and w["seed"]["ref"] == "nd:scan" and "nd:scan" in requested
+    assert (w["tracks"][0]["ref"], w["tracks"][0]["nd_song_id"]) == ("nd:scan", "scan")
+    async with session_scope() as s:
+        session = await s.get(WaveSession, w["session_id"])
+        assert (session.origin, session.client, session.seed_json["ref"]) == ("track_menu", "desktop", "nd:scan")
+
+
+def test_similar_scanned_song_rejects_paths_outside_the_library(hub_env) -> None:
+    from app import listen
+
+    library = hub_env / "library"
+    library.mkdir(parents=True, exist_ok=True)
+    outside = hub_env / "private.mp3"
+    outside.write_bytes(b"private")
+    (library / "linked.mp3").symlink_to(outside)
+    for path in ("../private.mp3", "/music/../private.mp3", "linked.mp3", str(outside)):
+        listen.remember_scanned_song({"id": "bad", "title": "Bad", "artist": "Bad", "path": path})
+        assert "nd:bad" not in listen._choices
+
+
 async def test_a_wave_by_track_starts_with_it(env, monkeypatch) -> None:
     c = env["client"]
     seen = fake_sources(monkeypatch, [tr(5000 + i) for i in range(10)])

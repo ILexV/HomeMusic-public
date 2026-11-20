@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc};
 use slint::ComponentHandle;
 
 use crate::{album_view, feature_context::Context, home, navidrome, player::Player, queue,
-    AppWindow, HubEvent, HubState, ItemActions, TrackList, TrackPlacement};
+    AppWindow, ExploreWindow, HubEvent, HubState, ItemActions, TrackList, TrackPlacement};
 
 pub(super) struct AlbumRequest {
     id: String,
@@ -14,7 +14,35 @@ pub(super) struct AlbumRequest {
     instance: u64,
 }
 
-pub(super) fn bind(ui: &AppWindow, ctx: &Context) {
+pub(super) fn bind(ui: &AppWindow, ctx: &Context, explore: &ExploreWindow) {
+    let discography = crate::discography::bind(ctx, explore);
+    let similar = crate::similar_tracks::bind(ctx, explore);
+    let state = ctx.clone();
+    let window = explore.as_weak();
+    ui.global::<ItemActions>().on_artist_albums(move |list, source| {
+        let Some(item) = track_at(&state, list, source) else { return };
+        if let (Some(ui), Some(window)) = (state.ui.upgrade(), window.upgrade()) {
+            window.set_similar(false);
+            discography.open(item);
+            let _ = crate::show_centered(&ui, &window);
+        }
+    });
+    let state = ctx.clone();
+    let window = explore.as_weak();
+    let browser = similar.clone();
+    ui.global::<ItemActions>().on_similar_tracks(move |list, source| {
+        let Some(item) = track_at(&state, list, source) else { return };
+        if let (Some(ui), Some(window)) = (state.ui.upgrade(), window.upgrade()) {
+            window.set_similar(true);
+            browser.open(item);
+            let _ = crate::show_centered(&ui, &window);
+        }
+    });
+    let state = ctx.clone();
+    ui.global::<ItemActions>().on_track_wave(move |list, source| {
+        if let Some(item) = track_at(&state, list, source) { similar.start_wave(item); }
+    });
+
     let state = ctx.clone();
     ui.global::<ItemActions>().on_open_song_album(move |id| {
         if let Some(ui) = state.ui.upgrade() {
@@ -24,26 +52,19 @@ pub(super) fn bind(ui: &AppWindow, ctx: &Context) {
 
     let state = ctx.clone();
     ui.global::<ItemActions>().on_place_track(move |list, source, placement| {
-        let Ok(index) = usize::try_from(source) else { return };
         let Some(ui) = state.ui.upgrade() else { return };
-        let item = match list {
-            TrackList::Queue => {
-                // Use the same operations as the drag handle and inline next button.
-                match placement {
-                    TrackPlacement::Next => ui.invoke_queue_row_next(source),
-                    TrackPlacement::End => {
-                        let len = state.queue.borrow().items().len();
-                        if len > 0 { ui.invoke_move_queue_row(source, (len - 1) as i32); }
-                    }
+        if list == TrackList::Queue {
+            // Use the same operations as the drag handle and inline next button.
+            match placement {
+                TrackPlacement::Next => ui.invoke_queue_row_next(source),
+                TrackPlacement::End => {
+                    let len = state.queue.borrow().items().len();
+                    if len > 0 { ui.invoke_move_queue_row(source, (len - 1) as i32); }
                 }
-                return;
             }
-            TrackList::Album => state.hub.album_preview.borrow().as_ref()
-                .and_then(|a| a.tracks.get(index)).cloned(),
-            TrackList::Home => home_track(&state.hub, index),
-            TrackList::Catalog => state.hub.hits.borrow().get(index).cloned().and_then(crate::catalog_track),
-        };
-        let Some(item) = item else { return };
+            return;
+        }
+        let Some(item) = track_at(&state, list, source) else { return };
         crate::cancel_queue_load(&ui, &state.hub);
         let mut queue = state.queue.borrow_mut();
         let mix;
@@ -101,6 +122,34 @@ pub(super) fn bind(ui: &AppWindow, ctx: &Context) {
             ui.set_queue_error("Не удалось загрузить альбом".into());
         }
     });
+}
+
+fn track_at(ctx: &Context, list: TrackList, source: i32) -> Option<queue::Item> {
+    let index = usize::try_from(source).ok()?;
+    match list {
+        TrackList::Queue => ctx.queue.borrow().items().get(index).cloned(),
+        TrackList::Album => ctx.hub.album_preview.borrow().as_ref()?.tracks.get(index).cloned(),
+        TrackList::Home => home_track(&ctx.hub, index),
+        TrackList::Catalog => ctx.hub.hits.borrow().get(index).cloned().and_then(crate::catalog_track),
+    }
+}
+
+pub(super) fn place_next(ctx: &Context, item: queue::Item, play_now: bool) {
+    let Some(ui) = ctx.ui.upgrade() else { return };
+    crate::cancel_queue_load(&ui, &ctx.hub);
+    let mut queue = ctx.queue.borrow_mut();
+    if play_now {
+        if let Some(current) = queue.current() {
+            crate::note_wave_leave(&ctx.player.borrow(), current, &ctx.hub, false);
+        }
+        queue.play_inserted(item, "search");
+    } else if place_new_track(&mut queue, item, TrackPlacement::Next, "search") {
+        if let Some(item) = queue.current() { crate::show_cover(&ui, &ctx.hub, &item.id); }
+    }
+    drop(queue);
+    ctx.hub.album_id.borrow_mut().clear();
+    ctx.refresh_queue();
+    if play_now { ctx.play_current(queue::Start::Manual); }
 }
 
 fn home_track(hub: &HubState, source: usize) -> Option<queue::Item> {

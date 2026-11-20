@@ -1,6 +1,6 @@
 import { Button } from "std-widgets.slint";
-import { AlbumMenu, TrackList, TrackMenu } from "item-menus.slint";
-import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { AlbumMenu, TrackList } from "item-menus.slint";
+import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TrackActions, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
 import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
@@ -501,6 +501,7 @@ export component Large inherits Rectangle {
                             border-radius: 4px;
                             HorizontalLayout {
                                 padding: 10px;
+                                padding-right: row.kind == "track" ? 34px : 10px;
                                 spacing: 10px;
                                 cross-axis-alignment: center;
                                 if row.kind == "album" : CoverArt { width: 36px; height: 36px; cover: row.cover; has-cover: row.has-cover; mark: 20px; }
@@ -527,7 +528,10 @@ export component Large inherits Rectangle {
                                 clicked => { root.pick-home(row.source); }
                             }
                             if row.kind == "album" : AlbumMenu { album-id: row.album-id; }
-                            if row.kind == "track" : TrackMenu { list: TrackList.home; source: row.source; song-id: row.song-id; }
+                            if row.kind == "track" : TrackActions {
+                                list: TrackList.home; source: row.source; song-id: row.song-id;
+                                identified: true; track-title: row.title; row-active: home-touch.has-hover;
+                            }
                         }
                     }
                 }

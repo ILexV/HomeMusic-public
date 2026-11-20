@@ -52,6 +52,16 @@ async def test_search_artists_none(catalog):
 
 
 @respx.mock
+async def test_similar_seed_reads_only_exact_track_metadata(catalog):
+    respx.get(f"{BASE}/").mock(return_value=httpx.Response(200, text=""))
+    page = respx.get(f"{BASE}/song/79436285").mock(return_value=httpx.Response(200, text=fx("track_kino.html")))
+    track = await catalog.get_track("79436285")
+    assert track and (track.ref, track.title, track.artist_ref) == ("hm:79436285", "Группа крови", "hm:1286")
+    assert await catalog.get_track("79436285") == track and page.call_count == 1
+    assert await catalog.get_track("../artist/1286") is None
+
+
+@respx.mock
 async def test_get_artist(catalog):
     respx.get(f"{BASE}/").mock(return_value=httpx.Response(200, text=""))
     page1 = respx.get(f"{BASE}/artist/1286").mock(return_value=httpx.Response(200, text=fx("artist_kino.html")))

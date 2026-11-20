@@ -1087,6 +1087,30 @@ async def _resolve_file(ref: str, *, probe: bool, remembered: bool) -> Choice:
     return choice
 
 
+def remember_scanned_song(song: dict[str, Any]) -> None:
+    """Prime the ordinary full-recording verifier for a user-resolved Navidrome song without a Hub import row."""
+    sid, filename = song.get("id"), song.get("path")
+    if not sid or not filename:
+        return
+    # Navidrome serves the shared library at /music; Subsonic normally sends a relative path.
+    rel = Path(filename)
+    if rel.is_absolute():
+        if not rel.is_relative_to("/music"):
+            return
+        rel = rel.relative_to("/music")
+    root = get_settings().library_dir.resolve()
+    try:
+        path = (root / rel).resolve(strict=True)
+        if not path.is_relative_to(root) or not path.is_file():
+            return
+    except (OSError, RuntimeError, ValueError):
+        return
+    ref = f"nd:{sid}"
+    _prune()
+    _choices[ref] = Choice(ref, "library", song["artist"], song["title"], song.get("duration"),
+                           path=path, nd_song_id=sid)
+
+
 async def _resolve_song(ref: str, song_id: str) -> Choice:
     """A song only the library has (`nd:<song>`, in a mix): its file."""
     async with session_scope() as s:

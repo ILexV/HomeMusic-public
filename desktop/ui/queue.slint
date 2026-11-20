@@ -1,5 +1,5 @@
-import { TrackList, TrackMenu } from "item-menus.slint";
-import { EmptyNote, Glyph, Theme, TitleButton, VerticalScrollBar } from "theme.slint";
+import { TrackList } from "item-menus.slint";
+import { EmptyNote, Glyph, Theme, TitleButton, TrackActions, VerticalScrollBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
 // Observe hover before dispatch to child controls, including the drag gutter outside the Flickable.
@@ -35,7 +35,8 @@ export component QueueView inherits Rectangle {
         pointer.mouse-x < pointer.width - 7px && pointer.mouse-y >= 0px && pointer.mouse-y < pointer.height
         ? root.row-at(pointer.mouse-y) : -1;
     private property <int> keyboard-row: -1;
-    // Horizontal keyboard navigation: play the row, queue it next, or remove it.
+    // The whole queue remains one tab stop: play, next, remove, or more.
+    private property <int> menu-source: -1;
     private property <int> keyboard-action: 0;
     vertical-stretch: 1;
     min-height: 40px;
@@ -92,7 +93,6 @@ export component QueueView inherits Rectangle {
             wrap: word-wrap;
         }
         pointer := QueueViewport {
-            enabled: root.quiet-actions;
             vertical-stretch: 1;
             min-height: 20px;
             if root.busy && root.queue.length == 0 : EmptyNote { message: "Загрузка очереди…"; }
@@ -131,10 +131,10 @@ export component QueueView inherits Rectangle {
                         }
                         if item.liked : Glyph { kind: "heart"; tint: Theme.orange; width: 13px; height: 13px; accessible-role: image; accessible-label: "В понравившихся"; }
                         Text { text: item.duration; color: Theme.muted; font-size: 10px; }
-                        Rectangle { width: 48px; }
+                        Rectangle { width: 76px; }
                     }
                     row-touch := TouchArea {
-                        width: parent.width - 50px;
+                        width: parent.width - 78px;
                         mouse-cursor: MouseCursor.pointer;
                         clicked => {
                             // A scroll or a long pointer movement is never a play action.
@@ -144,7 +144,7 @@ export component QueueView inherits Rectangle {
                         }
                     }
                     TitleButton {
-                        x: parent.width - 48px; y: 9px; width: 24px;
+                        x: parent.width - 76px; y: 9px; width: 24px;
                         visible: root.show-actions(index, item.source);
                         border-width: root.row-focused(index) && root.keyboard-action == 1 ? 1px : 0px;
                         border-color: Theme.orange;
@@ -152,17 +152,29 @@ export component QueueView inherits Rectangle {
                         clicked => { root.queue-row-next(item.source); }
                     }
                     TitleButton {
-                        x: parent.width - 24px; y: 9px; width: 24px;
+                        x: parent.width - 52px; y: 9px; width: 24px;
                         visible: root.show-actions(index, item.source);
                         border-width: root.row-focused(index) && root.keyboard-action == 2 ? 1px : 0px;
                         border-color: Theme.orange;
                         glyph: "×"; tip: "Убрать из очереди";
                         clicked => { root.remove-queue-row(item.source); }
                     }
-                    TrackMenu {
+                    TrackActions {
                         list: TrackList.queue;
                         source: item.source;
                         song-id: item.song-id;
+                        identified: item.identified;
+                        track-title: item.title;
+                        row-active: root.hovered-row == index || root.row-focused(index);
+                        tab-stop: false;
+                        keyboard-selected: root.row-focused(index) && root.keyboard-action == 3;
+                        property <bool> menu-requested: root.menu-source == item.source;
+                        changed menu-requested => {
+                            if self.menu-requested {
+                                root.menu-source = -1;
+                                self.open-menu();
+                            }
+                        }
                         can-next: item.can-move-next;
                         can-end: item.can-move-end;
                     }
@@ -233,8 +245,13 @@ export component QueueView inherits Rectangle {
             }
             // One tab stop for the entire list. Tab/Shift+Tab and player shortcuts bubble normally.
             list-keys := FocusScope {
-                enabled: root.quiet-actions && root.queue.length > 0;
+                enabled: root.queue.length > 0;
                 focus-on-click: false;
+                accessible-role: list;
+                accessible-label: root.keyboard-row < 0 || root.keyboard-row >= root.queue.length ? "Очередь" :
+                    "Очередь: " + root.queue[root.keyboard-row].title + " · " +
+                    (root.keyboard-action == 0 ? "Играть" : root.keyboard-action == 1 ? "Играть следующим" :
+                        root.keyboard-action == 2 ? "Убрать из очереди" : "Действия с треком");
                 focus-gained => {
                     root.keyboard-action = 0;
                     root.focus-row(root.has-current && !root.current-offscreen
@@ -257,17 +274,18 @@ export component QueueView inherits Rectangle {
                         return accept;
                     }
                     if event.text == Key.LeftArrow || event.text == Key.RightArrow {
-                        root.keyboard-action = clamp(root.keyboard-action + (event.text == Key.LeftArrow ? -1 : 1), 0, 2);
+                        root.keyboard-action = clamp(root.keyboard-action + (event.text == Key.LeftArrow ? -1 : 1), 0, 3);
                         root.focus-row(root.keyboard-row);
                         return accept;
                     }
-                    if event.text == Key.Return {
+                    if event.text == Key.Return || (event.text == " " && root.keyboard-action == 3) {
                         if !event.repeat {
                             root.focus-row(root.keyboard-row);
                             let source = root.queue[root.keyboard-row].source;
                             if root.keyboard-action == 0 { root.play-row(source); }
                             else if root.keyboard-action == 1 { root.queue-row-next(source); }
-                            else { root.remove-queue-row(source); }
+                            else if root.keyboard-action == 2 { root.remove-queue-row(source); }
+                            else { root.menu-source = source; }
                         }
                         return accept;
                     }

@@ -1,4 +1,4 @@
-import { TrackList, TrackMenu } from "item-menus.slint";
+import { TrackList } from "item-menus.slint";
 import { CoverArt, EmptyNote, EqButton, QueueRow, ScrollPort, Theme } from "theme.slint";
 import { QueueItem } from "types.slint";
 
@@ -62,8 +62,8 @@ export component AlbumDetail inherits Rectangle {
             if root.can-play : ScrollPort {
                 for item in root.album-tracks : QueueRow {
                     item: item;
+                    list: TrackList.album;
                     clicked => { root.album-play-row(item.source); }
-                    TrackMenu { list: TrackList.album; source: item.source; }
                 }
             }
         }

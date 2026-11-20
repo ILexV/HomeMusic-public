@@ -7,6 +7,24 @@ export { ItemActions, TrackList, TrackPlacement } from "item-menus.slint";
 import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
 import { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow } from "tools.slint";
 export { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow }
+import { DiscographyPanel } from "discography.slint";
+export { Discography } from "discography.slint";
+import { SimilarPanel } from "similar.slint";
+export { SimilarBrowser, SimilarRow } from "similar.slint";
+
+export component ExploreWindow inherits Window {
+    in-out property <bool> similar;
+    title: root.similar ? "Похожие треки" : "Альбомы исполнителя";
+    icon: @image-url("../assets/icon.png");
+    background: Theme.bg;
+    default-font-size: 14px;
+    preferred-width: 660px;
+    preferred-height: 500px;
+    min-width: 480px;
+    min-height: 320px;
+    if !root.similar : DiscographyPanel { }
+    if root.similar : SimilarPanel { }
+}
 
 export enum Mode { mini, medium, large }
 

@@ -83,6 +83,7 @@ def create_app() -> FastAPI:
         admin,
         auth,
         catalog,
+        discography,
         download_pages,
         downloads,
         events,
@@ -115,7 +116,7 @@ def create_app() -> FastAPI:
     app.add_middleware(UploadBodyLimitMiddleware)
     app.include_router(download_pages.router)
     app.include_router(recording_feedback.router)
-    for r in (auth.router, search.router, catalog.router, downloads.router, listen.router, library.router, medialib.router,
+    for r in (auth.router, search.router, catalog.router, discography.router, downloads.router, listen.router, library.router, medialib.router,
               uploads.router, playlists.router, plays.router, mixes.router, wave.router, smart_shuffle.router, imports.router, events.router, system.router, admin.router,
               insights.router, lyrics.router, smart_playlists.router, playback.router,
               recommendations.router, recommendation_pauses.router, releases.router):

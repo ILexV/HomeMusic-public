@@ -1,0 +1,52 @@
+import { Button } from "std-widgets.slint";
+import { ScrollPort, Theme } from "theme.slint";
+
+export struct SimilarRow {
+    title: string, artist: string, album: string, song-id: string, track-ref: string, seconds: int,
+}
+
+export global SimilarBrowser {
+    in-out property <string> seed-title;
+    in-out property <string> seed-ref;
+    in-out property <int> request-id;
+    in-out property <string> status;
+    in-out property <string> action-note;
+    in-out property <[SimilarRow]> rows;
+    callback choose(SimilarRow, bool); // true: play now; false: insert next
+    callback start-wave();
+}
+
+export component SimilarPanel inherits Rectangle {
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 14px; spacing: 8px;
+        Text { text: "Похожие песни"; font-size: 20px; font-weight: 600; color: Theme.text; }
+        Text { text: SimilarBrowser.seed-title; overflow: elide; color: Theme.muted; }
+        HorizontalLayout {
+            alignment: start;
+            Button { text: "Волна по треку";
+                enabled: SimilarBrowser.seed-ref != ""; clicked => { SimilarBrowser.start-wave(); }
+                Tooltip { text: @markdown("Заменить очередь волной по выбранному треку"); }
+            }
+        }
+        if SimilarBrowser.status != "" : Text { text: SimilarBrowser.status; color: Theme.muted; wrap: word-wrap; }
+        Rectangle {
+            vertical-stretch: 1;
+            if SimilarBrowser.rows.length > 0 : ScrollPort {
+                for row in SimilarBrowser.rows : Rectangle {
+                    height: 82px; background: Theme.bg;
+                    VerticalLayout {
+                        alignment: center; padding-left: 8px; padding-right: 8px; spacing: 3px;
+                        Text { text: row.title; color: Theme.text; overflow: elide; }
+                        Text { text: row.album == "" ? row.artist : row.artist + " · " + row.album; color: Theme.muted; overflow: elide; }
+                        HorizontalLayout { alignment: start; spacing: 6px;
+                            Button { text: "Послушать"; clicked => { SimilarBrowser.choose(row, true); } }
+                            Button { text: "Играть следующей"; clicked => { SimilarBrowser.choose(row, false); } }
+                        }
+                    }
+                }
+            }
+        }
+        if SimilarBrowser.action-note != "" : Text { text: SimilarBrowser.action-note; color: Theme.orange; wrap: word-wrap; }
+    }
+}

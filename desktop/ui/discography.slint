@@ -1,0 +1,74 @@
+import { Button, ComboBox } from "std-widgets.slint";
+import { ScrollPort, Theme } from "theme.slint";
+
+export global Discography {
+    in-out property <string> track;
+    in-out property <[string]> artists;
+    in-out property <int> selected;
+    in-out property <bool> catalog;
+    in-out property <[string]> releases;
+    in-out property <string> status;
+    in-out property <string> warning;
+    in-out property <bool> failed;
+    callback select-artist(int);
+    callback select-catalog(bool);
+    callback open-album(int);
+    callback retry();
+    callback received();
+}
+
+export component DiscographyPanel inherits Rectangle {
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 16px; spacing: 10px;
+        Text { text: "Дискография"; color: Theme.text; font-size: 20px; font-weight: 600; }
+        Text { text: Discography.track; color: Theme.muted; overflow: elide; }
+        if Discography.artists.length > 0 : HorizontalLayout {
+            spacing: 10px;
+            Text { text: "Исполнитель"; color: Theme.text; vertical-alignment: center; }
+            ComboBox {
+                horizontal-stretch: 1;
+                model: Discography.artists; current-index <=> Discography.selected;
+                selected(value) => { Discography.select-artist(self.current-index); }
+            }
+        }
+        HorizontalLayout {
+            alignment: start; spacing: 6px;
+            for label[index] in ["В библиотеке", "Весь каталог"] : Button {
+                text: label; checked: Discography.catalog == (index == 1);
+                enabled: Discography.artists.length > 0;
+                clicked => { Discography.select-catalog(index == 1); }
+            }
+        }
+        if Discography.warning != "" : Text { text: Discography.warning; color: Theme.orange; wrap: word-wrap; }
+        if Discography.status != "" : Text {
+            text: Discography.status; color: Discography.failed ? Theme.orange : Theme.muted; wrap: word-wrap;
+        }
+        if Discography.failed : Button { text: "Повторить"; clicked => { Discography.retry(); } }
+        Rectangle {
+            vertical-stretch: 1;
+            if Discography.releases.length > 0 : ScrollPort {
+                for label[index] in Discography.releases : Rectangle {
+                    height: 38px;
+                    background: touch.has-hover || keys.has-focus ? Theme.raised : Theme.panel;
+                    border-width: keys.has-focus ? 1px : 0px;
+                    border-color: Theme.orange;
+                    accessible-role: button; accessible-label: label;
+                    accessible-action-default => { Discography.open-album(index); }
+                    Text { x: 8px; width: parent.width - 16px; text: label; color: Theme.text; overflow: elide; vertical-alignment: center; }
+                    keys := FocusScope {
+                        key-pressed(event) => {
+                            if event.text == Key.Return || event.text == " " {
+                                if !event.repeat { Discography.open-album(index); }
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                    touch := TouchArea { mouse-cursor: pointer; clicked => { Discography.open-album(index); } }
+                    Tooltip { text: @markdown("\{label}"); }
+                }
+            }
+        }
+    }
+}

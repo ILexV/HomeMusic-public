@@ -775,15 +775,74 @@ export component Equalizer inherits Rectangle {
     }
 }
 
+// The topmost area handles only context-menu input. Left clicks fall through
+// to the dots or to the existing play, download and drag controls.
+export component TrackActions inherits Rectangle {
+    in property <TrackList> list <=> menu.list;
+    in property <int> source <=> menu.source;
+    in property <string> song-id <=> menu.song-id;
+    in property <bool> identified <=> menu.identified;
+    in property <bool> can-next <=> menu.can-next;
+    in property <bool> can-end <=> menu.can-end;
+    in property <string> track-title;
+    in property <bool> row-active;
+    in property <bool> tab-stop: true;
+    in property <bool> keyboard-selected;
+    in property <length> button-y: (root.height - dots.height) / 2;
+    width: 100%;
+    height: 100%;
+
+    public function open-menu() {
+        menu.show({ x: dots.x, y: dots.y + dots.height });
+    }
+
+    dots := Rectangle {
+        x: parent.width - self.width;
+        y: root.button-y;
+        width: 28px; height: 24px;
+        accessible-role: button;
+        accessible-label: "Действия с треком: " + root.track-title;
+        accessible-action-default => { root.open-menu(); }
+        forward-focus: keys;
+        property <bool> focused: keys.has-focus || root.keyboard-selected;
+        border-radius: 4px;
+        border-width: self.focused ? 1px : 0px;
+        border-color: Theme.orange;
+        background: touch.has-hover ? Theme.raised : transparent;
+        Text {
+            visible: root.row-active || dots.focused || touch.has-hover;
+            text: "⋯"; color: dots.focused || touch.has-hover ? Theme.orange : Theme.text;
+            font-size: 18px;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+        keys := FocusScope {
+            enabled: root.tab-stop;
+            focus-on-click: false;
+            key-pressed(event) => {
+                if !event.modifiers.control && !event.modifiers.meta && !event.modifiers.shift &&
+                    !event.modifiers.alt && (event.text == Key.Return || event.text == " ") {
+                    if !event.repeat { root.open-menu(); }
+                    return accept;
+                }
+                return reject;
+            }
+        }
+        touch := TouchArea { mouse-cursor: pointer; clicked => { root.open-menu(); } }
+        Tooltip { text: @markdown("Действия с треком"); }
+    }
+    menu := TrackMenu {}
+}
+
 export component QueueRow inherits Rectangle {
     in property <QueueItem> item;
+    in property <TrackList> list;
     callback clicked();
     height: 32px;
     background: root.item.current ? Theme.orange : (touch.has-hover ? Theme.raised : transparent);
 
     HorizontalLayout {
         padding-left: 8px;
-        padding-right: 10px;
+        padding-right: 34px;
         spacing: 8px;
         cross-axis-alignment: center;
 
@@ -820,6 +879,17 @@ export component QueueRow inherits Rectangle {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
+    TrackActions {
+        list: root.list; source: root.item.source;
+        song-id: root.item.song-id; identified: root.item.identified;
+        track-title: root.item.title; row-active: touch.has-hover;
+    }
+}
+
+// Observe the entire result (including its secondary actions) before the
+// individual controls receive the pointer event.
+component CatalogLayout inherits TouchArea {
+    VerticalLayout { @children }
 }
 
 export component CatalogRow inherits Rectangle {
@@ -830,8 +900,7 @@ export component CatalogRow inherits Rectangle {
     callback check-source();
     height: 44px + (root.hit.section == "" ? 0px : 28px) + (root.hit.is-album ? 0px : 24px);
 
-    VerticalLayout {
-        spacing: 0px;
+    surface := CatalogLayout {
         if root.hit.section != "" : Rectangle {
             height: 28px;
             Text {
@@ -857,7 +926,7 @@ export component CatalogRow inherits Rectangle {
             background: touch.has-hover ? Theme.raised : transparent;
             HorizontalLayout {
                 padding-left: 8px;
-                padding-right: 8px;
+                padding-right: root.hit.is-album ? 8px : 34px;
                 spacing: 8px;
                 cross-axis-alignment: center;
                 Rectangle {
@@ -936,11 +1005,6 @@ export component CatalogRow inherits Rectangle {
                     clicked => { root.download(); }
                 }
             }
-            if !root.hit.is-album : TrackMenu {
-                list: TrackList.catalog;
-                source: root.source;
-                song-id: root.hit.song-id;
-            }
         }
         if !root.hit.is-album : HorizontalLayout {
             height: 24px;
@@ -958,6 +1022,14 @@ export component CatalogRow inherits Rectangle {
                 clicked => { root.check-source(); }
             }
         }
+    }
+    if !root.hit.is-album : TrackActions {
+        y: root.hit.section == "" ? 0px : 28px;
+        height: parent.height - self.y;
+        button-y: 10px;
+        list: TrackList.catalog; source: root.source; song-id: root.hit.song-id;
+        identified: true; track-title: root.hit.title;
+        row-active: surface.has-hover && surface.mouse-y >= self.y;
     }
 }
 

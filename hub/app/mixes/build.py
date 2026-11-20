@@ -196,14 +196,15 @@ def stash(p: Profile) -> list[CatalogTrack]:
 
 
 async def _by_seeds(seeds: list[TasteTrack], fetch: Callable[[TasteTrack], Awaitable[list[sources.Hit]]],
-                    source: str) -> list[CatalogTrack]:
+                    source: str, limit: int | None = None) -> list[CatalogTrack]:
     """A source asked by every seed; the lists interleaved (each seed's first, then its second...)."""
     lists = await asyncio.gather(*(fetch(t) for t in seeds), return_exceptions=True)
     errors = [x for x in lists if isinstance(x, BaseException)]
     ok = [x for x in lists if not isinstance(x, BaseException)]
     if errors and not ok:
         raise errors[0]
-    resolved = await resolve_hits(source, _interleave(ok))
+    hits = _interleave(ok)
+    resolved = await resolve_hits(source, hits if limit is None else hits[:limit])
     return [t for t in resolved if t is not None]
 
 
@@ -326,23 +327,30 @@ async def yandex_wave(p: Profile) -> list[CatalogTrack]:
     return [t for t in await resolve_hits("yandex", hits) if t is not None]
 
 
-def generators(p: Profile, seeds: list[TasteTrack]) -> dict[str, Gen]:
+def track_generators(seeds: list[TasteTrack], *, limit: int | None = None) -> dict[str, Gen]:
+    """Metadata sources anchored to the supplied songs, independent of any account profile."""
     async def lastfm() -> list[CatalogTrack]:
         if not sources.lastfm_configured():
             raise Off("нет LASTFM_API_KEY")
-        return await _by_seeds(seeds, lambda t: sources.lastfm_similar_tracks(t.artist, t.title, limit=30), "lastfm")
+        return await _by_seeds(seeds, lambda t: sources.lastfm_similar_tracks(t.artist, t.title, limit=30), "lastfm", limit)
 
+    return {
+        "ytm_radio": lambda: _by_seeds(seeds, lambda t: sources.ytm_radio(t.artist, t.title), "ytm", limit),
+        "lastfm_similar": lastfm,
+        "yandex_similar": lambda: _by_seeds(seeds, lambda t: sources.yandex_similar(t.artist, t.title, t.duration_s),
+                                            "yandex", limit),
+    }
+
+
+def generators(p: Profile, seeds: list[TasteTrack]) -> dict[str, Gen]:
     async def const(x: list[CatalogTrack]) -> list[CatalogTrack]:
         return x
 
     return {
         "favorites": lambda: const(favorites(p)),
         "stash": lambda: const(stash(p)),
-        "ytm_radio": lambda: _by_seeds(seeds, lambda t: sources.ytm_radio(t.artist, t.title), "ytm"),
-        "lastfm_similar": lastfm,
+        **track_generators(seeds),
         "deezer_radio": lambda: deezer_radio(p),
-        "yandex_similar": lambda: _by_seeds(seeds, lambda t: sources.yandex_similar(t.artist, t.title, t.duration_s),
-                                            "yandex"),
         "similar_artists": lambda: similar_artists(p),
         "new_releases": lambda: new_releases(p),
         "yandex_wave": lambda: yandex_wave(p),

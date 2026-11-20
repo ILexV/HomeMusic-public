@@ -73,6 +73,20 @@ impl Availability {
     }
 }
 
+pub(super) enum WaveSeed {
+    Track(String),  // stable catalog, provider-file, or nd:<song> ref
+    Artist(String), // Navidrome artist id
+}
+
+impl WaveSeed {
+    fn json(&self) -> Value {
+        match self {
+            Self::Track(reference) => serde_json::json!({ "ref": reference }),
+            Self::Artist(id) => serde_json::json!({ "nd_artist_id": id }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogHit {
     pub kind: HitKind,
@@ -179,6 +193,10 @@ impl Hub {
         Ok(parse_search(&body))
     }
 
+    pub(super) fn catalog_album(&self, reference: &str) -> Result<Value, String> {
+        self.send("GET", &format!("/api/catalog/album/{}", encode(reference)), None)
+    }
+
     pub fn check_availability(&self, reference: &str) -> Availability {
         // Resolve only the selected track, with the same preview policy as the Play button.
         self.send("GET", &format!("/api/listen?ref={}", encode(reference)), None)
@@ -254,18 +272,12 @@ impl Hub {
         Ok(parse_mix_settings(&value))
     }
 
-    /// The user's own wave when `artist_id` is empty. `origin` is `home_card` or `radio`.
-    pub fn wave_start(&self, artist_id: &str, origin: &str, preferences: &Value) -> Result<WaveBatch, String> {
-        let seed = if artist_id.is_empty() {
-            Value::Null
-        } else {
-            serde_json::json!({ "nd_artist_id": artist_id })
-        };
+    pub(super) fn wave_start(&self, seed: Option<&WaveSeed>, origin: &str, preferences: &Value) -> Result<WaveBatch, String> {
         let body = self.send(
             "POST",
             "/api/wave/start",
             Some(serde_json::json!({
-                "seed": seed,
+                "seed": seed.map(WaveSeed::json),
                 "origin": origin,
                 "client": CLIENT,
                 "preferences": preferences,
@@ -1187,6 +1199,13 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn similar_track_wave_sends_a_recording_seed_not_an_artist_or_a_personal_seed() {
+        assert_eq!(WaveSeed::Track("nd:chosen".into()).json(), serde_json::json!({"ref": "nd:chosen"}));
+        assert_eq!(WaveSeed::Track("dz:2".into()).json(), serde_json::json!({"ref": "dz:2"}));
+        assert_eq!(WaveSeed::Artist("chosen".into()).json(), serde_json::json!({"nd_artist_id": "chosen"}));
+    }
 
     #[test]
     fn catalog_queue_plays_after_its_library_file_was_removed() {

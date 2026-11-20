@@ -13,7 +13,6 @@ enum Job {
     Pause, Undo,
     Explain { target: String },
     Wave { session: String, instance: u64, played: Vec<Value> },
-    Album { ticket: u64 },
     Download { ticket: u64 },
     Seen,
     Recording { token: Option<u64>, instance: u64, reference: String },
@@ -157,7 +156,7 @@ impl State {
         let (Some(t), Some(ui)) = (self.tools.upgrade(), self.ctx.ui.upgrade()) else { return };
         if self.ctx.hub.wave_busy.get() || self.ctx.hub.wave.borrow().asking { self.status("Дождитесь ответа текущей волны"); return; }
         *self.ctx.hub.wave_start_preferences.borrow_mut() = Self::preferences(&t);
-        crate::begin_wave(&ui, &self.ctx.hub, String::new(), "home_card");
+        crate::begin_wave(&ui, &self.ctx.hub, None, "home_card");
         t.set_recommendations_energy(0); t.set_recommendations_vocals(0); t.set_recommendations_discovery(0);
         self.status("Подготовка полных записей новой волны…");
         self.starting.set(true);
@@ -225,19 +224,8 @@ impl State {
         self.request(Job::Explain { target }, "GET", format!("/api/recommendations/explain?context={}&ref={}&nd_song_id={}", encode(&context), encode(&item.listen_ref), encode(&item.id)), None);
     }
     fn open_album(&self, reference: &str) {
-        let Some(ui) = self.ctx.ui.upgrade() else { return };
-        let ticket = self.ctx.hub.album_generation.get().wrapping_add(1);
-        self.ctx.hub.album_generation.set(ticket);
-        *self.ctx.hub.album_preview.borrow_mut() = Some(crate::AlbumPreview {
-            id: String::new(), cover_id: String::new(), catalog_ref: reference.into(), tracks: Vec::new(),
-        });
-        ui.set_album_title("Загрузка релиза…".into()); ui.set_album_artist("".into());
-        ui.set_album_tracks(ModelRc::default()); ui.set_album_total("".into());
-        ui.set_album_error("".into()); ui.set_album_note("".into()); ui.set_album_busy(true);
-        ui.set_album_has_cover(false); ui.set_album_can_download(true); ui.set_album_open(true);
-        if ui.get_mode() == crate::Mode::Mini { ui.invoke_set_mode(1); }
+        crate::show_explore_album(&self.ctx, reference, true, "Загрузка релиза…", "");
         if let Some(t) = self.tools.upgrade() { let _ = t.hide(); }
-        self.request(Job::Album { ticket }, "GET", format!("/api/catalog/album/{}", encode(reference)), None);
     }
     fn download_album(&self) {
         let reference = self.ctx.hub.album_preview.borrow().as_ref().map(|a| a.catalog_ref.clone()).unwrap_or_default();
@@ -393,15 +381,6 @@ impl State {
                         if let Some(ui) = self.ctx.ui.upgrade() { crate::record_playback(&ui, &self.ctx.hub, &self.ctx.queue.borrow(), &self.ctx.player.borrow().snapshot(), true); }
                         self.status(if batch.tracks.is_empty() { "Настройки применены. Полные записи ещё готовятся; текущая песня сохранена." } else { "Настройки применены к следующим песням; текущая не перезапущена." });
                     }
-                }
-            }
-            Job::Album { ticket } => {
-                let Some(ui) = self.ctx.ui.upgrade() else { return };
-                if ticket != self.ctx.hub.album_generation.get() || !ui.get_album_open() { return; }
-                ui.set_album_busy(false);
-                match reply.result {
-                    Err(error) => ui.set_album_error(error.into()),
-                    Ok(value) => crate::album_view::show_catalog(&ui, &self.ctx.hub, &value),
                 }
             }
             Job::Download { ticket } => {
