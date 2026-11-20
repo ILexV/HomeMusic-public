@@ -166,6 +166,26 @@ async def test_readiness_stop_start_commits_only_after_final_ack(env):
     assert old["error"] and old["state"] == final["state"]
 
 
+@pytest.mark.parametrize("playing,reported", [
+    (True, {"playing": False}), (False, {"playing": True}),
+    (True, {"index": 0}), (True, {"occurrence": "duplicate-1"}),
+])
+async def test_handoff_cannot_commit_a_different_start_result(env, playing, reported):
+    initial = await owned(env)
+    observed = await heartbeat(env.alice, "source", state=snapshot(playing=playing), revision=initial["revision"])
+    transfer = await post(env.alice, "handoff", device_id="target", target="target", revision=observed["revision"])
+    await acknowledge(env.alice, "target", transfer["commands"][0])
+    [stop] = (await heartbeat(env.alice, "source"))["commands"]
+    stopped = await acknowledge(env.alice, "source", stop, state=snapshot(playing=False, position=18))
+    [start] = (await heartbeat(env.alice, "target"))["commands"]
+    actual = {**start["state"], **reported}
+    failed = await acknowledge(env.alice, "target", start, state=actual)
+    assert failed["error"] and failed["handoff"]["phase"] == "failed"
+    assert failed["owner"] == "source" and failed["state"] == stopped["state"]
+    late = await acknowledge(env.alice, "target", start, state=start["state"])
+    assert late["owner"] == "source" and late["commands"] == []
+
+
 @pytest.mark.parametrize("failure_phase", ["prepare", "stop", "start"])
 async def test_failed_handoff_never_resumes_or_transfers_source(env, failure_phase):
     command = await prepare(env)
@@ -465,6 +485,27 @@ async def test_source_reconnecting_during_recovery_requires_stop_ack(env):
     await acknowledge(env.alice, "source", stop, state=snapshot(playing=False, position=17))
     start = (await heartbeat(env.alice, "target"))["commands"][0]
     assert start["state"] == snapshot(position=17)
+
+
+async def test_recovery_rejects_stop_ack_after_source_disconnects_again(env):
+    await owned(env)
+    env.clock.now += 16
+    await heartbeat(env.alice, "target")
+    pull = await post(env.alice, "handoff", device_id="target", target="target", revision=1)
+    await heartbeat(env.alice, "source")
+    env.clock.now += 14
+    await heartbeat(env.alice, "target")
+    ready = await acknowledge(env.alice, "target", pull["commands"][0])
+    assert ready["handoff"]["phase"] == "stopping"
+    # A local pause request also returns the source's pending stop, without renewing its heartbeat.
+    view = await post(env.alice, "command", device_id="source", target="source", revision=ready["revision"], kind="pause")
+    [stop] = view["commands"]
+    assert stop["kind"] == "stop"
+    env.clock.now += 2  # source lease lost, stop command still within its ten-second timeout
+    late = await acknowledge(env.alice, "source", stop, state=snapshot(playing=False, position=99))
+    assert late["handoff"]["phase"] == "failed" and late["error"]
+    assert late["owner"] == "source" and late["state"] == snapshot(playing=False)
+    assert (await heartbeat(env.alice, "target"))["commands"] == []
 
 
 async def test_recovery_cannot_use_disconnected_target(env):

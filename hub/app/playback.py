@@ -84,8 +84,8 @@ def _expire(data: dict, now: float) -> None:
             data["error"] = error
     if _active(data):
         transfer = data["handoff"]
-        required = ("target",) if transfer.get("recovery") else ("source", "target")
-        if not all(_online(data, transfer[key], now) for key in required):
+        needs_source = not transfer.get("recovery") or transfer["phase"] == "stopping"
+        if not _online(data, transfer["target"], now) or (needs_source and not _online(data, transfer["source"], now)):
             _abort(data, "Устройство отключилось во время передачи")
 
 
@@ -195,6 +195,10 @@ def _ack(data: dict, body: Ack, now: float) -> str | None:
             data["error"] = error
         return error
     state = body.state.model_dump() if body.state is not None else None
+    if kind == "start" and any(state[key] != command["state"][key] for key in ("playing", "index", "occurrence")):
+        error = "Целевой плеер подтвердил другую позицию в очереди или другой режим воспроизведения"
+        _abort(data, error)
+        return error
     _finish(command)
     data["error"] = None
     if not handoff_id:
