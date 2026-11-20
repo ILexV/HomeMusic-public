@@ -55,7 +55,7 @@ enum HubEvent {
     },
     AlbumLoaded {
         ticket: u64,
-        result: Result<(String, navidrome::LibraryQueue), String>,
+        result: Result<(String, album_view::Tracks), String>,
     },
     CardAlbum {
         request: context_actions::AlbumRequest,
@@ -403,9 +403,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let _connection_settings = connection_settings::bind(&feature_context, &tools);
     let _recommendations = recommendations::bind(&feature_context, &tools);
     let tools_weak = tools.as_weak();
+    let player_window = ui.as_weak();
     ui.on_open_tools(move || {
-        if let Some(tools) = tools_weak.upgrade() {
-            let _ = tools.show();
+        if let (Some(ui), Some(tools)) = (player_window.upgrade(), tools_weak.upgrade()) {
+            let _ = show_settings(&ui, &tools);
         }
     });
     show_status(&ui, &player.borrow(), &hub_state, &config_status);
@@ -853,7 +854,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     marks.refs.insert(item.listen_ref.clone());
                 }
             }
-            paint_track_marks(&ui, &queue_like.borrow(), &hub_like);
+            refresh_track_likes(&ui, &queue_like.borrow(), &hub_like);
             remember_note(
                 &ui, &player_like.borrow(), &hub_like, &status_like,
                 if was { "Убираем лайк…" } else { "Лайк: добавляем трек в загрузки…" },
@@ -877,7 +878,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 marks.songs.insert(item.id.clone());
             }
         }
-        paint_track_marks(&ui, &queue_like.borrow(), &hub_like);
+        refresh_track_likes(&ui, &queue_like.borrow(), &hub_like);
         note_wave_mark(&item, &hub_like, if was { "unlike" } else { "like" });
         let id = item.id;
         let client = Arc::clone(&hub_like.hub);
@@ -1283,15 +1284,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 );
                 poll_mix(&hub_tick);
                 if let Some(update) = waves_tick.poll() {
-                    match update {
-                        wave::Update::Loading => ui.set_wave_message("Загрузка волны…".into()),
-                        wave::Update::Cleared => ui.set_wave_message("".into()),
-                        wave::Update::Unavailable => ui.set_wave_message("Нет данных волны".into()),
-                        wave::Update::Ready(peaks) => {
-                            ui.set_wave_message("".into());
-                            show_wave(&ui, peaks);
-                        }
-                    }
+                    show_wave(&ui, update);
                 }
                 let player = player_tick.borrow();
                 let snapshot = player.snapshot();
@@ -1362,13 +1355,46 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     if !config.loaded || config.user.is_empty() || config.password.is_empty() {
-        ui.show()?;
-        tools.set_active_panel(7);
-        tools.show()?;
+        // The primary monitor is available only after winit creates the player window.
+        use slint::winit_030::WinitWindowAccessor;
+        let player_window = ui.as_weak();
+        let settings = tools.as_weak();
+        slint::spawn_local(async move {
+            if let (Some(ui), Some(tools)) = (player_window.upgrade(), settings.upgrade()) {
+                if ui.window().winit_window().await.is_err() { return; }
+                tools.set_active_panel(7);
+                let _ = show_settings(&ui, &tools);
+            }
+        }).map_err(|e| slint::PlatformError::Other(e.to_string()))?;
     }
     let result = ui.run();
     record_playback(&ui, &hub_state, &queue.borrow(), &player.borrow().snapshot(), true);
     result
+}
+
+fn show_settings(ui: &AppWindow, tools: &ToolsWindow) -> Result<(), slint::PlatformError> {
+    use slint::winit_030::{winit::dpi::PhysicalPosition, WinitWindowAccessor};
+
+    let was_visible = tools.window().is_visible();
+    tools.show()?;
+    let monitor = ui.window().with_winit_window(|window| window.current_monitor()).flatten();
+    tools.window().with_winit_window(|window| {
+        if !was_visible {
+            if let Some(monitor) = monitor {
+                let origin = monitor.position();
+                let screen = monitor.size();
+                let dialog = window.outer_size();
+                // Keep all coordinates physical, including negative secondary-monitor origins.
+                window.set_outer_position(PhysicalPosition::new(
+                    origin.x + (screen.width.saturating_sub(dialog.width) / 2) as i32,
+                    origin.y + (screen.height.saturating_sub(dialog.height) / 2) as i32,
+                ));
+            }
+        }
+        window.set_minimized(false);
+        window.focus_window();
+    });
+    Ok(())
 }
 
 struct PlaceWatch {
@@ -1648,8 +1674,17 @@ fn empty_wave() -> slint::ModelRc<f32> {
     slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<f32>::new())))
 }
 
-fn show_wave(ui: &AppWindow, peaks: Vec<f32>) {
-    ui.set_wave(slint::ModelRc::from(Rc::new(slint::VecModel::from(peaks))));
+fn show_wave(ui: &AppWindow, update: wave::Update) {
+    let message = match update {
+        wave::Update::Loading => "Загрузка волны…",
+        wave::Update::Cleared => "",
+        wave::Update::Unavailable => "Нет данных волны",
+        wave::Update::Ready(peaks) => {
+            ui.set_wave(slint::ModelRc::from(Rc::new(slint::VecModel::from(peaks))));
+            ""
+        }
+    };
+    ui.set_wave_message(message.into());
 }
 
 fn tray_icon() -> slint::Image {
@@ -1956,16 +1991,34 @@ fn download_catalog_hit(
     });
 }
 
+fn track_liked(marks: &hub::Marks, item: &queue::Item) -> bool {
+    if item.id.is_empty() {
+        !item.listen_ref.is_empty() && marks.refs.contains(&item.listen_ref)
+    } else {
+        marks.songs.contains(&item.id)
+    }
+}
+
+fn refresh_track_likes(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
+    paint_track_marks(ui, queue, hub);
+    let marks = hub.marks.borrow();
+    let rows = ui.get_queue();
+    for (index, mut row) in rows.iter().enumerate() {
+        if let Some(item) = queue.items().get(row.source as usize) {
+            let liked = track_liked(&marks, item);
+            if row.liked != liked {
+                row.liked = liked;
+                rows.set_row_data(index, row);
+            }
+        }
+    }
+    album_view::refresh_likes(ui, hub);
+}
+
 fn paint_track_marks(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
     let item = queue.current();
     let marks = hub.marks.borrow();
-    ui.set_liked(item.is_some_and(|item| {
-        if !item.id.is_empty() {
-            marks.songs.contains(&item.id)
-        } else {
-            !item.listen_ref.is_empty() && marks.refs.contains(&item.listen_ref)
-        }
-    }));
+    ui.set_liked(item.is_some_and(|item| track_liked(&marks, item)));
     ui.set_disliked(item.is_some_and(|item| {
         hub.pending_dislikes.borrow().iter()
             .find(|(t, _)| t.matches(&item.id, &item.listen_ref))
@@ -2256,7 +2309,7 @@ fn apply_hub_events(
     }
     if refresh_marks {
         show_browser(ui, &mut browser.borrow_mut(), hub);
-        paint_track_marks(ui, &queue.borrow(), hub);
+        refresh_track_likes(ui, &queue.borrow(), hub);
     }
     if refresh_hits && hub.catalog_open.get() {
         show_hits(ui, &hub.hits.borrow());
@@ -2963,6 +3016,7 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
     let query = ui.get_queue_search().to_string();
     let current = queue.index();
     let mut current_row = -1;
+    let marks = hub.marks.borrow();
     let rows: Vec<QueueItem> = queue
         .items()
         .iter()
@@ -2981,6 +3035,7 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
                 meta: item.artist.clone().into(),
                 duration: row_duration(item).into(),
                 current: is_current,
+                liked: track_liked(&marks, item),
                 song_id: item.id.as_str().into(),
                 can_move_next: !is_current && index != current.map_or(0, |i| i + 1),
                 can_move_end: index + 1 < queue.items().len(),

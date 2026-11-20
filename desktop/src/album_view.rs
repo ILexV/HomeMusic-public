@@ -3,13 +3,26 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 
 use crate::{
     cancel_queue_load, clear_wave, jump, library_to_queue, navidrome, note_wave_leave,
     player::Player, push_event, queue, request_cover, row_duration, show_queue, wave,
     AlbumPreview, AppWindow, HubEvent, HubState, QueueItem,
 };
+
+pub(super) enum Tracks {
+    Catalog(serde_json::Value),
+    Library(navidrome::LibraryQueue),
+}
+
+fn load_tracks(client: &crate::hub::Hub, config: &navidrome::ServerConfig, id: String) -> Result<(String, Tracks), String> {
+    let tracks = match client.library_album(&id) {
+        Ok(value) => Tracks::Catalog(value),
+        Err(_) => Tracks::Library(navidrome::album_tracks(config, &id)?),
+    };
+    Ok((id, tracks))
+}
 
 pub fn open_album(
     ui: &AppWindow,
@@ -27,8 +40,9 @@ pub fn open_album(
     let config = config.clone();
     let id = id.to_string();
     let events = Arc::clone(&hub.events);
+    let client = Arc::clone(&hub.hub);
     std::thread::spawn(move || {
-        let result = navidrome::album_tracks(&config, &id).map(|tracks| (id, tracks));
+        let result = load_tracks(&client, &config, id);
         push_event(&events, HubEvent::AlbumLoaded { ticket, result });
     });
 }
@@ -39,8 +53,9 @@ pub(super) fn open_song_album(ui: &AppWindow, hub: &HubState, config: &navidrome
     let config = config.clone();
     let id = song_id.to_owned();
     let events = Arc::clone(&hub.events);
+    let client = Arc::clone(&hub.hub);
     std::thread::spawn(move || {
-        let result = navidrome::song_album(&config, &id);
+        let result = navidrome::song_album_id(&config, &id).and_then(|id| load_tracks(&client, &config, id));
         push_event(&events, HubEvent::AlbumLoaded { ticket, result });
     });
 }
@@ -80,17 +95,19 @@ pub fn apply_album_result(
     ui: &AppWindow,
     hub: &HubState,
     ticket: u64,
-    result: Result<(String, navidrome::LibraryQueue), String>,
+    result: Result<(String, Tracks), String>,
 ) {
     if ticket != hub.album_generation.get() || !ui.get_album_open() {
         return;
     }
-    let mut preview = hub.album_preview.borrow_mut();
-    let Some(preview) = preview.as_mut() else { return };
     ui.set_album_busy(false);
     match result {
-        Ok((id, library)) => {
-            preview.id = id;
+        Ok((id, Tracks::Catalog(value))) => {
+            if let Some(preview) = hub.album_preview.borrow_mut().as_mut() { preview.id = id; }
+            show_catalog(ui, hub, &value);
+        }
+        Ok((id, Tracks::Library(library))) => {
+            if let Some(preview) = hub.album_preview.borrow_mut().as_mut() { preview.id = id; }
             let album = library_to_queue(library);
             ui.set_album_title(album.name().into());
             ui.set_album_total(album.total_label().into());
@@ -99,18 +116,55 @@ pub fn apply_album_result(
                     ui.set_album_artist(first.artist.clone().into());
                 }
             }
-            let rows = album.items().iter().enumerate().map(|(index, item)| QueueItem {
-                source: index as i32,
-                number: (index + 1).to_string().into(),
-                title: item.title.clone().into(),
-                meta: item.artist.clone().into(),
-                duration: row_duration(item).into(),
-                ..QueueItem::default()
-            }).collect::<Vec<_>>();
-            ui.set_album_tracks(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
-            preview.tracks = album.into_items();
+            show_rows(ui, hub, album, std::iter::repeat(true));
         }
         Err(message) => ui.set_album_error(message.into()),
+    }
+}
+
+pub(super) fn show_catalog(ui: &AppWindow, hub: &HubState, value: &serde_json::Value) {
+    let title = value["title"].as_str().unwrap_or_default();
+    ui.set_album_title(title.into());
+    ui.set_album_artist(value["artist"].as_str().unwrap_or_default().into());
+    let (items, owned): (Vec<_>, Vec<_>) = value["tracks"].as_array().into_iter().flatten().filter_map(|row| {
+        let t = crate::hub::playable(row)?;
+        Some((queue::Item { id: t.nd_song_id, listen_ref: t.reference, title: t.title,
+            artist: t.artist, album: t.album, duration_s: t.duration_s, path: String::new(), meta: String::new() },
+            row["owned"].as_bool().unwrap_or(false)))
+    }).unzip();
+    let album = queue::Queue::from_tracks(title, items);
+    ui.set_album_total(album.total_label().into());
+    show_rows(ui, hub, album, owned.into_iter());
+}
+
+fn show_rows(ui: &AppWindow, hub: &HubState, album: queue::Queue, owned: impl Iterator<Item = bool>) {
+    let marks = hub.marks.borrow();
+    let rows = album.items().iter().zip(owned).enumerate().map(|(index, (item, owned))| QueueItem {
+        source: index as i32,
+        number: (index + 1).to_string().into(),
+        title: item.title.as_str().into(),
+        meta: if owned { item.artist.as_str().into() } else { format!("Не скачан · {}", item.artist).into() },
+        liked: crate::track_liked(&marks, item),
+        duration: row_duration(item).into(),
+        ..QueueItem::default()
+    }).collect::<Vec<_>>();
+    ui.set_album_tracks(slint::ModelRc::new(slint::VecModel::from(rows)));
+    if let Some(preview) = hub.album_preview.borrow_mut().as_mut() { preview.tracks = album.into_items(); }
+}
+
+pub(super) fn refresh_likes(ui: &AppWindow, hub: &HubState) {
+    let preview = hub.album_preview.borrow();
+    let Some(preview) = preview.as_ref() else { return };
+    let marks = hub.marks.borrow();
+    let rows = ui.get_album_tracks();
+    for (i, item) in preview.tracks.iter().enumerate() {
+        if let Some(mut row) = rows.row_data(i) {
+            let liked = crate::track_liked(&marks, item);
+            if row.liked != liked {
+                row.liked = liked;
+                rows.set_row_data(i, row);
+            }
+        }
     }
 }
 

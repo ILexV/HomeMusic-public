@@ -88,6 +88,47 @@ test('device handoff prepares real audio, stops the source and starts the target
   expect(stopped).toBeLessThanOrEqual(Number(await position.inputValue()));
 });
 
+test('a browser can play the selected track locally without taking another device’s session', async ({ page, browser }) => {
+  await playLibrary(page, 'listener');
+  const source = page.getByRole('region', { name: 'Устройства и общий сеанс' });
+  await source.getByRole('button', { name: 'Сделать этот браузер владельцем' }).click();
+  await expect(source).toContainText('Владелец: Браузер (здесь)');
+
+  const target = await browser.newPage({ baseURL: new URL(page.url()).origin });
+  try {
+    await login(target, 'listener', '/player');
+    await expect(target.getByRole('region', { name: 'Устройства и общий сеанс' })).toContainText('Владелец: Браузер');
+    await target.evaluate(() => { location.hash = '/liked'; });
+    const track = target.getByRole('button', { name: 'Слушать «Browser tone»', exact: true });
+    const streamPath = '/api/listen/stream';
+    let requests = 0;
+    target.on('request', (req) => { if (new URL(req.url()).pathname === streamPath) requests++; });
+    await track.click();
+    const dialog = target.getByRole('alertdialog', { name: 'Слушать в этом браузере?' });
+    await dialog.getByText('Отмена', { exact: true }).click();
+    await expect(dialog).toBeHidden();
+    expect(requests).toBe(0);
+
+    await track.click();
+    const [audio] = await Promise.all([
+      target.waitForResponse((r) => new URL(r.url()).pathname === streamPath),
+      dialog.getByRole('button', { name: 'Слушать локально' }).click(),
+    ]);
+    expect(new URL(audio.url()).searchParams.get('ref')).toBe('nd:browser-tone');
+    expect([200, 206]).toContain(audio.status());
+    expect(audio.headers()['content-type']).toMatch(/^audio\//);
+    await openPlayer(target);
+    await expect(target.getByRole('region', { name: 'Очередь' }).getByRole('button', {
+      name: 'Убрать «Browser tone» из понравившихся', pressed: true,
+    })).toBeVisible();
+    await expect(target.getByRole('region', { name: 'Устройства и общий сеанс' })).toContainText('Локальный режим');
+    await expect.poll(async () => Number(await target.getByRole('slider', { name: 'Перемотка', exact: true }).inputValue())).toBeGreaterThan(0);
+    await expect(source).toContainText('Владелец: Браузер (здесь)');
+  } finally {
+    await target.close();
+  }
+});
+
 test('problem filter finds an old failure outside the latest 200 downloads', async ({ page }) => {
   await login(page, 'pagination');
   await page.getByRole('tab', { name: /Проблемы/ }).click();

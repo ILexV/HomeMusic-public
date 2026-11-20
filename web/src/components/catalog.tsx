@@ -97,6 +97,7 @@ export function TrackRow({
   number,
   showCover = true,
   showAlbum = false,
+  albumDetail = false,
   link = true,
   onPlay,
   queue,
@@ -106,6 +107,7 @@ export function TrackRow({
   number?: number;
   showCover?: boolean;
   showAlbum?: boolean;
+  albumDetail?: boolean;
   link?: boolean;
   /** Plays with context in the app's player (the rest of the album or list); by default the track alone. */
   onPlay?: () => void;
@@ -122,7 +124,7 @@ export function TrackRow({
   const playing = phase === 'playing' || waiting;
   const rowRef = useRef<HTMLDivElement>(null);
   // on screen: the Hub picks the file in the background, so a tap starts at once
-  useEffect(() => (rowRef.current && !track.owned ? watchOnScreen(rowRef.current, track.ref) : undefined), [track.ref, track.owned]);
+  useEffect(() => (rowRef.current && !track.owned && !albumDetail ? watchOnScreen(rowRef.current, track.ref) : undefined), [track.ref, track.owned, albumDetail]);
   const download = async () => {
     setBusy(true);
     await downloadRef(track.ref);
@@ -160,6 +162,7 @@ export function TrackRow({
         <div className={cx('truncate text-[15px]', track.owned || current ? 'text-accent' : 'text-fg')}>{track.title}</div>
         <div className="flex items-center gap-1.5 text-[13px] text-muted">
           {track.explicit && <ExplicitBadge />}
+          {albumDetail && !track.owned && <span className="shrink-0">Не скачан ·</span>}
           <span className="truncate">{sub}</span>
         </div>
       </div>

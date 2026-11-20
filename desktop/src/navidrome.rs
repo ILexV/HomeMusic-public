@@ -362,13 +362,19 @@ pub fn album_tracks(config: &ServerConfig, album_id: &str) -> Result<LibraryQueu
 
 /// Resolve an actual song's album identity, not a title match or partial queue.
 pub fn song_album(config: &ServerConfig, song_id: &str) -> Result<(String, LibraryQueue), String> {
+    let id = song_album_id(config, song_id)?;
+    let tracks = album_tracks(config, &id)?;
+    Ok((id, tracks))
+}
+
+pub(super) fn song_album_id(config: &ServerConfig, song_id: &str) -> Result<String, String> {
     require_login(config)?;
     let body = http_json(&view_url(config, "getSong.view", &format!("id={}", encode(song_id))))?;
     check_body(config, &body)?;
     let id = body.get("subsonic-response").and_then(|v| v.get("song"))
         .and_then(|v| v.get("albumId")).and_then(Value::as_str)
         .filter(|s| !s.is_empty()).ok_or("Navidrome: нет данных альбома")?;
-    Ok((id.to_owned(), album_tracks(config, id)?))
+    Ok(id.to_owned())
 }
 
 /// Albums and artists matching a search box query. An empty query does not call the server.

@@ -1,4 +1,5 @@
-import { Theme, EqButton, ScrollPort } from "theme.slint";
+import { Button, Slider } from "std-widgets.slint";
+import { Theme, ScrollPort } from "theme.slint";
 
 export struct DeviceRow {
     id: string,
@@ -34,28 +35,30 @@ export component DevicesPanel inherits Rectangle {
         Text { text: root.track; color: Theme.text; overflow: elide; }
         HorizontalLayout {
             spacing: 6px;
-            EqButton { label: root.detached ? "Подключить" : "Здесь"; tip: "Продолжить общую сессию на компьютере"; enabled: !root.busy; clicked => { root.take-here(); } }
-            EqButton { label: "Назад"; enabled: root.has-session && !root.busy; clicked => { root.command("prev", 0); } }
-            EqButton { label: root.playing ? "Пауза" : "Играть"; enabled: root.has-session && !root.busy; clicked => { root.command(root.playing ? "pause" : "play", 0); } }
-            EqButton { label: "Далее"; enabled: root.has-session && !root.busy; clicked => { root.command("next", 0); } }
+            Button { text: root.detached ? "Подключиться к сессии" : "Играть здесь"; enabled: !root.busy; clicked => { root.take-here(); } }
+            Button { text: "Назад"; enabled: root.has-session && !root.busy; clicked => { root.command("prev", 0); } }
+            Button { text: root.playing ? "Пауза" : "Играть"; enabled: root.has-session && !root.busy; clicked => { root.command(root.playing ? "pause" : "play", 0); } }
+            Button { text: "Далее"; enabled: root.has-session && !root.busy; clicked => { root.command("next", 0); } }
         }
-        if !root.detached : EqButton { label: "Слушать только здесь"; tip: "Отключиться от общей сессии, в том числе без сети"; clicked => { root.local-only(); } }
-        Text { text: "Позиция: " + round(root.position) + " / " + round(root.duration) + " с"; color: Theme.muted; font-size: 11px; }
-        Rectangle {
-            height: 16px; background: Theme.raised;
-            Rectangle { width: parent.width * (root.duration > 0 ? min(1, root.position / root.duration) : 0); height: 100%; background: Theme.orange; }
-            TouchArea { enabled: root.has-session && !root.busy && root.duration > 0; mouse-cursor: pointer; clicked => { root.command("seek", max(0, min(1, self.mouse-x / self.width)) * root.duration); } }
+        if !root.detached : Button { text: "Отключиться от общей сессии"; clicked => { root.local-only(); } }
+        if root.has-session : Text { text: "Позиция: " + round(root.position) + " / " + round(root.duration) + " с"; color: Theme.muted; }
+        if root.has-session : Slider {
+            accessible-label: "Позиция общей очереди";
+            minimum: 0; maximum: max(1, root.duration); value: root.position;
+            enabled: !root.busy && root.duration > 0;
+            released(value) => { root.command("seek", value); }
         }
-        HorizontalLayout {
+        if root.has-session : HorizontalLayout {
             spacing: 8px;
-            Text { text: "Громкость"; color: Theme.muted; }
-            Rectangle {
-                height: 16px; background: Theme.raised;
-                Rectangle { width: parent.width * root.volume; height: 100%; background: Theme.orange; }
-                TouchArea { enabled: root.has-session && !root.busy; mouse-cursor: pointer; clicked => { root.command("volume", max(0, min(1, self.mouse-x / self.width))); } }
+            Text { text: "Громкость"; color: Theme.muted; vertical-alignment: center; }
+            Slider {
+                accessible-label: "Громкость общей очереди";
+                minimum: 0; maximum: 1; step: 0.05; value: root.volume;
+                enabled: !root.busy;
+                released(value) => { root.command("volume", value); }
             }
         }
-        Rectangle {
+        if !root.detached : Rectangle {
             vertical-stretch: 1;
             min-height: 80px;
         ScrollPort {
@@ -66,13 +69,13 @@ export component DevicesPanel inherits Rectangle {
                     padding: 8px; spacing: 8px;
                     VerticalLayout {
                         Text { text: device.name; color: device.online ? Theme.text : Theme.dim; overflow: elide; }
-                        Text { text: device.detail; color: Theme.muted; font-size: 11px; overflow: elide; }
+                        Text { text: device.detail; color: Theme.muted; font-size: 13px; overflow: elide; }
                     }
-                    EqButton { label: device.owner ? "Активно" : "Передать"; enabled: device.online && !device.owner && root.has-session && !root.busy; clicked => { root.transfer(device.id); } }
+                    Button { text: device.owner ? "Активно" : "Передать"; enabled: device.online && !device.owner && root.has-session && !root.busy; clicked => { root.transfer(device.id); } }
                 }
             }
         }
         }
-        Text { text: "Локальные файлы без ID библиотеки передать нельзя. При потере связи общая сессия приостанавливается."; color: Theme.dim; font-size: 11px; wrap: word-wrap; }
+        Text { text: "Локальные файлы без ID библиотеки передать нельзя. При потере связи общая сессия приостанавливается."; color: Theme.dim; font-size: 13px; wrap: word-wrap; }
     }
 }

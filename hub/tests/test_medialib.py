@@ -106,6 +106,85 @@ async def test_album_songs_are_owned_tracks_with_the_hubs_refs(env):
     assert (await env["client"].get("/api/nd/albums/nope")).status_code == 404
 
 
+async def test_partial_album_catalog_preview_is_metadata_only(env, monkeypatch):
+    from sqlalchemy import func, select
+
+    from app.db import session_scope
+    from app.models import Album, DownloadItem, Track
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    missing = catalog.track.model_copy(update={"id": "101", "ref": "dz:101", "title": "Новый трек",
+                                               "track_no": 3, "isrc": None})
+    catalog.album.tracks = [catalog.track, missing]
+    monkeypatch.setattr(svc, "deezer", catalog)
+    async with session_scope() as s:
+        album = Album(uid=str(uuid.uuid4()), title=catalog.album.title, album_artist=catalog.album.artist,
+                      deezer_album_id=catalog.album.id)
+        s.add(album)
+        await s.flush()
+        track = await s.scalar(select(Track).where(Track.nd_song_id == "ndK"))
+        track.album_id = album_id = album.id
+
+    client = env["client"]
+    nd = await client.get("/api/nd/albums/alK?catalog=true")
+    assert nd.status_code == 200, nd.text
+    assert [(t["ref"], t["owned"], t["nd_song_id"]) for t in nd.json()["tracks"]] == [
+        ("dz:100", True, "ndK"), ("dz:101", False, None), ("nd:ndZ", True, "ndZ")]
+    managed = await client.get(f"/api/library/albums/{album_id}?catalog=true")
+    assert managed.status_code == 200, managed.text
+    assert [t["ref"] for t in managed.json()["tracks"]] == ["dz:100"]
+    assert [(t["ref"], t["owned"]) for t in managed.json()["other_tracks"]] == [("dz:101", False)]
+    async with session_scope() as s:
+        assert await s.scalar(select(func.count()).select_from(DownloadItem)) == 0
+    assert not catalog.previews
+
+
+@pytest.mark.parametrize("down", [False, True])
+async def test_album_falls_back_to_second_catalog(env, monkeypatch, down):
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    async def no_match(artist, title):
+        if down:
+            raise httpx.ConnectError("unavailable")
+        return [catalog.album.model_copy(update={"title": "Другой релиз"})]
+
+    class Hitmoz:
+        async def search_albums(self, query):
+            return [catalog.album.model_copy(update={"ref": "hm:99", "source": "hm", "id": "99"})]
+
+        async def get_album(self, id_):
+            assert id_ == "99"
+            missing = catalog.track.model_copy(update={"ref": "hm:2", "source": "hm", "id": "2",
+                                                       "title": "Недостающий трек", "isrc": None})
+            return catalog.album.model_copy(update={"tracks": [missing]})
+
+    monkeypatch.setattr(catalog, "search_albums", no_match)
+    monkeypatch.setattr(svc, "deezer", catalog)
+    monkeypatch.setattr(svc, "hitmoz_catalog", Hitmoz())
+    response = await env["client"].get("/api/nd/albums/alK?catalog=true")
+    assert response.status_code == 200, response.text
+    assert [(t["ref"], t["owned"]) for t in response.json()["tracks"]] == [
+        ("hm:2", False), ("dz:100", True), ("nd:ndZ", True)]
+
+
+async def test_unidentified_album_requires_unambiguous_release(env, monkeypatch):
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    async def ambiguous(artist, title):
+        return [catalog.album, catalog.album.model_copy(update={"ref": "dz:11"})]
+    monkeypatch.setattr(catalog, "search_albums", ambiguous)
+    monkeypatch.setattr(svc, "deezer", catalog)
+    response = await env["client"].get("/api/nd/albums/alK?catalog=true")
+    assert response.status_code == 200, response.text
+    assert [t["ref"] for t in response.json()["tracks"]] == ["dz:100", "nd:ndZ"]
+
+
 async def test_liked_lists_the_newest_like_first(env):
     r = await env["client"].get("/api/nd/liked")
     assert r.status_code == 200, r.text

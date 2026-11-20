@@ -1,5 +1,5 @@
-import { CheckBox, ComboBox } from "std-widgets.slint";
-import { Theme, EqButton, SearchField, ScrollPort } from "theme.slint";
+import { Button, CheckBox, ComboBox } from "std-widgets.slint";
+import { Theme, SearchField, ScrollPort } from "theme.slint";
 
 export struct SmartPlaylistRow { id: string, name: string, detail: string }
 export struct SmartRuleRow { kind: int, value: string, maximum: string, flag: bool }
@@ -39,8 +39,8 @@ export component SmartPlaylistsPanel inherits Rectangle {
             spacing: 8px;
             Text { text: "Плейлисты по правилам"; color: Theme.text; font-size: 15px; wrap: word-wrap; }
             HorizontalLayout {
-                EqButton { label: "Новый"; enabled: !root.busy; clicked => { root.new-playlist(); } }
-                EqButton { label: "Обновить"; enabled: !root.busy; clicked => { root.refresh(); } }
+                Button { text: "Новый"; enabled: !root.busy; clicked => { root.new-playlist(); } }
+                Button { text: "Обновить"; enabled: !root.busy; clicked => { root.refresh(); } }
             }
             Rectangle {
                 vertical-stretch: 1;
@@ -52,7 +52,7 @@ export component SmartPlaylistsPanel inherits Rectangle {
                     VerticalLayout {
                         padding: 6px;
                         Text { text: row.name; color: Theme.text; overflow: elide; }
-                        Text { text: row.detail; color: Theme.dim; font-size: 11px; overflow: elide; }
+                        Text { text: row.detail; color: Theme.dim; font-size: 13px; overflow: elide; }
                     }
                     TouchArea { enabled: !root.busy; clicked => { root.select-playlist(row.id); } }
                 }
@@ -79,7 +79,7 @@ export component SmartPlaylistsPanel inherits Rectangle {
                                 current-index: rule.kind;
                                 selected(value) => { root.rule-kind(index, self.current-index); }
                             }
-                            EqButton { label: "Удалить правило"; clicked => { root.remove-rule(index); } }
+                            Button { text: "Удалить правило"; clicked => { root.remove-rule(index); } }
                         }
                         if rule.kind == 0: CheckBox {
                             text: "Наоборот: без отметки «Нравится»";
@@ -102,13 +102,13 @@ export component SmartPlaylistsPanel inherits Rectangle {
                         }
                         if rule.kind == 2: Text {
                             text: "Нет прослушиваний за всю доступную историю";
-                            color: Theme.dim; font-size: 11px; wrap: word-wrap;
+                            color: Theme.dim; font-size: 13px; wrap: word-wrap;
                         }
                     }
                 }
             }
             }
-            EqButton { label: "Добавить правило"; clicked => { root.add-rule(); } }
+            Button { text: "Добавить правило"; clicked => { root.add-rule(); } }
             HorizontalLayout {
                 ComboBox {
                     model: ["По названию", "По исполнителю", "По году", "По добавлению", "По прослушиванию", "Случайно"];
@@ -118,10 +118,10 @@ export component SmartPlaylistsPanel inherits Rectangle {
                 SearchField { text <=> root.limit; hint: "Лимит (1–2000)"; }
             }
             HorizontalLayout {
-                EqButton { label: "Сохранить"; enabled: !root.busy; clicked => { root.save(); } }
-                EqButton { label: "Удалить"; enabled: !root.busy && root.selected != ""; clicked => { root.delete-playlist(); } }
-                EqButton { label: "Проверить"; enabled: !root.busy; clicked => { root.preview(); } }
-                EqButton { label: "Играть"; enabled: !root.busy; clicked => { root.play(); } }
+                Button { text: "Сохранить"; enabled: !root.busy; clicked => { root.save(); } }
+                Button { text: "Удалить"; enabled: !root.busy && root.selected != ""; clicked => { root.delete-playlist(); } }
+                Button { text: "Проверить"; enabled: !root.busy; clicked => { root.preview(); } }
+                Button { text: "Играть"; enabled: !root.busy; clicked => { root.play(); } }
             }
             Text {
                 text: root.busy ? "Загрузка…" : root.status;

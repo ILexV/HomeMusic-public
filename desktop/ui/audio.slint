@@ -11,21 +11,24 @@ export component AudioPanel inherits Rectangle {
     callback audio-set-normalization(int);
     background: Theme.panel;
     VerticalLayout {
-        padding: 18px;
-        spacing: 14px;
-        Text { text: "ПЕРЕХОДЫ И ГРОМКОСТЬ"; color: Theme.text; font-size: 15px; font-weight: 600; }
-        Text { text: "Предзагрузка следующего трека включена. При нулевом перекрытии — непрерывное воспроизведение."; color: Theme.muted; wrap: word-wrap; }
-        Text { text: "Перекрытие: " + round(root.audio-crossfade * 10) / 10 + " с"; color: Theme.text; }
+        padding: 24px;
+        spacing: 12px;
+        Text { text: "Звук и переходы"; color: Theme.text; font-size: 22px; font-weight: 600; }
+        Text { text: "Изменения применяются сразу."; color: Theme.muted; }
+        Text { text: "Плавный переход между треками"; color: Theme.text; font-size: 17px; }
+        Text { text: root.audio-crossfade == 0 ? "Без перекрытия" : "Перекрытие: " + round(root.audio-crossfade * 10) / 10 + " с"; color: Theme.muted; }
         Slider {
-            minimum: 0; maximum: 12; value: root.audio-crossfade;
+            minimum: 0; maximum: 12; step: 0.1; value: root.audio-crossfade;
             changed(value) => { root.audio-set-crossfade(value); }
         }
         CheckBox {
             text: "Разрешить перекрытие внутри альбома";
+            enabled: root.audio-crossfade > 0;
             checked: root.audio-overlap-album;
             toggled => { root.audio-set-overlap-album(self.checked); }
         }
-        Text { text: "Нормализация громкости"; color: Theme.text; font-size: 14px; }
+        Rectangle { height: 1px; background: Theme.line; }
+        Text { text: "Нормализация громкости"; color: Theme.text; font-size: 17px; }
         ComboBox {
             model: ["Выключена", "По треку", "По альбому"];
             current-index: root.audio-normalization;
@@ -33,8 +36,8 @@ export component AudioPanel inherits Rectangle {
         }
         Text { text: root.audio-status; color: Theme.orange; wrap: word-wrap; }
         Text {
-            text: "Нет тегов громкости? Аудио анализируется в фоне целиком. Пока анализ не окончен, усиление не меняется. Режим альбома использует единый коэффициент для полного альбома и сохраняет разницу громкости между треками. Для локальных файлов без данных альбома доступен режим трека.";
-            color: Theme.muted; wrap: word-wrap; font-size: 12px;
+            text: "«По треку» выравнивает громкость песен. «По альбому» сохраняет разницу между ними. Без тегов громкости плеер анализирует запись в фоне.";
+            color: Theme.muted; wrap: word-wrap;
         }
         Rectangle { vertical-stretch: 1; }
     }

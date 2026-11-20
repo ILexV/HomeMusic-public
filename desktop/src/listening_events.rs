@@ -73,6 +73,10 @@ fn context_at(queue: &Queue, wave: &hub::WaveLive, index: usize) -> String {
 }
 
 impl State {
+    pub fn attempt_token(&self) -> Option<u64> {
+        self.attempt.as_ref().and_then(|attempt| attempt.token)
+    }
+
     pub fn failed(&mut self, hub: &HubState) {
         self.emit("error", None, hub);
     }

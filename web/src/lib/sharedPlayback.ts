@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { errorMessage } from '../api/client';
 import { playbackRequest, type PlaybackAck, type PlaybackCommand, type PlaybackControl, type PlaybackSnapshot, type PlaybackView } from '../api/playback';
 import { newEventId } from './plays';
+import { confirmDialog, toast } from './ui';
 
 export interface PlaybackAdapter {
   snapshot(): PlaybackSnapshot | null;
@@ -287,21 +288,39 @@ class Runtime {
     }
   }
 
-  localAllowed() {
+  localAllowed(onChooseLocal?: () => void) {
     const view = state.view;
+    const transferring = () => !!this.prepared || ['preparing', 'stopping', 'starting'].includes(state.view?.handoff?.phase ?? '');
+    let reason: string;
     if (this.recoveryFence) {
-      update({ error: 'Сеанс восстанавливался после потери связи. Подтвердите продолжение здесь или выберите локальный режим.' });
-      return false;
-    }
-    if (this.leaseLost && this.published) {
-      update({ error: 'Нет связи с сервером. Дождитесь подключения перед продолжением.' });
-      return false;
-    }
-    if (this.prepared || (view?.handoff && ['preparing', 'stopping', 'starting'].includes(view.handoff.phase)) || (view?.owner && view.owner !== this.id)) {
-      update({ error: 'Воспроизведение на другом устройстве или передача активны. Нажмите «Слушать здесь» в панели устройств.' });
-      return false;
-    }
-    return true;
+      reason = 'Подтвердите восстановление сеанса в панели устройств.';
+    } else if (this.leaseLost && this.published) {
+      reason = 'Нет связи с сервером. Дождитесь подключения перед продолжением.';
+    } else if (transferring()) {
+      reason = 'Дождитесь окончания передачи воспроизведения.';
+    } else if (view?.owner && view.owner !== this.id) {
+      const owner = view.devices.find((device) => device.id === view.owner);
+      reason = owner ? `Общий сеанс закреплён за устройством «${owner.name}»${owner.online ? '' : ' (не в сети)'}.` : 'Общий сеанс закреплён за другим устройством.';
+      if (onChooseLocal) {
+        void confirmDialog({
+          title: 'Слушать в этом браузере?',
+          body: `${reason} В локальном режиме выбранный трек заиграет здесь. Очередь и звук другого устройства не изменятся.`,
+          okLabel: 'Слушать локально',
+        }).then((ok) => {
+          if (!ok || this.ctl.signal.aborted) return;
+          if (state.view?.owner !== view.owner || transferring() || this.recoveryFence) {
+            toast('Состояние общего сеанса изменилось. Повторите выбор трека.', 'info');
+            return;
+          }
+          detachPlayback();
+          onChooseLocal();
+        });
+        return false;
+      }
+    } else return true;
+    update({ error: reason });
+    if (onChooseLocal) toast(reason, 'info', { label: 'Устройства', to: '/player' });
+    return false;
   }
 }
 
@@ -341,8 +360,9 @@ export function attachPlayback() {
   try { localStorage.removeItem(`hm-playback-local-only:${activeAccount}`); } catch { /* Optional preference. */ }
   runtime = new Runtime(activeAdapter, true);
 }
-export function localPlaybackAllowed() {
-  return runtime?.localAllowed() ?? true;
+/** Explicit play gestures can opt out of a foreign session; background transitions never detach it. */
+export function localPlaybackAllowed(onChooseLocal?: () => void) {
+  return runtime?.localAllowed(onChooseLocal) ?? true;
 }
 export function claimPlayback() {
   return runtime?.action('claim');

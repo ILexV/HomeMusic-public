@@ -265,6 +265,7 @@ function Queue({ queue, index, onWave }: { queue: readonly ListenTrack[]; index:
                 </span>
               </span>
             </button>
+            <LikeButton songId={t.nd_song_id} refId={t.ref} title={t.title} size={17} className="w-9" data={{ ...t }} />
             {i > index + 1 && <IconButton icon="back" label="Поднять выше" onClick={() => moveInQueue(i, i - 1)} size={18} className="w-9 rotate-90 text-muted" />}
             {i !== index && <IconButton icon="x" label="Убрать из очереди" onClick={() => removeFromQueue(i)} size={18} className="w-9 text-muted" />}
             <TrackMenuButton track={t} className="w-9" inPlayer />

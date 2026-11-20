@@ -213,6 +213,7 @@ export type ReleaseType = 'album' | 'single' | 'ep' | 'compilation';
 
 export interface LibTrackOut {
   id: number;
+  ref?: string | null;
   nd_song_id: string | null;
   album_id: number | null;
   artist: string;
@@ -245,6 +246,7 @@ export interface LibAlbumOut {
   has_cover: boolean;
   nd_album_id?: string | null;
   tracks?: LibTrackOut[] | null;
+  other_tracks?: TrackOut[];
 }
 
 export interface AlbumPatchIn {

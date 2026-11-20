@@ -1,5 +1,5 @@
-import { Palette } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Button, Palette } from "std-widgets.slint";
+import { Theme, ScrollPort } from "theme.slint";
 import { AudioPanel } from "audio.slint";
 import { ModesPanel, ModeRecommendation } from "modes.slint";
 import { StreamInfoPanel } from "stream-info.slint";
@@ -13,11 +13,11 @@ export { RecommendationRow }
 export { ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow }
 
 export component ToolsWindow inherits Window {
-    title: "HomeMusic · Управление плеером";
+    title: "HomeMusic · Настройки и инструменты";
     icon: @image-url("../assets/icon.png");
     background: Theme.bg;
     default-font-size: 14px;
-    preferred-width: 900px;
+    preferred-width: 960px;
     preferred-height: 680px;
     min-width: 760px;
     min-height: 560px;
@@ -159,21 +159,34 @@ export component ToolsWindow inherits Window {
     HorizontalLayout {
         spacing: 1px;
         Rectangle {
-            width: 174px;
+            width: 192px;
             background: Theme.panel;
-            VerticalLayout {
-                padding: 12px;
-                spacing: 6px;
-                Text { text: "ПЛЕЕР"; color: Theme.dim; font-size: 11px; height: 32px; }
-                for label[index] in ["Звук и переходы", "Режим очереди", "Источник трека", "Офлайн-музыка", "Текст песни", "Умные плейлисты", "Устройства", "Подключение", "Рекомендации"] : Rectangle {
-                    height: 42px;
-                    border-radius: 4px;
-                    background: root.active-panel == index ? Theme.raised : (tab.has-hover ? #ffffff08 : transparent);
-                    if root.active-panel == index : Rectangle { x: 0px; width: 3px; height: 24px; y: 9px; background: Theme.orange; }
-                    Text { x: 12px; width: parent.width - 20px; text: label; color: root.active-panel == index ? Theme.text : Theme.muted; vertical-alignment: center; font-size: 13px; }
-                    tab := TouchArea { mouse-cursor: pointer; clicked => { root.active-panel = index; } }
+            ScrollPort {
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 5px;
+                    Text { text: "Настройки"; color: Theme.text; font-size: 22px; font-weight: 600; }
+                    for entry in [
+                        { panel: 0, group: "Воспроизведение", name: "Звук и переходы" },
+                        { panel: 1, group: "", name: "Режим очереди" },
+                        { panel: 8, group: "", name: "Рекомендации" },
+                        { panel: 7, group: "Подключение и файлы", name: "Учётная запись" },
+                        { panel: 6, group: "", name: "Устройства" },
+                        { panel: 3, group: "", name: "Офлайн-музыка" },
+                        { panel: 2, group: "Инструменты", name: "Источник трека" },
+                        { panel: 4, group: "", name: "Текст песни" },
+                        { panel: 5, group: "", name: "Умные плейлисты" },
+                    ] : VerticalLayout {
+                        if entry.group != "" : Text {
+                            height: 32px; vertical-alignment: bottom;
+                            text: entry.group; font-size: 13px; color: Theme.muted;
+                        }
+                        Button {
+                            text: entry.name; checked: root.active-panel == entry.panel;
+                            clicked => { root.active-panel = entry.panel; }
+                        }
+                    }
                 }
-                Rectangle { vertical-stretch: 1; }
             }
         }
         Rectangle {

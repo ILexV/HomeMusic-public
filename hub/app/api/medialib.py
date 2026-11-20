@@ -6,6 +6,7 @@ has these as native screens (Tempus); the PWA in a plain browser shows them from
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from datetime import datetime
 from urllib.parse import quote
 
@@ -15,12 +16,13 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import NdAlbumOut, NdArtistOut, NdArtistPageOut, NdHomeOut, NdLikedOut, NdSongOut
+from app.api.catalog import library_album_tracks
+from app.api.schemas import NdAlbumOut, NdArtistOut, NdArtistPageOut, NdHomeOut, NdLikedOut, NdSongOut, TrackOut
 from app.auth import current_user, user_navidrome
 from app.db import get_session
 from app.library.navidrome import NavidromeClient, SubsonicError
 from app.mixes.resolve import library_track
-from app.models import CatalogCache, ImportItem, Track, User
+from app.models import Album, CatalogCache, ImportItem, Track, User
 
 router = APIRouter(prefix="/api/nd", tags=["medialib"])
 
@@ -121,13 +123,55 @@ async def albums(type: str = "alphabeticalByName", offset: int = Query(0, ge=0),
     return [album_out(a) for a in await nd_call(user, lambda nd: nd.get_album_list2(type, size=size, offset=offset))]
 
 
+def complete_tracklist(local: list[NdSongOut], release: list[TrackOut]) -> list[NdSongOut]:
+    """Keep Navidrome identities (and local-only bonus tracks), in catalog order."""
+    by_song = {t.nd_song_id: i for i, t in enumerate(local) if t.nd_song_id}
+    by_ref = {t.ref: i for i, t in enumerate(local)}
+    by_name = defaultdict(list)
+    for i, t in enumerate(local):
+        by_name[t.artist.casefold(), t.title.casefold()].append(i)
+    used = set()
+    rows = []
+    for track in release:
+        index = by_ref.get(track.ref)
+        if index is None:
+            index = by_song.get(track.nd_song_id)
+        if index is None:
+            candidates = [i for i in by_name[track.artist.casefold(), track.title.casefold()] if i not in used
+                          and (not track.duration_s or not local[i].duration_s or abs(track.duration_s - local[i].duration_s) <= 3)
+                          and (not track.track_no or not local[i].track_no or track.track_no == local[i].track_no)
+                          and (track.disc_no or 1) == (local[i].disc_no or 1)]
+            if len(candidates) == 1:
+                index = candidates[0]
+        if index is None or index in used:
+            rows.append(NdSongOut(**track.model_dump()))
+        else:
+            used.add(index)
+            song = local[index]
+            update = {"album_ref": track.album_ref, "track_no": track.track_no or song.track_no}
+            if song.source == "nd":
+                update.update(ref=track.ref, id=track.id, source=track.source)
+            rows.append(song.model_copy(update=update))
+    rows.extend(t for i, t in enumerate(local) if i not in used)
+    return rows
+
+
 @router.get("/albums/{album_id}", response_model=NdAlbumOut)
-async def album(album_id: str, user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
+async def album(album_id: str, catalog: bool = False, user: User = Depends(current_user),
+                s: AsyncSession = Depends(get_session, scope="function")):
     a = await nd_call(user, lambda nd: nd.get_album(album_id))
     if not a.get("id"):
         raise HTTPException(404, "Альбом не найден")
     out = album_out(a)
     out.tracks = await songs_out(s, a.get("song") or [])
+    if catalog and out.tracks:
+        local_id = next((t.library_track_id for t in out.tracks if t.library_track_id), None)
+        deezer_id = await s.scalar(select(Album.deezer_album_id).join(Track).where(Track.id == local_id)) if local_id else None
+        release = await library_album_tracks(s, user.id, out.artist, out.title, out.year, deezer_id)
+        if release:
+            out.tracks = complete_tracklist(out.tracks, release)
+            out.song_count = len(out.tracks)
+            out.duration_s = sum(t.duration_s or 0 for t in out.tracks)
     return out
 
 

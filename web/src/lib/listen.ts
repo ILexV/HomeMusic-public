@@ -527,7 +527,7 @@ export function listen(track: ListenTrack, queue?: readonly ListenTrack[], conte
 }
 
 function startList(track: ListenTrack, trigger: PlayTrigger, queue?: readonly ListenTrack[], context?: string, origin?: LaunchOrigin) {
-  if (!applyingShared && !localPlaybackAllowed()) return;
+  if (!applyingShared && !localPlaybackAllowed(() => startList(track, trigger, queue, context, origin))) return;
   listContext = context ?? routeContext();
   listLaunch = newLaunch(listContext, origin);
   const source = queue?.some((t) => t === track || t.ref === track.ref) ? queue : [track];
@@ -556,6 +556,7 @@ function startList(track: ListenTrack, trigger: PlayTrigger, queue?: readonly Li
 /** «Слушать» of a whole list: from its first track (with shuffle on, a random one). `shuffle` sets the mode. */
 export function listenAll(list: readonly ListenTrack[], opts: { shuffle?: boolean; context?: string; origin?: LaunchOrigin } = {}) {
   if (!list.length) return;
+  if (!localPlaybackAllowed(() => listenAll(list, opts))) return;
   if (opts.shuffle !== undefined) setModes({ shuffle: opts.shuffle });
   // starts over even when the first track is the one playing (listen() would pause it)
   startList(state.shuffle ? list[Math.floor(Math.random() * list.length)] : list[0], 'auto', list, opts.context, opts.origin);
@@ -799,6 +800,7 @@ export function moveInQueue(from: number, to: number) {
 
 /** A tap on a track of the queue: it plays now, the queue stays as it is. */
 export function playQueueAt(index: number) {
+  if (!localPlaybackAllowed(() => playQueueAt(index))) return;
   if (index === state.index && state.phase !== 'ended' && state.phase !== 'error') return toggle();
   if (index >= 0 && index < state.queue.length) start(state.queue, index, 'manual');
 }
@@ -863,7 +865,7 @@ export function retryRecording(ref: string) {
 }
 
 function resume() {
-  if (!applyingShared && !localPlaybackAllowed()) return;
+  if (!applyingShared && !localPlaybackAllowed(resume)) return;
   const a = audio;
   const track = state.track;
   if (!a || !track) return;

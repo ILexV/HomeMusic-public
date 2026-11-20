@@ -344,8 +344,8 @@ export function NdAlbumPage({ id }: { id: string }) {
       <ListActions tracks={tracks} context="album" />
       <ul>
         {tracks.map((t, i) => (
-          <li key={`${t.nd_song_id}:${i}`}>
-            <TrackRow track={t} number={t.track_no ?? i + 1} queue={tracks} link={false} />
+          <li key={`${t.ref}:${i}`}>
+            <TrackRow track={t} number={t.track_no ?? i + 1} albumDetail queue={tracks} link={false} />
           </li>
         ))}
       </ul>

@@ -194,6 +194,10 @@ impl Hub {
         Ok(download_summary(&body))
     }
 
+    pub(super) fn library_album(&self, id: &str) -> Result<Value, String> {
+        self.send("GET", &format!("/api/nd/albums/{}?catalog=true", encode(id)), None)
+    }
+
     pub fn download_album(&self, reference: &str) -> Result<String, String> {
         let body = self.send(
             "POST",
@@ -1086,7 +1090,7 @@ fn playables(value: Option<&Value>) -> Vec<Playable> {
         .unwrap_or_default()
 }
 
-fn playable(row: &Value) -> Option<Playable> {
+pub(super) fn playable(row: &Value) -> Option<Playable> {
     let mut nd_song_id = text(row, "nd_song_id");
     let mut reference = text(row, "ref");
     if nd_song_id.is_empty() && reference.starts_with("nd:") {

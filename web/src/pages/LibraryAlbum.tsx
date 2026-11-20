@@ -6,6 +6,7 @@ import { AlbumPicker } from '../components/pickers';
 import { Button, Checkbox, Cover, ErrorState, ExplicitBadge, Field, IconButton, Loading, PageHeader, SectionTitle, Sheet, cx } from '../components/ui';
 import { fmtDuration, fmtLength, providerLabel, toIntOrNull, tracksWord, warningText } from '../lib/format';
 import { useAsync } from '../lib/hooks';
+import { TrackRow } from '../components/catalog';
 import { LikeButton } from '../components/LikeButton';
 import { TrackMenuButton } from '../components/TrackMenu';
 import { listen, listenAll, type ListenTrack } from '../lib/listen';
@@ -103,7 +104,7 @@ export function LibraryAlbumPage({ id }: { id: number }) {
     if (!ok) return;
     const r = await attempt(() => api.deleteTrack(t.id), 'Трек удалён');
     if (r) {
-      res.setData((prev) => (prev ? { ...prev, track_count: prev.track_count - 1, tracks: (prev.tracks ?? []).filter((x) => x.id !== t.id) } : prev));
+      res.reload(true);
       toggle(t.id, false);
     }
   };
@@ -127,9 +128,9 @@ export function LibraryAlbumPage({ id }: { id: number }) {
       <AlbumForm
         album={album}
         coverSrc={album.has_cover ? libraryCoverUrl(album.id, 600, coverRev) : null}
-        onSaved={(a) => res.setData((prev) => ({ ...a, tracks: a.tracks ?? prev?.tracks }))}
+        onSaved={() => res.reload(true)}
         onCover={(a) => {
-          res.setData((prev) => ({ ...a, tracks: a.tracks ?? prev?.tracks }));
+          res.setData((prev) => ({ ...a, tracks: a.tracks ?? prev?.tracks, other_tracks: prev?.other_tracks }));
           setCoverRev(Date.now());
         }}
       />
@@ -188,7 +189,7 @@ export function LibraryAlbumPage({ id }: { id: number }) {
                 </span>
                 <span className="shrink-0 text-xs tabular-nums text-dim">{fmtDuration(t.duration_s)}</span>
               </button>
-              <LikeButton songId={t.nd_song_id} title={t.title} className="w-10" />
+              <LikeButton songId={t.nd_song_id} refId={t.ref} title={t.title} className="w-10" />
               {playable.includes(t) && (
                 <IconButton icon="play" label={`Слушать «${t.title}»`} className="!text-accent" size={20} onClick={() => playFrom(t)} />
               )}
@@ -197,6 +198,15 @@ export function LibraryAlbumPage({ id }: { id: number }) {
             </li>
           ))}
         </ul>
+      )}
+
+      {!!album.other_tracks?.length && (
+        <section aria-label="Остальные треки релиза">
+          <SectionTitle>Остальные треки релиза · {album.other_tracks.length}</SectionTitle>
+          {album.other_tracks.map((t) => (
+            <TrackRow key={t.ref} track={t} number={t.track_no ?? undefined} albumDetail link={false} />
+          ))}
+        </section>
       )}
 
       {selected.size > 0 && (

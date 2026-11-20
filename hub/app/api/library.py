@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.catalog import library_album_tracks
 from app.api.schemas import (
     AlbumCreateIn,
     AlbumMergeIn,
@@ -39,6 +40,7 @@ router = APIRouter(tags=["library"])
 
 def track_out(t: Track) -> LibTrackOut:
     return LibTrackOut(
+        ref=f"dz:{t.deezer_track_id}" if t.deezer_track_id else None,
         id=t.id, nd_song_id=t.nd_song_id, album_id=t.album_id, artist=t.artist, title=t.title, album=t.album,
         album_artist=t.album_artist, track_no=t.track_no, disc_no=t.disc_no, year=t.year, duration_s=t.duration_s,
         bitrate_kbps=t.bitrate_kbps, codec=t.codec, explicit=t.explicit, source=t.source, locked=t.locked,
@@ -114,8 +116,15 @@ async def track_source(nd_song_id: str, user: User = Depends(current_user),
 
 
 @router.get("/api/library/albums/{album_id}", response_model=LibAlbumOut)
-async def get_album(album_id: int, user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
-    return await album_out(s, await _album(s, album_id), with_tracks=True)
+async def get_album(album_id: int, catalog: bool = False, user: User = Depends(current_user),
+                    s: AsyncSession = Depends(get_session, scope="function")):
+    out = await album_out(s, await _album(s, album_id), with_tracks=True)
+    if catalog:
+        release = await library_album_tracks(s, user.id, out.album_artist, out.title, out.year, out.deezer_album_id)
+        local_ids = {t.id for t in out.tracks or ()}
+        local_refs = {t.ref for t in out.tracks or () if t.ref}
+        out.other_tracks = [t for t in release if t.library_track_id not in local_ids and t.ref not in local_refs]
+    return out
 
 
 @router.patch("/api/library/albums/{album_id}", response_model=LibAlbumOut)

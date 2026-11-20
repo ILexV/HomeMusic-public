@@ -518,7 +518,7 @@ unlike the wave). The rows are kept for the analytics: `smart_sessions`, `smart_
 | GET | `/api/library/albums?q=&offset=0&limit=50` | `LibAlbumOut[]` |
 | POST | `/api/library/albums` | `AlbumCreateIn` → `LibAlbumOut` (empty custom album / compilation) |
 | GET | `/api/library/track-source?nd_song_id=` | `TrackSourceOut` `{source, source_url, acquired_at}` — where the file came from (`source`: `hitmoz`, `hitmos_fm`, `ytdlp`, `upload`, `manual`); `404` — not a Hub library track (the app's track info) |
-| GET | `/api/library/albums/{id}` | `LibAlbumOut` with `tracks` |
+| GET | `/api/library/albums/{id}` | `LibAlbumOut` with editable local `tracks`; `?catalog=true` also returns `other_tracks` from the matching release, without importing audio |
 | PATCH | `/api/library/albums/{id}` | `AlbumPatchIn` → `LibAlbumOut` (rename, album artist, year, genre, type) |
 | PUT | `/api/library/albums/{id}/cover` | multipart `file` (image) → `LibAlbumOut` |
 | GET | `/api/library/albums/{id}/cover?size=300` | image/jpeg |
@@ -576,7 +576,7 @@ from it → `502`.
 |---|---|---|
 | GET | `/api/nd/home` | `NdHomeOut {recent, frequent, newest, starred: NdAlbumOut[] (15 each), radio: NdArtistOut[]}` — the rows of «Главная»; `radio` («Радиостанции», 30): liked artists first, then by album count |
 | GET | `/api/nd/albums?type=alphabeticalByName&offset=0&size=50` | `NdAlbumOut[]` — Subsonic `getAlbumList2`; `type` one of `recent`, `frequent`, `newest`, `starred`, `alphabeticalByName`, `alphabeticalByArtist`, `random` (else `422`); `size` 1–500 |
-| GET | `/api/nd/albums/{id}` | `NdAlbumOut` with `tracks: NdSongOut[]`; `404` unknown |
+| GET | `/api/nd/albums/{id}` | `NdAlbumOut` with `tracks: NdSongOut[]`; `?catalog=true` merges the catalog tracklist in release order, retaining local-only tracks. `owned=false` denotes catalog-only rows playable by `ref`. No audio download is queued; unavailable or ambiguous release metadata leaves the local list intact. `404` unknown album |
 | GET | `/api/nd/artists` | `NdArtistOut[]` — every artist (the alphabetical index flattened) |
 | GET | `/api/nd/artists/{id}` | `NdArtistPageOut {artist, albums}` — albums by year, newest first, those without a year last, ties by title; `404` unknown |
 | GET | `/api/nd/liked` | `NdLikedOut {songs, albums, artists}` — Navidrome stars merged with own track favorites and pending import likes. Own decisions override ND/import state; aliases deduplicate songs. Catalog-only songs have `owned=false`, nullable `nd_song_id` and remain playable by `ref`; listing never starts downloads or catalog requests. Stored subject/import/playback metadata supplies names (ref fallback when unavailable). Songs and albums newest ♥ first; unknown import dates last. Successful `/api/star` commits before publishing a `library` SSE (`starred`/`unstarred`). |

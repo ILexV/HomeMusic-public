@@ -169,6 +169,7 @@ class AdminUserDetailOut(AdminUserOut):
 
 class LibTrackOut(BaseModel):
     id: int
+    ref: str | None = None
     nd_song_id: str | None
     album_id: int | None
     artist: str
@@ -208,6 +209,7 @@ class LibAlbumOut(BaseModel):
     has_cover: bool = False
     nd_album_id: str | None = None
     tracks: list[LibTrackOut] | None = None
+    other_tracks: list[TrackOut] = []
 
 
 class AlbumPatchIn(BaseModel):

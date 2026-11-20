@@ -795,13 +795,16 @@ export component QueueRow inherits Rectangle {
             horizontal-alignment: right;
             vertical-alignment: center;
         }
-        Text {
-            text: root.item.title;
-            color: root.item.current ? #1b1b1b : Theme.text;
-            font-size: 13px;
-            overflow: elide;
-            vertical-alignment: center;
+        VerticalLayout {
             horizontal-stretch: 1;
+            alignment: center;
+            Text { text: root.item.title; color: root.item.current ? #1b1b1b : Theme.text; font-size: 13px; overflow: elide; }
+            if root.item.meta != "" : Text { text: root.item.meta; color: Theme.muted; font-size: 10px; overflow: elide; }
+        }
+        if root.item.liked : Glyph {
+            kind: "heart"; tint: Theme.orange;
+            width: 13px; height: 13px;
+            accessible-role: image; accessible-label: "В понравившихся";
         }
         Text {
             text: root.item.duration;

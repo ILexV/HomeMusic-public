@@ -1,5 +1,5 @@
-import { LineEdit, ScrollView } from "std-widgets.slint";
-import { Theme, EqButton } from "theme.slint";
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
 
 export component ConnectionPanel inherits Rectangle {
     in-out property <string> server;
@@ -33,9 +33,10 @@ export component ConnectionPanel inherits Rectangle {
             Text { text: "Адрес HomeMusic Hub"; color: Theme.text; }
             LineEdit {
                 text <=> root.hub;
-                placeholder-text: "https://hub.example.org (пусто — тот же хост, порт 8080)";
+                placeholder-text: "https://hub.example.org";
                 edited(value) => { root.changed(); }
             }
+            Text { text: "Можно оставить пустым: тот же хост, что у Navidrome, порт 8080."; color: Theme.muted; wrap: word-wrap; }
             Text { text: "Имя пользователя"; color: Theme.text; }
             LineEdit {
                 text <=> root.user;
@@ -56,13 +57,13 @@ export component ConnectionPanel inherits Rectangle {
             Text { text: root.storage; color: Theme.dim; wrap: word-wrap; font-size: 12px; }
             HorizontalLayout {
                 spacing: 10px;
-                EqButton {
-                    label: "Проверить вход";
+                Button {
+                    text: "Проверить вход";
                     enabled: !root.busy;
                     clicked => { root.test(); }
                 }
-                EqButton {
-                    label: "Сохранить и переподключиться";
+                Button {
+                    text: "Сохранить и перезапустить плеер"; primary: true;
                     enabled: !root.busy;
                     clicked => { root.save(); }
                 }

@@ -1,5 +1,5 @@
 import { TrackList, TrackMenu } from "item-menus.slint";
-import { EmptyNote, Theme, TitleButton, VerticalScrollBar } from "theme.slint";
+import { EmptyNote, Glyph, Theme, TitleButton, VerticalScrollBar } from "theme.slint";
 import { QueueItem } from "types.slint";
 
 // Observe hover before dispatch to child controls, including the drag gutter outside the Flickable.
@@ -129,6 +129,7 @@ export component QueueView inherits Rectangle {
                             Text { text: item.title; color: item.current ? Theme.orange : Theme.text; font-size: 12px; overflow: elide; }
                             if item.meta != "" : Text { text: item.meta; color: Theme.dim; font-size: 10px; overflow: elide; }
                         }
+                        if item.liked : Glyph { kind: "heart"; tint: Theme.orange; width: 13px; height: 13px; accessible-role: image; accessible-label: "В понравившихся"; }
                         Text { text: item.duration; color: Theme.muted; font-size: 10px; }
                         Rectangle { width: 48px; }
                     }

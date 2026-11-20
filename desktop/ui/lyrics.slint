@@ -1,4 +1,5 @@
-import { Theme, ScrollPort, EqButton, SearchField } from "theme.slint";
+import { Button, CheckBox } from "std-widgets.slint";
+import { Theme, ScrollPort, SearchField } from "theme.slint";
 
 export struct LyricLine {
     text: string,
@@ -61,12 +62,7 @@ export component LyricsPanel inherits Rectangle {
         spacing: 8px;
         HorizontalLayout {
             Text { text: root.title; color: Theme.text; font-size: 15px; overflow: elide; vertical-alignment: center; }
-            EqButton {
-                label: root.following ? "Следить за строкой" : "Свободная прокрутка";
-                tip: "Автоматически прокручивать к текущей строке";
-                active: root.following;
-                clicked => { root.following = !root.following; }
-            }
+            CheckBox { text: "Следить за текущей строкой"; checked <=> root.following; }
         }
         if root.local : VerticalLayout {
             spacing: 5px;
@@ -78,10 +74,10 @@ export component LyricsPanel inherits Rectangle {
             HorizontalLayout {
                 spacing: 5px;
                 SearchField { text <=> root.query-album; hint: "Альбом (для точного совпадения)"; }
-                EqButton { label: "Найти текст"; enabled: root.query-title != "" && root.query-artist != ""; clicked => { root.search(); } }
+                Button { text: "Найти текст"; enabled: root.query-title != "" && root.query-artist != ""; clicked => { root.search(); } }
             }
         }
-        Text { text: root.note; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+        Text { text: root.note; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
         Rectangle {
             vertical-stretch: 1;
             min-height: 80px;

@@ -1,21 +1,19 @@
-//! A detailed energy envelope for the seek bar. Playback stays in libmpv.
+//! The seek bar uses the same native decoders as playback, on a silent background player.
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::{MediaSource, MediaSourceStream};
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use libmpv2::{events::Event, mpv_end_file_reason, Mpv};
+use tempfile::NamedTempFile;
 
 const BARS: usize = 4096;
-const HTTP_CAP: u64 = 20 * 1024 * 1024;
-const FILE_CAP: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 256;
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(180);
+// Bound scratch disk usage. Never present a prefix as the complete track.
+const MAX_DOWNLOAD: u64 = 1024 * 1024 * 1024;
 
 pub enum Update {
     Cleared,
@@ -48,11 +46,8 @@ impl WaveHub {
         let hub = Arc::clone(self);
         let cookie = cookie.to_owned();
         std::thread::spawn(move || {
-            let bytes = read_limited(&target, &cookie);
-            if hub.ticket.load(Ordering::Relaxed) != ticket {
-                return;
-            }
-            let update = match bytes.and_then(peaks_from_bytes) {
+            let current = || hub.ticket.load(Ordering::Relaxed) == ticket;
+            let update = match analyze(&target, &cookie, current) {
                 Some(peaks) => Update::Ready(peaks),
                 None => Update::Unavailable,
             };
@@ -65,8 +60,8 @@ impl WaveHub {
     }
 
     pub fn poll(&self) -> Option<Update> {
-        let current = self.ticket.load(Ordering::Relaxed);
         let mut slot = self.pending.lock().ok()?;
+        let current = self.ticket.load(Ordering::Relaxed);
         match slot.take() {
             Some((ticket, update)) if ticket == current => Some(update),
             _ => None,
@@ -74,8 +69,10 @@ impl WaveHub {
     }
 }
 
-
-fn read_limited(target: &str, cookie: &str) -> Option<Vec<u8>> {
+fn analyze(target: &str, cookie: &str, current: impl Fn() -> bool) -> Option<Vec<f32>> {
+    let deadline = std::time::Instant::now() + ANALYSIS_TIMEOUT;
+    let active = || current() && std::time::Instant::now() < deadline;
+    if !active() { return None; }
     if target.starts_with("http://") || target.starts_with("https://") {
         let mut builder = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(5))
@@ -93,137 +90,95 @@ fn read_limited(target: &str, cookie: &str) -> Option<Vec<u8>> {
                 .set("X-HomeMusic-Prefetch", "1");
         }
         let response = request.call().ok()?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(HTTP_CAP)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.is_empty() {
-            None
-        } else {
-            Some(bytes)
-        }
+        if response.status() != 200 { return None; }
+        let expected = response.header("Content-Length").and_then(|value| value.parse::<u64>().ok());
+        // Remote MP4/M4A can keep their sample tables after the audio. Spool the
+        // whole response to a private seekable file, not a truncated RAM prefix.
+        let mut audio = NamedTempFile::new().ok()?;
+        copy_complete(response.into_reader(), &mut audio, expected, MAX_DOWNLOAD, &active)?;
+        analyze_file(audio.path(), active)
     } else {
-        let file = std::fs::File::open(target).ok()?;
-        let mut bytes = Vec::new();
-        file.take(FILE_CAP).read_to_end(&mut bytes).ok()?;
-        if bytes.is_empty() {
-            None
-        } else {
-            Some(bytes)
-        }
+        analyze_file(Path::new(target), active)
     }
 }
 
-fn id3_audio_offset(bytes: &[u8]) -> usize {
-    let mut offset = 0;
-    while let Some(header) = bytes.get(offset..offset + 10) {
-        if &header[..3] != b"ID3" || !(2..=4).contains(&header[3])
-            || header[4] == 0xff || header[6..10].iter().any(|byte| byte & 0x80 != 0)
-        {
-            break;
+fn copy_complete(
+    mut source: impl Read, mut output: impl Write, expected: Option<u64>, limit: u64,
+    active: impl Fn() -> bool,
+) -> Option<()> {
+    if expected.is_some_and(|bytes| bytes > limit) { return None; }
+    let mut received = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    while active() {
+        let count = source.read(&mut buffer).ok()?;
+        if count == 0 {
+            return (received > 0 && expected.is_none_or(|size| received == size)).then_some(());
         }
-        let size = header[6..10].iter().fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
-        let footer = if header[3] == 4 && header[5] & 0x10 != 0 { 10 } else { 0 };
-        let Some(end) = offset.checked_add(10 + size + footer) else { break };
-        if end > bytes.len() {
-            break;
-        }
-        offset = end;
+        received += count as u64;
+        if received > expected.unwrap_or(limit) { return None; }
+        output.write_all(&buffer[..count]).ok()?;
     }
-    offset
+    None
 }
 
-pub fn peaks_from_bytes(bytes: Vec<u8>) -> Option<Vec<f32>> {
-    // The envelope needs no tags or embedded pictures. Skip bounded ID3v2 blocks:
-    // Symphonia 0.5 rejects the valid empty ID3 tag used by some MP3 previews.
-    let start = id3_audio_offset(&bytes);
-    let mut cursor = Cursor::new(bytes);
-    cursor.set_position(start as u64);
-    let source = OwnedBytes { inner: cursor };
-    let stream = MediaSourceStream::new(Box::new(source), Default::default());
-    let probed = symphonia::default::get_probe()
-        .format(
-            &Hint::new(),
-            stream,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .ok()?;
-    let mut format = probed.format;
-    let (track_id, params) = {
-        let track = format.default_track()?;
-        (track.id, track.codec_params.clone())
-    };
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
-        .ok()?;
+// libavfilter parses a graph and then parses each filter's options. Quote a
+// literal at both levels, including Windows drive letters and user-directory names.
+fn av_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
 
-    let capacity = params.n_frames.map(|frames| frames.div_ceil(CHUNK as u64).min(200_001) as usize).unwrap_or(0);
-    let mut chunk_peaks = Vec::with_capacity(capacity);
-    let mut chunk_energy = 0.0f64;
-    let mut chunk_n = 0usize;
-    let mut samples = None;
+fn analyze_file(path: &Path, active: impl Fn() -> bool) -> Option<Vec<f32>> {
+    if !path.is_file() || !active() { return None; }
+    let levels = NamedTempFile::new().ok()?.into_temp_path();
+    let file = av_quote(&av_quote(levels.to_str()?));
+    let graph = format!(
+        "asetnsamples=n={CHUNK}:p=0,astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file={file}"
+    );
+    // Pass the graph verbatim through mpv's filter-option parser.
+    let filter = format!("lavfi=graph=%{}%{graph}", graph.len());
+    let mpv = Mpv::with_initializer(|init| {
+        init.set_option("config", "no")?;
+        init.set_option("load-scripts", "no")?;
+        init.set_option("vid", "no")?;
+        init.set_option("audio-display", "no")?;
+        init.set_option("ytdl", "no")?;
+        init.set_option("access-references", "no")?;
+        init.set_option("msg-level", "all=no")?;
+        init.set_option("ao", "null")?;
+        init.set_option("ao-null-untimed", "yes")?;
+        init.set_option("af", filter.as_str())?;
+        Ok(())
+    }).ok()?;
+    mpv.command("loadfile", &[path.to_str()?, "replace"]).ok()?;
     loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(_) => break,
-        };
-        if packet.track_id() != track_id {
-            continue;
-        }
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
-            Err(_) => continue,
-        };
-        push_buffer(decoded, &mut samples, &mut chunk_peaks, &mut chunk_energy, &mut chunk_n);
-        if chunk_peaks.len() > 200_000 {
-            break;
+        if !active() { return None; }
+        match mpv.wait_event(0.025) {
+            Some(Ok(Event::EndFile(mpv_end_file_reason::Eof))) => break,
+            Some(Ok(Event::EndFile(_) | Event::Shutdown | Event::QueueOverflow)) | Some(Err(_)) => return None,
+            _ => {}
         }
     }
-    if chunk_n > 0 {
-        chunk_peaks.push((chunk_energy / chunk_n as f64).sqrt() as f32);
-    }
-    let peaks = peaks_from_samples(&chunk_peaks, BARS);
-    if peaks.is_empty() {
-        None
-    } else {
-        Some(peaks)
-    }
-}
-
-fn push_buffer(
-    decoded: AudioBufferRef<'_>,
-    buffer: &mut Option<SampleBuffer<f32>>,
-    chunk_peaks: &mut Vec<f32>,
-    chunk_energy: &mut f64,
-    chunk_n: &mut usize,
-) {
-    let spec = *decoded.spec();
-    let channels = spec.channels.count().max(1);
-    if buffer.as_ref().is_none_or(|samples| samples.capacity() < decoded.capacity() * channels) {
-        *buffer = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
-    }
-    let samples = buffer.as_mut().expect("sample buffer initialized");
-    samples.copy_interleaved_ref(decoded);
-    let channel_scale = 1.0 / channels as f64;
-    for frame in samples.samples().chunks(channels) {
-        // Energy, not a maximum: isolated clipped peaks must not flatten a whole interval.
-        // Squaring each channel separately also preserves anti-phase stereo.
-        let energy = frame.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>();
-        *chunk_energy += energy * channel_scale;
-        *chunk_n += 1;
-        if *chunk_n >= CHUNK {
-            chunk_peaks.push((*chunk_energy / *chunk_n as f64).sqrt() as f32);
-            *chunk_energy = 0.0;
-            *chunk_n = 0;
+    drop(mpv); // Flush the last filter frame and release its output file.
+    let mut reader = BufReader::new(std::fs::File::open(&levels).ok()?);
+    let mut line = String::new();
+    let mut rms = Vec::new();
+    while active() {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            let peaks = peaks_from_samples(&rms, BARS);
+            return (!peaks.is_empty()).then_some(peaks);
+        }
+        if let Some(db) = line.strip_prefix("lavfi.astats.Overall.RMS_level=") {
+            let amplitude = 10f32.powf(db.trim_end().parse::<f32>().ok()? / 20.0);
+            if !amplitude.is_finite() { return None; }
+            rms.push(amplitude);
         }
     }
+    None
 }
 
 /// RMS envelope at a fixed resolution, normalized once per track. Silence stays empty.
-pub fn peaks_from_samples(samples: &[f32], bars: usize) -> Vec<f32> {
+fn peaks_from_samples(samples: &[f32], bars: usize) -> Vec<f32> {
     if samples.is_empty() || bars == 0 {
         return Vec::new();
     }
@@ -245,35 +200,98 @@ pub fn peaks_from_samples(samples: &[f32], bars: usize) -> Vec<f32> {
     out
 }
 
-struct OwnedBytes {
-    inner: Cursor<Vec<u8>>,
-}
-
-impl Read for OwnedBytes {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buffer)
-    }
-}
-
-impl Seek for OwnedBytes {
-    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        self.inner.seek(position)
-    }
-}
-
-impl MediaSource for OwnedBytes {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
-    fn byte_len(&self) -> Option<u64> {
-        Some(self.inner.get_ref().len() as u64)
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn peaks_from_bytes(bytes: Vec<u8>) -> Option<Vec<f32>> {
+        let mut media = NamedTempFile::new().unwrap();
+        media.write_all(&bytes).unwrap();
+        analyze(media.path().to_str().unwrap(), "", || true)
+    }
+
+    #[test]
+    fn opus_wave_reaches_the_rendered_seek_bar_in_each_layout() {
+        use slint::{ComponentHandle, PhysicalSize};
+        use slint::platform::{self, Platform, WindowAdapter};
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use std::rc::Rc;
+
+        struct Offscreen;
+        impl Platform for Offscreen {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+        }
+        platform::set_platform(Box::new(Offscreen)).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        ui.show().unwrap();
+        let waves = WaveHub::shared();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone.opus");
+        waves.load(Some(path.into()), "");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let peaks = loop {
+            match waves.poll() {
+                Some(Update::Ready(peaks)) => break peaks,
+                Some(Update::Unavailable) => panic!("Opus produced no envelope"),
+                _ => {}
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(peaks.len(), BARS);
+        for (mode, width, height) in [
+            (crate::Mode::Mini, 600, 180),
+            (crate::Mode::Medium, 540, 700),
+            (crate::Mode::Large, 1200, 800),
+        ] {
+            ui.set_mode(mode);
+            ui.window().set_size(PhysicalSize::new(width, height));
+            ui.set_wave(crate::empty_wave());
+            let empty = ui.window().take_snapshot().unwrap();
+            crate::show_wave(&ui, Update::Ready(peaks.clone()));
+            let rendered = ui.window().take_snapshot().unwrap();
+            // Count newly painted unplayed waveform pixels, not a label or cursor.
+            let columns = rendered.as_slice().iter().zip(empty.as_slice()).filter(|(new, old)|
+                new != old && [new.r, new.g, new.b] == [0x7a; 3]
+            ).count();
+            assert!(columns > 100, "no waveform visible in {mode:?}: {columns} pixels");
+        }
+    }
+
+    #[test]
+    fn remote_analysis_requires_a_complete_response_within_budget() {
+        let transfer = |expected, limit| {
+            let mut data = Vec::new();
+            copy_complete(b"abcd".as_slice(), &mut data, expected, limit, || true)?;
+            Some(data)
+        };
+        assert_eq!(transfer(None, 4).unwrap(), b"abcd");
+        assert_eq!(transfer(Some(4), 4).unwrap(), b"abcd");
+        assert!(transfer(None, 3).is_none());     // chunked body over budget
+        assert!(transfer(Some(4), 3).is_none());  // too large before first read
+        assert!(transfer(Some(3), 4).is_none());  // advertised too little
+        assert!(transfer(Some(5), 6).is_none());  // interrupted transfer
+    }
+
+    #[test]
+    fn large_m4a_reads_the_sample_table_after_the_audio() {
+        use std::io::{Seek, SeekFrom};
+        let bytes = include_bytes!("../testdata/tone.m4a");
+        // The fixture stores mdat before moov. Insert a valid sparse free atom
+        // between them, without moving any audio samples or their chunk offsets.
+        let table = bytes.windows(4).rposition(|tag| tag == b"moov").unwrap() - 4;
+        let padding = 65 * 1024 * 1024u32;
+        let mut media = NamedTempFile::new().unwrap();
+        media.write_all(&bytes[..table]).unwrap();
+        media.write_all(&padding.to_be_bytes()).unwrap();
+        media.write_all(b"free").unwrap();
+        media.seek(SeekFrom::Current(i64::from(padding - 8))).unwrap();
+        media.write_all(&bytes[table..]).unwrap();
+        let peaks = analyze(media.path().to_str().unwrap(), "", || true).expect("complete M4A");
+        assert_eq!(peaks.len(), BARS);
+    }
 
     #[test]
     fn loud_half_is_taller_than_the_quiet_half() {

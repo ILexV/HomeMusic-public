@@ -1,5 +1,41 @@
 //! Bridges the queue's occurrence identity and mpv's prepared media without replaying promotions.
 use crate::{feature_context::Context, player::PlaybackState};
+use crate::queue::{Queue, Repeat, Start};
+use std::collections::HashSet;
+
+/// A failed run follows row IDs (not track IDs or positions) across edits.
+/// An explicit selection or a natural boundary starts a new run.
+#[derive(Default)]
+struct FailedRun {
+    expected: Option<u64>,
+    rows: HashSet<u64>,
+}
+
+impl FailedRun {
+    fn clear(&mut self) {
+        self.expected = None;
+        self.rows.clear();
+    }
+
+    // None: stale event; Some(false): this attempt failed with no successor.
+    fn advance(&mut self, queue: &mut Queue, attempt: Option<u64>) -> Option<bool> {
+        let index = queue.index()?;
+        if attempt.is_none() || attempt != queue.current_token() { return None; }
+        if self.expected != attempt { self.clear(); }
+        self.rows.insert(queue.row_token(index).unwrap());
+        let end = if queue.repeat() == Repeat::All { index } else { 0 };
+        let next = (index + 1..queue.items().len()).chain(0..end)
+            .find(|&i| !self.rows.contains(&queue.row_token(i).unwrap()));
+        if let Some(next) = next {
+            queue.select(next);
+            self.expected = queue.current_token();
+            Some(true)
+        } else {
+            self.clear();
+            Some(false)
+        }
+    }
+}
 
 struct Prepared {
     revision: u64,
@@ -14,6 +50,7 @@ struct Prepared {
 #[derive(Default)]
 pub(crate) struct State {
     prepared: Option<Prepared>,
+    failures: FailedRun,
     observation: Option<(Option<u64>, PlaybackState)>,
 }
 
@@ -25,6 +62,7 @@ impl State {
             (player.take_natural_end(), player.take_promoted())
         };
         if ended || promoted.is_some() {
+            self.failures.clear();
             let adopted = self.prepared.as_ref().is_some_and(|prepared| {
                 let queue = ctx.queue.borrow();
                 promoted.as_deref() == Some(prepared.key.as_str())
@@ -54,6 +92,19 @@ impl State {
             } else if promoted.is_some() {
                 // The user removed the predicted successor before native promotion was observed.
                 ctx.player.borrow_mut().stop();
+            }
+        }
+        // Handle promotion first: the appended entry can fail in the same batch as
+        // the previous entry's EOF. Reloading a stale prediction clears its failure.
+        if ctx.player.borrow_mut().take_failed_media() {
+            let attempt = ctx.hub.listening.borrow().attempt_token();
+            let advanced = self.failures.advance(&mut ctx.queue.borrow_mut(), attempt);
+            if let Some(advanced) = advanced {
+                ctx.hub.listening.borrow_mut().failed(&ctx.hub);
+                if advanced {
+                    self.prepared = None;
+                    ctx.play_current(Start::Auto);
+                }
             }
         }
         self.prepare(ctx);
@@ -105,5 +156,63 @@ impl State {
             // Idempotent in Player; still re-prepares after crossfade settings invalidated its deck.
             let _ = ctx.player.borrow_mut().prepare_next(&prepared.target, &prepared.cookie, &prepared.key, prepared.same_album);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue::Item;
+
+    fn queue(repeat: Repeat, current: usize) -> Queue {
+        let mut queue = Queue::from_tracks("test", vec![Item::file("duplicate", "duplicate"); 3]);
+        queue.select(current);
+        queue.set_repeat(repeat);
+        queue
+    }
+
+    fn fail(run: &mut FailedRun, queue: &mut Queue) -> bool {
+        let current = queue.current_token();
+        run.advance(queue, current).unwrap()
+    }
+
+    #[test]
+    fn failed_media_skips_repeat_one_but_never_wraps_without_repeat_all() {
+        for repeat in [Repeat::Off, Repeat::One] {
+            let mut q = queue(repeat, 1);
+            let mut failures = FailedRun::default();
+            assert!(fail(&mut failures, &mut q));
+            assert_eq!(q.index(), Some(2));
+            assert!(!fail(&mut failures, &mut q));
+            assert_eq!(q.index(), Some(2));
+            assert_eq!(q.repeat(), repeat);
+        }
+    }
+
+    #[test]
+    fn failed_media_visits_each_row_once_across_wrap_and_reorder() {
+        let mut q = queue(Repeat::All, 2);
+        let mut failures = FailedRun::default();
+        let stale = q.current_token();
+        assert!(fail(&mut failures, &mut q));
+        assert_eq!(q.index(), Some(0));
+        assert_eq!(failures.advance(&mut q, stale), None);
+        let last_untried = q.row_token(1);
+        q.move_item(2, 1);
+        assert!(fail(&mut failures, &mut q));
+        assert_eq!(q.row_token(q.index().unwrap()), last_untried);
+        assert!(!fail(&mut failures, &mut q));
+        // A fresh explicit attempt may retry the other rows.
+        assert!(fail(&mut failures, &mut q));
+    }
+
+    #[test]
+    fn failed_media_singleton_repeat_all_stops() {
+        let mut q = Queue::from_path("missing", "missing", "");
+        q.select(0);
+        q.set_repeat(Repeat::All);
+        let token = q.current_token();
+        assert!(!fail(&mut FailedRun::default(), &mut q));
+        assert_eq!(q.current_token(), token);
     }
 }

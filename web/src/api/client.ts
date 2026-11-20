@@ -283,7 +283,7 @@ export const api = {
   // library
   libAlbums: (q: string, offset = 0, limit = 50, signal?: AbortSignal) =>
     request<LibAlbumOut[]>('GET', withQuery('/api/library/albums', { q, offset, limit }), { signal }),
-  libAlbum: (id: number, signal?: AbortSignal) => request<LibAlbumOut>('GET', `/api/library/albums/${id}`, { signal }),
+  libAlbum: (id: number, signal?: AbortSignal) => request<LibAlbumOut>('GET', `/api/library/albums/${id}?catalog=true`, { signal }),
   createAlbum: (body: AlbumCreateIn) => request<LibAlbumOut>('POST', '/api/library/albums', { json: body }),
   patchAlbum: (id: number, body: AlbumPatchIn) =>
     request<LibAlbumOut>('PATCH', `/api/library/albums/${id}`, { json: body }),
@@ -357,7 +357,7 @@ export const api = {
   ndLiked: (signal?: AbortSignal) => request<NdLikedOut>('GET', '/api/nd/liked', { signal }),
   ndArtists: (signal?: AbortSignal) => cachedGet<NdArtistOut[]>('/api/nd/artists', signal),
   ndArtist: (id: string, signal?: AbortSignal) => request<NdArtistPageOut>('GET', `/api/nd/artists/${enc(id)}`, { signal }),
-  ndAlbum: (id: string, signal?: AbortSignal) => request<NdAlbumOut>('GET', `/api/nd/albums/${enc(id)}`, { signal }),
+  ndAlbum: (id: string, signal?: AbortSignal) => request<NdAlbumOut>('GET', `/api/nd/albums/${enc(id)}?catalog=true`, { signal }),
   ndAlbums: (type: NdAlbumList, offset = 0, size = 50, signal?: AbortSignal) =>
     request<NdAlbumOut[]>('GET', withQuery('/api/nd/albums', { type, offset, size }), { signal }),
 

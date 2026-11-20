@@ -68,9 +68,12 @@ pub struct Player {
     phase: PlaybackPhase,
     /// Ignore the replaced file's trailing events until the next StartFile.
     awaiting_start: bool,
+    expected_start: Option<i64>,
     /// Set by stop and by a natural end that was already handled.
     /// A following end-of-file event must not advance the queue.
     user_stopped: bool,
+    /// One foreground media failure with unpaused playback intent.
+    skip_failed_media: bool,
     null_audio: bool,
     prepared: Option<Prepared>,
     promoted: Option<String>,
@@ -122,6 +125,35 @@ fn append_file(mpv: &Mpv, target: &str, cookie: &str) -> Result<(), libmpv2::Err
     }
 }
 
+/// libmpv2 drops the StartFile entry ID and conflates EndFile.error with
+/// unrelated command/property errors. Keep the native boundary identity.
+fn playback_event(mpv: &Mpv) -> Option<(libmpv2::events::Event<'static>, Option<i64>)> {
+    use libmpv2::events::{mpv_event_id as id, Event};
+    loop {
+        // SAFETY: this is the only reader of this client during the drain. All
+        // event data is copied before the next wait, using its documented type.
+        unsafe {
+            let event = &*libmpv2_sys::mpv_wait_event(mpv.ctx.as_ptr(), 0.0);
+            let boundary = match event.event_id {
+                id::None => return None,
+                id::StartFile => {
+                    let start = &*event.data.cast::<libmpv2_sys::mpv_event_start_file>();
+                    (Event::StartFile, Some(start.playlist_entry_id))
+                }
+                id::EndFile => {
+                    let end = &*event.data.cast::<libmpv2_sys::mpv_event_end_file>();
+                    (Event::EndFile(end.reason as _), None)
+                }
+                id::FileLoaded => (Event::FileLoaded, None),
+                id::Shutdown => (Event::Shutdown, None),
+                id::QueueOverflow => (Event::QueueOverflow, None),
+                _ => continue,
+            };
+            return Some(boundary);
+        }
+    }
+}
+
 impl Player {
     pub fn open(options: PlayerOptions) -> Self {
         ensure_c_numeric();
@@ -136,7 +168,9 @@ impl Player {
                     notice: None,
                     phase: PlaybackPhase::Idle,
                     awaiting_start: false,
+                    expected_start: None,
                     user_stopped: false,
+                    skip_failed_media: false,
                     null_audio: options.null_audio,
                     prepared: None, promoted: None, native_ending: false, fade: None,
                     fade_factor: 1.0, crossfade_s: 0.0, overlap_album: false,
@@ -155,7 +189,9 @@ impl Player {
                 notice: Some(open_error(&err)),
                 phase: PlaybackPhase::Error,
                 awaiting_start: false,
+                expected_start: None,
                 user_stopped: false,
+                skip_failed_media: false,
                 null_audio: options.null_audio,
                 prepared: None, promoted: None, native_ending: false, fade: None,
                 fade_factor: 1.0, crossfade_s: 0.0, overlap_album: false,
@@ -218,6 +254,10 @@ impl Player {
 
     /// After take_natural_end, advance the queue but never reload promoted audio.
     pub fn take_promoted(&mut self) -> Option<String> { self.promoted.take() }
+
+    pub fn take_failed_media(&mut self) -> bool {
+        std::mem::take(&mut self.skip_failed_media)
+    }
 
     pub fn set_audio_context(&mut self, track: AudioTrack, complete_album: Vec<AudioTrack>) {
         self.audio_track = Some(track);
@@ -376,6 +416,7 @@ impl Player {
         position_s: f32,
         paused: bool,
     ) -> Result<(), String> {
+        self.skip_failed_media = false;
         self.cancel_preload();
         self.finish_fade();
         self.promoted = None;
@@ -421,6 +462,7 @@ impl Player {
         }
         // loadfile only accepted the request. FileLoaded/EndFile tell us whether
         // the asynchronous open actually succeeded.
+        self.expected_start = self.mpv.as_ref().and_then(|m| m.get_property("playlist/0/id").ok());
         self.apply_eq();
         Ok(())
     }
@@ -457,6 +499,7 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        self.skip_failed_media = false;
         self.cancel_preload();
         self.finish_fade();
         self.promoted = None;
@@ -484,13 +527,16 @@ impl Player {
             return false;
         };
         let mut eof = false;
-        while let Some(event) = mpv.wait_event(0.0) {
+        while let Some((event, entry)) = playback_event(mpv) {
             // Stop is authoritative even when StartFile/FileLoaded were queued.
             if self.user_stopped {
                 continue;
             }
             match event {
-                Ok(Event::StartFile) => {
+                Event::StartFile => {
+                    if self.awaiting_start && self.expected_start.is_some() && self.expected_start != entry {
+                        continue;
+                    }
                     if self.native_ending {
                         if let Some(prepared) = self.prepared.take() {
                             self.promoted = Some(prepared.key);
@@ -507,12 +553,12 @@ impl Player {
                     eof = false;
                 }
                 _ if self.awaiting_start => {}
-                Ok(Event::FileLoaded) => {
+                Event::FileLoaded => {
                     self.phase = PlaybackPhase::Playing;
                     self.notice = None;
                     eof = false;
                 }
-                Ok(Event::EndFile(reason::Eof)) => {
+                Event::EndFile(reason::Eof) => {
                     self.phase = PlaybackPhase::Ended;
                     // Restoring an old position beyond a shortened file must not
                     // advance into an audible next track while pause is requested.
@@ -523,23 +569,34 @@ impl Player {
                         eof = false;
                     }
                 }
-                Ok(Event::EndFile(reason::Stop | reason::Quit)) => {
+                Event::EndFile(reason::Stop | reason::Quit) => {
                     self.phase = PlaybackPhase::Stopped;
                     eof = false;
                 }
-                Ok(Event::EndFile(reason::Redirect)) => {
+                Event::EndFile(reason::Redirect) => {
+                    self.expected_start = None;
                     self.phase = PlaybackPhase::Loading;
                     self.awaiting_start = true;
                     eof = false;
                 }
-                // libmpv2 converts EndFile.error into Err, not EndFile(Error).
-                // Neither errors nor endpoint log messages are safe UI text.
-                Err(_) | Ok(Event::EndFile(reason::Error) | Event::QueueOverflow) => {
+                Event::EndFile(reason::Error) => {
+                    self.skip_failed_media = !flag(mpv, "pause").unwrap_or(true);
+                    // mpv may already have started the appended entry. Queue policy
+                    // (not its native playlist) decides the successor after failure.
+                    if self.prepared.as_ref().is_some_and(|p| p.deck.is_none()) {
+                        let _ = mpv.command("stop", &[]);
+                    }
+                    self.user_stopped = true;
                     self.phase = PlaybackPhase::Error;
                     self.notice = Some("Не удалось воспроизвести файл".into());
                     eof = false;
                 }
-                Ok(Event::Shutdown) => {
+                Event::QueueOverflow => {
+                    self.phase = PlaybackPhase::Error;
+                    self.notice = Some("Переполнена очередь событий плеера".into());
+                    eof = false;
+                }
+                Event::Shutdown => {
                     self.phase = PlaybackPhase::Stopped;
                     eof = false;
                 }
@@ -1206,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_media_reports_error_without_advancing_and_recovers() {
+    fn failed_media_signals_once_and_recovers() {
         let root = std::env::temp_dir();
         let missing = root.join(format!(
             "home-music-missing-{}-private-token.wav",
@@ -1221,6 +1278,8 @@ mod tests {
         assert_eq!(failed.duration_s, 0.0);
         assert!(!player.take_natural_end());
         assert_eq!(player.notice(), Some("Не удалось воспроизвести файл"));
+        assert!(player.take_failed_media());
+        assert!(!player.take_failed_media());
 
         let path = root.join(format!("home-music-recovery-{}.wav", std::process::id()));
         std::fs::write(&path, tone_wav(2.0)).unwrap();
@@ -1234,6 +1293,68 @@ mod tests {
     }
 
     #[test]
+    fn failed_media_never_skips_after_pause_stop_or_replacement() {
+        let root = std::env::temp_dir();
+        let missing = root.join(format!("hm-cancel-failed-{}.wav", std::process::id()));
+        let missing = missing.to_string_lossy();
+        let mut player = open_null();
+        player.load_cookie_at(&missing, "", 0.0, true).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Error);
+        assert!(!player.take_failed_media());
+
+        player.load(&missing).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Error);
+        player.stop();
+        assert!(!player.take_failed_media());
+
+        let path = root.join(format!("hm-replace-failed-{}.wav", std::process::id()));
+        std::fs::write(&path, tone_wav(2.0)).unwrap();
+        player.load(&missing).unwrap();
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        assert!(!player.take_failed_media());
+        player.stop();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_media_with_native_preload_leaves_the_successor_to_the_queue() {
+        let root = std::env::temp_dir();
+        let missing = root.join(format!("hm-bad-before-preload-{}.wav", std::process::id()));
+        let next = root.join(format!("hm-native-after-bad-{}.wav", std::process::id()));
+        std::fs::write(&next, tone_wav(2.0)).unwrap();
+        let mut player = open_null();
+        player.load(&missing.to_string_lossy()).unwrap();
+        player.prepare_next(&next.to_string_lossy(), "", "native", true).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Error);
+        assert!(player.take_failed_media());
+        assert!(player.take_promoted().is_none());
+        player.load(&next.to_string_lossy()).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        assert!(!player.take_failed_media());
+        player.stop();
+        std::fs::remove_file(next).unwrap();
+    }
+
+    #[test]
+    fn failed_media_in_native_successor_keeps_both_notifications() {
+        let root = std::env::temp_dir();
+        let path = root.join(format!("hm-before-failed-{}.wav", std::process::id()));
+        let missing = root.join(format!("hm-preload-failed-{}.wav", std::process::id()));
+        std::fs::write(&path, tone_wav(0.6)).unwrap();
+        let mut player = open_null();
+        player.load(&path.to_string_lossy()).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        player.prepare_next(&missing.to_string_lossy(), "", "bad-next", true).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Error);
+        assert_eq!(player.take_promoted().as_deref(), Some("bad-next"));
+        assert!(player.take_failed_media());
+        assert!(!player.take_failed_media());
+        player.stop();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn malformed_http_media_does_not_expose_url_or_cookie() {
         let url = format!("{}?token=private-token", serve_wav(b"not audio".to_vec()));
         let mut player = open_null();
@@ -1241,10 +1362,11 @@ mod tests {
         wait_until(&mut player, |state| state.phase == PlaybackPhase::Error);
         assert_eq!(player.notice(), Some("Не удалось воспроизвести файл"));
         assert!(!player.take_natural_end());
+        assert!(player.take_failed_media());
     }
 
     #[test]
-    fn full_stream_unavailable_stops_without_duration_or_queue_advance() {
+    fn failed_media_full_stream_503_is_not_an_eof() {
         let url = format!(
             "{}?ref=dz%3A370418141&full=1",
             serve_response(
@@ -1260,8 +1382,10 @@ mod tests {
         assert_eq!(failed.duration_s, 0.0);
         assert_eq!(failed.position_s, 0.0);
         assert_eq!(player.notice(), Some("Не удалось воспроизвести файл"));
+        assert!(player.take_failed_media());
         for _ in 0..5 {
-            assert!(!player.take_natural_end(), "unavailable audio advanced the queue");
+            assert!(!player.take_natural_end(), "unavailable audio counted as EOF");
+            assert!(!player.take_failed_media());
             assert_eq!(player.snapshot().phase, PlaybackPhase::Error);
             std::thread::sleep(Duration::from_millis(30));
         }
