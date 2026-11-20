@@ -245,6 +245,10 @@ All `/api/playback` routes use the authenticated user's isolated session. `Snaps
 
 Responses are a `View`: `{device_id, devices, owner, revision, state, handoff, commands, error}`. Commands are bounded, expiring and delivered only to their target; acknowledgment is idempotent. Only the owner publishes state with the current revision. Position-only heartbeats update telemetry without invalidating a controller's revision; queue, mode, volume and playing changes still reject stale actions.
 
+A pending play/pause/next/prev/seek/volume command fails if its target goes offline before acknowledgment, even if the command itself has not timed out. Reconnecting does not redeliver it, and a late acknowledgment cannot update playback state. The controller can send a new command once the target is online.
+
+If the target fails during `start`, the owner remains unchanged and the paused snapshot keeps its final position. The Hub advances the revision so a delayed heartbeat or control from before the stop cannot overwrite that snapshot or resume playback.
+
 Handoff is prepare-paused → source stop acknowledgment with final position → target start acknowledgment → ownership commit. Failure never automatically resumes the source. Recovery from an owner offline for over 15 seconds is explicit and still requires a ready, online target. Clients heartbeat every two seconds and pause shared playback after 12 seconds without successful contact; reconnect does not automatically resume audio. Explicit local-only mode disconnects from session control and allows offline playback without that shared-session fence. Browser autoplay denial is visible, not a successful transfer.
 
 ## Listening data (mixes, «Моя волна»: MIXES.md 3)

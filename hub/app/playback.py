@@ -55,6 +55,9 @@ def _finish(command: dict, error: str | None = None) -> None:
 
 def _abort(data: dict, error: str) -> None:
     transfer = data["handoff"]
+    if transfer["phase"] == "starting":
+        # The paused snapshot survives the abort. Fence requests from before the stop.
+        data["revision"] += 1
     transfer["phase"] = "failed"
     transfer["error"] = error
     data["error"] = error
@@ -66,9 +69,14 @@ def _abort(data: dict, error: str) -> None:
 
 def _expire(data: dict, now: float) -> None:
     for command in data["commands"]:
-        if command["status"] != "pending" or command["expires_at"] > now:
+        if command["status"] != "pending":
             continue
-        error = "Время выполнения команды истекло"
+        if command["expires_at"] <= now:
+            error = "Время выполнения команды истекло"
+        elif not command.get("handoff_id") and not _online(data, command["target"], now):
+            error = "Устройство отключилось до подтверждения команды"
+        else:
+            continue
         if command.get("handoff_id") and _active(data):
             _abort(data, error)
         else:

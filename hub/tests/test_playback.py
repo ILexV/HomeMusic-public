@@ -175,7 +175,7 @@ async def test_failed_handoff_never_resumes_or_transfers_source(env, failure_pha
         device = "source"
         command = (await heartbeat(env.alice, device))["commands"][0]
     if failure_phase == "start":
-        await acknowledge(env.alice, device, command, state=snapshot(playing=False, position=18))
+        stopped = await acknowledge(env.alice, device, command, state=snapshot(playing=False, position=18))
         device = "target"
         command = (await heartbeat(env.alice, device))["commands"][0]
     failed = await acknowledge(env.alice, device, command, ok=False, error="https://host/?token=secret /private/file")
@@ -185,6 +185,12 @@ async def test_failed_handoff_never_resumes_or_transfers_source(env, failure_pha
     assert source["commands"] == []
     if failure_phase == "start":
         assert source["state"]["playing"] is False and source["state"]["position"] == 18
+        stale = await heartbeat(env.alice, "source", state=snapshot(), revision=stopped["revision"])
+        assert stale["state"] == stopped["state"]
+        await post(env.alice, "command", device_id="remote", target="source", revision=stopped["revision"], kind="play")
+        assert (await heartbeat(env.alice, "source"))["commands"] == []
+        fresh = await post(env.alice, "command", device_id="source", target="source", revision=source["revision"], kind="play")
+        assert not fresh["error"] and fresh["commands"][0]["kind"] == "play"
     late = await acknowledge(env.alice, device, command, state=snapshot())
     assert late["owner"] == "source" and late["handoff"]["phase"] == "failed"
 
@@ -304,6 +310,33 @@ async def test_expired_control_ack_does_not_publish(env):
     env.clock.now = command["expires_at"]
     late = await acknowledge(env.alice, "source", command, state=snapshot(index=0, occurrence="first"))
     assert late["error"] and late["revision"] == 1 and late["state"] == snapshot()
+
+
+@pytest.mark.parametrize("reconnect_first", [False, True])
+async def test_control_does_not_survive_owner_losing_contact(env, reconnect_first):
+    initial = await owned(env)
+    env.clock.now += 14
+    # The controller is still polling; the owner's last heartbeat is nearly stale.
+    await heartbeat(env.alice, "remote")
+    sender = "remote" if reconnect_first else "source"
+    sent = await post(env.alice, "command", device_id=sender, target="source",
+                      revision=initial["revision"], kind="seek", value=90)
+    assert not sent["error"]
+    env.clock.now += 2  # owner offline, but the ten-second seek command hasn't timed out
+    if reconnect_first:
+        view = await heartbeat(env.alice, "source")
+        assert view["commands"] == [] and view["error"]
+    else:
+        [delivered] = sent["commands"]
+        view = await acknowledge(env.alice, "source", delivered, state=snapshot(position=90))
+        assert view["error"]
+        assert (await heartbeat(env.alice, "source"))["commands"] == []
+    assert view["owner"] == "source" and view["state"] == initial["state"]
+    retry = await post(env.alice, "command", device_id="remote", target="source",
+                       revision=view["revision"], kind="seek", value=30)
+    assert not retry["error"]
+    [command] = (await heartbeat(env.alice, "source"))["commands"]
+    assert command["value"] == 30
 
 
 async def test_two_independent_sqlite_workers_serialize_claim_and_control(env):
