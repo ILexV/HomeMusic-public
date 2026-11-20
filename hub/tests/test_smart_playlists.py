@@ -204,6 +204,56 @@ async def test_saved_evaluation_changes_with_metadata_stars_and_listening(api):
     assert [track["nd_song_id"] for track in preview.json()["tracks"]] == ["private"]
 
 
+@pytest.mark.parametrize(("liked", "expected"), [(True, ["b", "c"]), (False, ["a"])])
+async def test_liked_rule_uses_own_decisions_over_stale_navidrome_stars(api, liked, expected):
+    from app.api.schemas import FavoriteTarget
+    from app.favorites import record
+
+    client, sessions, (alice, bob), data, _ = api
+    data[alice.id]["songs"].append(song("c"))
+    data[alice.id]["liked"] = {"a", "c"}
+    async with sessions() as s:
+        # Navidrome still lists a and lacks b. Neither delivery is pending.
+        await record(s, alice.id, FavoriteTarget(nd_song_id="a"), False)
+        await record(s, alice.id, FavoriteTarget(nd_song_id="b"), True)
+        # c has no decision from Alice, so her Navidrome star wins.
+        await record(s, bob.id, FavoriteTarget(nd_song_id="c"), False)
+        await s.commit()
+
+    response = await client.post("/api/smart-playlists/preview", headers=account("alice"),
+                                 json={"rules": [{"kind": "liked", "value": liked}]})
+    assert response.status_code == 200, response.text
+    assert [t["nd_song_id"] for t in response.json()["tracks"]] == expected
+
+
+async def test_catalog_listens_follow_a_track_into_the_library(api):
+    from app.models import Track
+
+    client, sessions, (alice, bob), _, _ = api
+    now = utcnow()
+    async with sessions() as s:
+        for nd_id, dz_id in [("a", "11"), ("b", "22")]:
+            s.add(Track(uid=nd_id, path=f"{nd_id}.mp3", artist="Artist", title=nd_id, fingerprint=nd_id,
+                        deezer_track_id=dz_id, nd_song_id=nd_id))
+        for user, ref in [(alice, "dz:11"), (bob, "dz:22")]:
+            s.add(PlayEvent(user_id=user.id, event_id="catalog-listen", ref=ref, kind="finish",
+                            ts=now - timedelta(days=5), listened_ms=180000, client="app/1"))
+        await s.commit()
+
+    response = await client.post("/api/smart-playlists/preview", headers=account("alice"),
+                                 json={"rules": [{"kind": "unheard"}]})
+    assert response.status_code == 200, response.text
+    assert [t["nd_song_id"] for t in response.json()["tracks"]] == ["b"]
+
+    async with sessions() as s:
+        # The later library event must not be overwritten by the older catalog listen.
+        s.add(PlayEvent(user_id=alice.id, event_id="library-listen", nd_song_id="a", kind="finish",
+                        ts=now, listened_ms=180000, client="app/1"))
+        await s.flush()
+        assert await listening_history(s, alice.id, now) == {"a": now}
+        assert await listening_history(s, bob.id, now) == {"b": now - timedelta(days=5)}
+
+
 async def test_history_is_all_time_per_account_and_ignores_non_listening_events(api):
     _, sessions, users, _, _ = api
     async with sessions() as s:

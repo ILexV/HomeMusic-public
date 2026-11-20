@@ -227,6 +227,9 @@ All definitions and evaluations belong to the authenticated account; another use
 `Definition`: `{match: "all"|"any", rules: [...], sort, descending, limit}`. One to 32 rules; limit 1–2000; sort `title`, `artist`, `year`, `added`, `last_listened`, or `random`. Rules: `liked {value}`, `not_listened {days, include_unheard}`, `unheard`, `genre {value}`, `year {minimum?, maximum?}`, `recently_added {days}`. Unknown fields and invalid ranges return `422`; no SQL expressions are accepted.
 
 `Evaluation`: `{count, tracks: [{nd_song_id, title, artist, album, duration_s}]}`; count precedes the limit. Evaluation uses the user's currently visible Navidrome library, favorites and listening history, not recommendations. “Not listened recently” excludes unheard tracks unless requested. Unknown last-listened time with a positive Navidrome play count is not proof of either “unheard” or “older than N days”. Results are recalculated on preview/play; random order is recalculated too.
+For `unheard`, `not_listened` and sorting by `last_listened`, a catalog listen from before a track joined the library counts once its recorded catalog ref can be linked to the Navidrome song ID. The latest listening time for that account wins; titles alone never link a listen.
+
+For the `liked` rule, the account's effective Hub like or unlike overrides a stale Navidrome star, even after delivery has been acknowledged. Tracks without a Hub decision use that account's Navidrome stars. `liked: false` (rule `{kind: "liked", value: false}`) uses the inverse of the same set, within the visible library.
 
 ## Shared playback and device control
 

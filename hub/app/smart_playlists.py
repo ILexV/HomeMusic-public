@@ -5,15 +5,17 @@ import asyncio
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
+from itertools import batched
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import JSON, DateTime, ForeignKey, String, and_, func, or_, select
+from sqlalchemy import JSON, DateTime, ForeignKey, String, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.auth import user_navidrome
 from app.models import Base, PlayEvent, User, utcnow
+from app.plays import Ids
 
 
 class SmartPlaylist(Base):
@@ -179,13 +181,29 @@ def evaluate_tracks(definition: Definition, songs: list[dict], liked: set[str], 
 async def listening_history(s: AsyncSession, user_id: int, now: datetime) -> dict[str, datetime]:
     # Likes, starts, errors and zero-playback finishes are not listening. Legacy completed
     # plays and imported scrobbles lack listened_ms; keep them. Aggregate *all* saved history.
-    q = select(PlayEvent.nd_song_id, func.max(PlayEvent.ts)).where(
-        PlayEvent.user_id == user_id, PlayEvent.target_type == "track", PlayEvent.nd_song_id.is_not(None),
+    catalog_ref = case((PlayEvent.nd_song_id.is_(None), PlayEvent.ref))
+    q = select(PlayEvent.nd_song_id, catalog_ref, func.max(PlayEvent.ts)).where(
+        PlayEvent.user_id == user_id, PlayEvent.target_type == "track",
         PlayEvent.ts <= now, PlayEvent.superseded_scrobble.is_(False),
         or_(and_(PlayEvent.kind.in_(("progress", "skip", "finish", "interrupted")), PlayEvent.listened_ms > 0),
             and_(PlayEvent.kind == "finish", PlayEvent.listened_ms.is_(None))),
-    ).group_by(PlayEvent.nd_song_id)
-    return dict((await s.execute(q)).all())
+    ).group_by(PlayEvent.nd_song_id, catalog_ref)
+    history = {}
+    catalog_only = []
+    for nd_id, ref, ts in await s.execute(q):
+        if nd_id:
+            history[nd_id] = ts
+        elif ref:
+            catalog_only.append((ref, ts))
+    # A stream can predate the local file. Resolve only recorded identities, never titles.
+    for batch in batched(catalog_only, 500):
+        ids = Ids(s)
+        await ids.prime((ref, None) for ref, _ in batch)
+        for ref, ts in batch:
+            _, nd_id = await ids.complete(ref, None)
+            if nd_id and ts > history.get(nd_id, datetime.min):
+                history[nd_id] = ts
+    return history
 
 
 async def library_songs(nd) -> list[dict]:
@@ -220,16 +238,20 @@ async def evaluate(s: AsyncSession, user: User, definition: Definition) -> Evalu
                 liked = {str(song["id"]) for song in starred.get("song", []) if song.get("id")}
                 from app.favorites import snapshot
                 for state in (await snapshot(s, user.id)).values():
-                    if state.target_type == "track" and state.event.mirror_pending:
-                        ids = {a[3:] for a in state.aliases if a.startswith("nd:")}
-                        if state.nd_id:
-                            ids.add(state.nd_id)
-                        if state.liked:
-                            liked.update(ids)
-                        else:
-                            liked.difference_update(ids)
+                    # Delivery status governs retries, not which favorite decision is current.
+                    if state.target_type != "track":
+                        continue
+                    ids = {a[3:] for a in state.aliases if a.startswith("nd:")}
+                    if state.nd_id:
+                        ids.add(state.nd_id)
+                    if state.liked:
+                        liked.update(ids)
+                    else:
+                        liked.difference_update(ids)
             else:
                 songs, liked = await library_songs(nd), set()
         now = utcnow()
-        history = await listening_history(s, user.id, now)
+        needs_history = definition.sort == "last_listened" or any(
+            isinstance(rule, (NotListenedRule, UnheardRule)) for rule in definition.rules)
+        history = await listening_history(s, user.id, now) if needs_history else {}
         return evaluate_tracks(definition, songs, liked, history, now)
