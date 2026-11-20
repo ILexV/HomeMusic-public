@@ -1,6 +1,6 @@
 import { setListeningAccount } from './lib/plays';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ApiError, UNAUTHORIZED_EVENT, api, errorMessage, invalidateCache } from './api/client';
+import { ApiError, UNAUTHORIZED_EVENT, api, errorMessage, resetApiSession } from './api/client';
 import type { MeOut } from './api/types';
 import { MiniPlayer, PlayerSpacer } from './components/MiniPlayer';
 import { Overlays } from './components/Overlays';
@@ -142,7 +142,7 @@ export function App() {
 
   useEffect(() => {
     const onUnauthorized = () => {
-      invalidateCache();
+      resetApiSession();
       restoreWave(null);
       setListeningAccount(null);
       setMe(null);
@@ -176,7 +176,7 @@ export function App() {
   const logout = useCallback(async () => {
     const result = await api.logout();
     if (!result?.ok) throw new Error('Хаб не подтвердил завершение сеанса.');
-    invalidateCache();
+    resetApiSession();
     restoreWave(null);
     setListeningAccount(null);
     stopListening();
@@ -204,7 +204,10 @@ export function App() {
   if (me === null) {
     return (
       <>
-        <LoginPage onLogin={setMe} />
+        <LoginPage onLogin={(account) => {
+          resetApiSession();
+          setMe(account);
+        }} />
         <Overlays />
       </>
     );

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { api, errorMessage, libraryCoverUrl, uploadCoverUrl } from '../api/client';
+import { api, errorMessage, libraryCoverUrl, sessionGeneration, uploadCoverUrl } from '../api/client';
 import type { LibAlbumOut, ReleaseType, UploadOut, UploadTrackIn } from '../api/types';
 import { Icon } from '../components/Icon';
 import { AlbumPicker, PlaylistPicker, type PlaylistPick } from '../components/pickers';
@@ -121,7 +121,9 @@ export function UploadPage() {
       const batch: Transfer[] = ok.map((file, i) => ({ key: `${Date.now()}-${i}-${file.name}`, file, progress: 0 }));
       setTransfers((prev) => [...prev, ...batch]);
       // Sequential: one slow mobile uplink is better used by one file at a time.
+      const generation = sessionGeneration;
       for (const t of batch) {
+        if (generation !== sessionGeneration) break;
         try {
           const res = await api.uploadFiles([t.file], (p) => setTransfers((prev) => prev.map((x) => (x.key === t.key ? { ...x, progress: p } : x))));
           addUploads(res);

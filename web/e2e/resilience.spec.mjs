@@ -129,6 +129,34 @@ test('offline logout warns that the session may still be active and allows a ret
   expect((await page.request.get('/api/auth/me')).status()).toBe(401);
 });
 
+test('a late upload rejection does not sign out the next account', async ({ page }) => {
+  await login(page, 'alice', '/upload');
+  let holdUpload;
+  const pending = new Promise(resolve => { holdUpload = resolve; });
+  let submissions = 0;
+  await page.route('**/api/uploads', (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    if (++submissions === 1) holdUpload(route);
+    else return route.abort();
+  });
+  await page.locator('input[type=file][multiple]').setInputFiles(['first.wav', 'second.wav'].map(name => ({
+    name, mimeType: 'audio/wav', buffer: Buffer.from('delayed upload'),
+  })));
+  const upload = await pending;
+  await page.evaluate(() => { location.hash = '/more'; });
+  await page.getByRole('button', { name: 'Выйти', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Выйти', exact: true }).click();
+  await page.getByLabel('Имя или почта').fill('bob');
+  await page.getByLabel('Пароль', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Разделы' })).toBeVisible();
+
+  await upload.fulfill({ status: 401, json: { detail: 'Сессия истекла' } });
+  await page.evaluate(() => { location.hash = '/downloads'; });
+  await expect(page.getByText('bob download 0', { exact: true })).toBeVisible();
+  expect(submissions).toBe(1);
+});
+
 test('explicit logout and account switch do not expose the previous queue or downloads', async ({ page }) => {
   await playLibrary(page, 'alice');
   await page.evaluate(() => { location.hash = '/more'; });

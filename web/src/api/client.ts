@@ -84,6 +84,11 @@ export class ApiError extends Error {
 
 /** Fired when the server answers 401: the app switches to the login screen. */
 export const UNAUTHORIZED_EVENT = 'hm:unauthorized';
+export let sessionGeneration = 0;
+
+function requireCurrentSession(generation: number) {
+  if (generation !== sessionGeneration) throw new DOMException('Сеанс завершён', 'AbortError');
+}
 
 function onUnauthorized(path: string) {
   if (!path.startsWith('/api/auth/login') && !path.startsWith('/api/auth/register') && !path.startsWith('/api/auth/email/')) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
@@ -136,6 +141,7 @@ interface RequestOpts {
 }
 
 export async function request<T>(method: string, path: string, opts: RequestOpts = {}): Promise<T> {
+  const generation = sessionGeneration;
   const headers: Record<string, string> = { Accept: 'application/json' };
   let body: BodyInit | undefined;
   if (opts.json !== undefined) {
@@ -151,25 +157,31 @@ export async function request<T>(method: string, path: string, opts: RequestOpts
     if ((e as Error).name === 'AbortError') throw e;
     throw new ApiError(0, 'Нет связи с сервером');
   }
+  requireCurrentSession(generation);
   if (res.status === 401) onUnauthorized(path);
-  if (!res.ok) throw await errorFromResponse(res);
-  if (res.status === 204) return undefined as T;
-  const ct = res.headers.get('content-type') ?? '';
-  if (!ct.includes('json')) return undefined as T;
-  return (await res.json()) as T;
+  // A current 401 can synchronously end its own session. Still reject its details if another user signs in.
+  const bodyGeneration = sessionGeneration;
+  try {
+    if (!res.ok) throw await errorFromResponse(res);
+    if (res.status === 204) return undefined as T;
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.includes('json')) return undefined as T;
+    return (await res.json()) as T;
+  } finally {
+    requireCurrentSession(bodyGeneration);
+  }
 }
 
 // Short-lived cache for GET pages (back navigation feels instant).
 const cache = new Map<string, { at: number; data: unknown }>();
 const CACHE_TTL = 3 * 60 * 1000;
-let cacheGeneration = 0;
 
 export async function cachedGet<T>(path: string, signal?: AbortSignal, fresh = false): Promise<T> {
   const hit = cache.get(path);
   if (!fresh && hit && Date.now() - hit.at < CACHE_TTL) return hit.data as T;
-  const generation = cacheGeneration;
+  const generation = sessionGeneration;
   const data = await request<T>('GET', path, { signal });
-  if (generation !== cacheGeneration) throw new DOMException('Сеанс завершён', 'AbortError');
+  requireCurrentSession(generation);
   cache.set(path, { at: Date.now(), data });
   return data;
 }
@@ -179,8 +191,8 @@ export function peekCache<T>(path: string): T | undefined {
   return hit && Date.now() - hit.at < CACHE_TTL ? (hit.data as T) : undefined;
 }
 
-export function invalidateCache() {
-  cacheGeneration++;
+export function resetApiSession() {
+  sessionGeneration++;
   cache.clear();
 }
 
@@ -192,6 +204,7 @@ export function uploadWithProgress<T>(
   signal?: AbortSignal,
   method = 'POST',
 ): Promise<T> {
+  const generation = sessionGeneration;
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open(method, url);
@@ -201,6 +214,10 @@ export function uploadWithProgress<T>(
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
     xhr.onload = () => {
+      if (generation !== sessionGeneration) {
+        reject(new DOMException('Сеанс завершён', 'AbortError'));
+        return;
+      }
       let data: unknown;
       try {
         data = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
