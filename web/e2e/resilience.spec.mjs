@@ -23,6 +23,57 @@ async function playLibrary(page, user) {
   await expect.poll(async () => Number(await page.getByRole('slider', { name: 'Перемотка', exact: true }).inputValue())).toBeGreaterThan(0);
 }
 
+test('an automatic update waits for an unsent screenshot even without message text', async ({ page }) => {
+  await login(page, 'alice', '/assistant');
+  await page.locator('input[type=file][accept="image/*"]').setInputFiles({
+    name: 'draft.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/L1sAAAAASUVORK5CYII=', 'base64'),
+  });
+  await expect(page.getByRole('img', { name: 'draft.png' })).toBeVisible();
+  await page.route('**/healthz', route => route.fulfill({ json: { web_build: 'next-assistant-build' } }));
+  const [check] = await Promise.all([
+    page.waitForResponse('**/healthz'),
+    page.evaluate(() => window.dispatchEvent(new Event('hm:resume'))),
+  ]);
+  await check.finished();
+  const remove = page.getByRole('button', { name: 'Убрать скриншот' });
+  await remove.click({ timeout: 5000 });
+  await expect(remove).toBeHidden();
+  await Promise.all([
+    page.waitForEvent('domcontentloaded', { timeout: 5000 }),
+    page.evaluate(() => window.dispatchEvent(new Event('hm:resume'))),
+  ]);
+  await expect(page.getByRole('textbox', { name: 'Сообщение ассистенту' })).toBeVisible();
+});
+
+test('an automatic update preserves a pending chat reply across navigation', async ({ page }) => {
+  await login(page, 'alice', '/assistant');
+  let capture;
+  const pending = new Promise(resolve => { capture = resolve; });
+  await page.route('**/api/assistant/chat', route => { capture(route); });
+  await page.getByRole('textbox', { name: 'Сообщение ассистенту' }).fill('Подбери музыку');
+  await page.getByRole('button', { name: 'Отправить' }).click();
+  const request = await pending;
+  await page.evaluate(() => { location.hash = '/more'; });
+  await expect(page.getByRole('heading', { name: 'Ещё', exact: true })).toBeVisible();
+  await page.route('**/healthz', route => route.fulfill({ json: { web_build: 'next-chat-build' } }));
+  const [check] = await Promise.all([
+    page.waitForResponse('**/healthz'),
+    page.evaluate(() => window.dispatchEvent(new Event('hm:resume'))),
+  ]);
+  await check.finished();
+  await page.getByRole('link', { name: /Ассистент/ }).click();
+  await expect(page.getByText('Подбери музыку', { exact: true })).toBeVisible({ timeout: 5000 });
+  await request.fulfill({ json: { chat_id: 42, reply: 'Ответ на первое сообщение' } });
+  await expect(page.getByText('Ответ на первое сообщение', { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#\/assistant\?chat=42$/);
+  await Promise.all([
+    page.waitForEvent('domcontentloaded', { timeout: 5000 }),
+    page.evaluate(() => { location.hash = '/more'; }),
+  ]);
+  await expect(page.getByRole('heading', { name: 'Ещё', exact: true })).toBeVisible();
+});
+
 test('network loss keeps the account and a retry restores the real library', async ({ page, context }) => {
   await login(page, 'offline');
   await expect(page.getByText('offline download 0', { exact: true })).toBeVisible();

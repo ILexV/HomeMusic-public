@@ -27,6 +27,14 @@ let checking: Promise<void> | null = null;
 /** The build the Hub serves, once it is not ours. */
 let newer: string | null = null;
 
+let pendingOperations = 0;
+
+/** For work that survives route changes but would be interrupted by a document reload. */
+export function holdAutoUpdate(): () => void {
+  pendingOperations++;
+  return () => { pendingOperations--; };
+}
+
 /** Asks the Hub which build it serves; `throttled` skips it when asked less than a minute ago. */
 async function check(throttled: boolean): Promise<void> {
   if (checking) return checking;
@@ -61,7 +69,7 @@ const TEXT_INPUT = 'input:not([type]),input[type=text],input[type=url],input[typ
 
 /** Something on screen that a reload would lose. */
 function holdsState(): boolean {
-  if (document.querySelector('[aria-modal="true"]')) return true;
+  if (document.querySelector('[aria-modal="true"], [data-hold-update]')) return true;
   // a field being typed in (an empty one, like the autofocused search box, holds nothing)
   const active = document.activeElement as HTMLElement | null;
   if (active?.isContentEditable) return true;
@@ -78,7 +86,7 @@ function holdsState(): boolean {
 }
 
 function canReload(): boolean {
-  if (!newer || listenBusy()) return false;
+  if (!newer || pendingOperations || listenBusy()) return false;
   try {
     if (sessionStorage.getItem(RELOADED_FOR) === newer) return false;
     sessionStorage.setItem(RELOADED_FOR, newer);

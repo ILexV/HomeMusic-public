@@ -28,7 +28,7 @@ export default defineConfig({
   webServer: [
     { command: `"${python}" tests/browser_server.py`, cwd: hub,
       url: 'http://127.0.0.1:18080/healthz', timeout: 60_000, reuseExistingServer: false },
-    { command: 'npm run dev -- --host 127.0.0.1 --port 15173 --strictPort',
+    { command: 'npm run dev -- --mode e2e --host 127.0.0.1 --port 15173 --strictPort',
       env: { HOMEMUSIC_DEV_BACKEND: 'http://127.0.0.1:18080' },
       url: 'http://127.0.0.1:15173', timeout: 30_000, reuseExistingServer: false },
   ],

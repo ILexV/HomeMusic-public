@@ -10,6 +10,7 @@ import { Button, ErrorState, IconButton, Loading, Spinner, cx } from '../compone
 import { tracksWord } from '../lib/format';
 import { navigate, parseHash } from '../lib/router';
 import { attempt, toast } from '../lib/ui';
+import { holdAutoUpdate } from '../lib/update';
 
 const MAX_IMAGES = 15;
 const MAX_MESSAGE_CHARS = 5000;
@@ -160,6 +161,7 @@ async function send(content: string, attached: File[]) {
   const user: Entry = { id: ++seq, role: 'user', content, images: imageUrls };
   const history: ChatMessage[] = [...state.entries.filter((e) => !e.error), user].map((e) => ({ role: e.role, content: historyContent(e) }));
   update((s) => ({ entries: [...s.entries, user], sending: true }));
+  const releaseUpdate = holdAutoUpdate();
   try {
     const r = await api.chat(history, state.id, attached);
     if (g !== gen) return;
@@ -178,6 +180,7 @@ async function send(content: string, attached: File[]) {
   } catch (e) {
     if (g === gen) update((s) => ({ entries: [...s.entries, { id: ++seq, role: 'assistant', content: errorMessage(e), error: true }] }));
   } finally {
+    releaseUpdate();
     if (g === gen) update({ sending: false });
   }
 }
@@ -360,7 +363,7 @@ export function AssistantChat({ chatId }: { chatId: number | null }) {
         <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { addImages(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
         <div className="flex min-w-0 flex-1 flex-col rounded-3xl border border-line bg-raised transition-colors focus-within:border-accent">
           {!!images.length && (
-            <ul className="flex gap-2 overflow-x-auto px-2 pt-2" aria-label="Скриншоты к сообщению">
+            <ul className="flex gap-2 overflow-x-auto px-2 pt-2" aria-label="Скриншоты к сообщению" data-hold-update="">
               {images.map((f, i) => (
                 <li key={`${f.name}-${i}`} className="relative shrink-0">
                   <img src={imagePreviews[i]} alt={f.name || 'Скриншот'} className="h-16 w-16 rounded-2xl object-cover" />

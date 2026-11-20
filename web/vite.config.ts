@@ -30,7 +30,7 @@ const backend = process.env.HOMEMUSIC_DEV_BACKEND || 'http://localhost:8080';
 
 export default defineConfig(({ command, mode }) => ({
   plugins: [react(), tailwindcss(), buildId(), ...(mode === 'mock' ? [mockApi()] : [])],
-  define: { __HM_BUILD__: JSON.stringify(command === 'build' ? BUILD_ID : 'dev') },
+  define: { __HM_BUILD__: JSON.stringify(command === 'build' || mode === 'e2e' ? BUILD_ID : 'dev') },
   build: {
     outDir,
     emptyOutDir: true,
