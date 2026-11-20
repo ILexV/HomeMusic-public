@@ -117,6 +117,71 @@ def test_backup_failure_status_redacts_repository_credentials(settings, monkeypa
     assert not list(settings.data_dir.glob("homemusic-recovery-*"))
 
 
+def test_local_rotation_keeps_seven_daily_snapshots_without_touching_manual_copies(settings, monkeypatch):
+    from app import housekeeping
+
+    settings.backups_dir = settings.music_root / ".backups"
+    monkeypatch.setattr(housekeeping, "get_settings", lambda: settings)
+    folder = settings.backups_dir / "hub"
+    folder.mkdir(parents=True)
+    snapshots = [folder / f"hub-200001{day:02}.sqlite3" for day in range(1, 8)]
+    for path in snapshots:
+        shutil.copyfile(settings.db_path, path)
+    manual = [folder / name for name in ("hub-000-before-upgrade.sqlite3", "hub-manual.sqlite3",
+                                          "hub-20000231.sqlite3")]
+    for path in manual:
+        path.write_bytes(b"keep this copy")
+    link = folder / "hub-19990101.sqlite3"
+    link.symlink_to(manual[0])
+
+    created = housekeeping.backup_hub_db()
+    assert created is not None
+    with sqlite3.connect(created) as db:
+        assert db.execute("SELECT value FROM test").fetchone() == ("recover me",)
+    assert all(path.read_bytes() == b"keep this copy" for path in manual)
+    assert link.is_symlink()
+    assert all(path.is_file() for path in snapshots[1:])
+    assert not snapshots[0].exists()
+
+
+def test_uninitialized_database_does_not_replace_last_good_snapshot(settings, monkeypatch):
+    from app import housekeeping
+
+    settings.backups_dir = settings.music_root / ".backups"
+    monkeypatch.setattr(housekeeping, "get_settings", lambda: settings)
+    previous = housekeeping.backup_hub_db()
+    last_success = backup.read_status()["local"]["last_success"]
+    settings.db_path.write_bytes(b"")
+    with pytest.raises(backup.BackupError, match="no application tables"):
+        housekeeping.backup_hub_db()
+    status = backup.read_status()["local"]
+    assert status["status"] == "error" and status["last_success"] == last_success
+    with sqlite3.connect(previous) as db:
+        assert db.execute("SELECT value FROM test").fetchone() == ("recover me",)
+
+
+@pytest.mark.parametrize("initialized", [True, False])
+def test_restore_checks_for_tables_not_rows_even_with_matching_checksum(tmp_path, initialized):
+    root, manifest = recovery_tree(tmp_path)
+    name = "navidrome.sqlite3"
+    path = root / name
+    with sqlite3.connect(path) as db:
+        if initialized:
+            db.execute("DELETE FROM test")
+        else:
+            # sqlite_sequence survives DROP TABLE; it is not application data.
+            db.execute("CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            db.execute("DROP TABLE seq")
+            db.execute("DROP TABLE test")
+    manifest["files"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (root / backup.MANIFEST).write_text(json.dumps(manifest))
+    if initialized:
+        assert backup.verify_recovery(root)["ok"]
+    else:
+        with pytest.raises(backup.BackupError, match="no application tables"):
+            backup.verify_recovery(root)
+
+
 def test_snapshot_includes_committed_wal(settings, tmp_path):
     source = settings.db_path
     with sqlite3.connect(source) as db:
@@ -127,6 +192,30 @@ def test_snapshot_includes_committed_wal(settings, tmp_path):
         backup.snapshot_sqlite(source, target)
     with sqlite3.connect(target) as db:
         assert db.execute("SELECT value FROM test").fetchall() == [("recover me",), ("in wal",)]
+
+
+@pytest.mark.skipif(shutil.which("restic") is None, reason="real restic binary required")
+def test_restore_latest_uses_absolute_time_across_hosts_and_only_recovery_tags(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("RESTIC_REPOSITORY", str(tmp_path / "repo"))
+    monkeypatch.setenv("RESTIC_PASSWORD", "test-password")
+    monkeypatch.delenv("RESTIC_REPOSITORY_FILE", raising=False)
+    monkeypatch.delenv("RESTIC_PASSWORD_FILE", raising=False)
+    root, manifest = recovery_tree(tmp_path)
+    backup._restic("init")
+    for host, zone, clock, tag in [
+        ("older", "Asia/Tokyo", "2025-01-01 18:00:00", backup.TAG),  # 09:00 UTC
+        ("newer", "UTC", "2025-01-01 12:00:00", backup.TAG),
+        ("unrelated", "UTC", "2025-01-01 23:00:00", "other"),
+    ]:
+        monkeypatch.setenv("TZ", zone)
+        config = root / "config.yaml"
+        config.write_text(f"host: {host}\n")
+        manifest["files"][config.name] = hashlib.sha256(config.read_bytes()).hexdigest()
+        (root / backup.MANIFEST).write_text(json.dumps(manifest))
+        backup._restic("backup", "--host", host, "--time", clock, "--tag", tag, "--", str(root))
+
+    restored = backup.restore(tmp_path / "recovery")
+    assert (Path(restored["recovery_root"]) / "config.yaml").read_text() == "host: newer\n"
 
 
 @pytest.mark.skipif(shutil.which("restic") is None, reason="real restic binary required")

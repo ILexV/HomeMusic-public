@@ -63,6 +63,10 @@ def sqlite_integrity(path: Path) -> None:
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
         if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise BackupError("SQLite integrity check failed")
+        # integrity_check also reports "ok" for an uninitialized database.
+        table = db.execute("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' LIMIT 1")
+        if table.fetchone() is None:
+            raise BackupError("SQLite database has no application tables")
 
 
 def snapshot_sqlite(source: Path, destination: Path) -> None:
@@ -217,11 +221,9 @@ def restore(destination: Path, snapshot: str = "latest") -> dict:
     if not snapshot or snapshot.startswith("-"):
         raise BackupError("invalid snapshot selector")
     # Resolve a tagged snapshot to its immutable ID before checking/restoring (no moving latest target).
-    snapshots = json.loads(_restic("snapshots", "--json", "--tag", TAG, *([] if snapshot == "latest" else [snapshot])))
+    snapshots = json.loads(_restic("snapshots", "--json", "--tag", TAG, snapshot))
     if not isinstance(snapshots, list) or not snapshots:
         raise BackupError("no tagged recovery snapshot found")
-    if snapshot == "latest":
-        snapshots = [max(snapshots, key=lambda item: item["time"])]
     if len(snapshots) != 1:
         raise BackupError("exactly one tagged recovery snapshot is required")
     snapshot_id = snapshots[0].get("id", "")

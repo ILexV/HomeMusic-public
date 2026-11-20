@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from app.config import get_settings
@@ -15,8 +16,19 @@ log = logging.getLogger(__name__)
 KEEP_BACKUPS = 7
 
 
+def _is_daily_snapshot(path: Path) -> bool:
+    match = re.fullmatch(r"hub-([0-9]{8})\.sqlite3", path.name)
+    if not match:
+        return False
+    try:
+        date.fromisoformat(match[1])
+    except ValueError:
+        return False
+    return not path.is_symlink() and path.is_file()
+
+
 def backup_hub_db() -> Path | None:
-    from app.backup import record_status, snapshot_sqlite
+    from app.backup import BackupError, record_status, snapshot_sqlite
 
     s = get_settings()
     record_status("local", success=None)
@@ -35,12 +47,13 @@ def backup_hub_db() -> Path | None:
         shutil.copyfile(local_tmp, tmp)
         tmp.chmod(0o600)
         tmp.replace(dest)
-        for old in sorted(dest_dir.glob("hub-*.sqlite3"))[:-KEEP_BACKUPS]:
+        snapshots = sorted(path for path in dest_dir.iterdir() if _is_daily_snapshot(path))
+        for old in snapshots[:-KEEP_BACKUPS]:
             old.unlink(missing_ok=True)
         record_status("local", success=True)
         return dest
     except Exception as exc:
-        record_status("local", success=False, error=type(exc).__name__)
+        record_status("local", success=False, error=str(exc) if isinstance(exc, BackupError) else type(exc).__name__)
         raise
     finally:
         local_tmp.unlink(missing_ok=True)
