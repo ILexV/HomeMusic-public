@@ -249,6 +249,10 @@ A pending play/pause/next/prev/seek/volume command fails if its target goes offl
 
 If the target fails during `start`, the owner remains unchanged and the paused snapshot keeps its final position. The Hub advances the revision so a delayed heartbeat or control from before the stop cannot overwrite that snapshot or resume playback.
 
+If the source reports an empty queue in its `stop` acknowledgment, the Hub saves that queue under a new revision and fails the handoff without sending `start`. The source remains the owner.
+
+Once the Hub accepts the source's `stop` acknowledgment, the source may disconnect. Only the target must stay online and acknowledge `start` before its deadline for the transfer to complete.
+
 The final `start` acknowledgment must match the command's `playing`, queue `index`, and `occurrence`. A mismatch fails the handoff without changing owner. The target reports its actual elapsed position; it need not exactly match the source's stop time.
 
 Handoff is prepare-paused → source stop acknowledgment with final position → target start acknowledgment → ownership commit. Failure never automatically resumes the source. Recovery from an owner offline for over 15 seconds is explicit and still requires a ready, online target. Clients heartbeat every two seconds and pause shared playback after 12 seconds without successful contact; reconnect does not automatically resume audio. Explicit local-only mode disconnects from session control and allows offline playback without that shared-session fence. Browser autoplay denial is visible, not a successful transfer.

@@ -166,6 +166,43 @@ async def test_readiness_stop_start_commits_only_after_final_ack(env):
     assert old["error"] and old["state"] == final["state"]
 
 
+async def test_queue_cleared_during_handoff_is_not_started_or_restored(env):
+    prepare_command = await prepare(env)
+    await acknowledge(env.alice, "target", prepare_command)
+    source = await heartbeat(env.alice, "source")
+    [stop] = source["commands"]
+    empty = snapshot(queue=[], index=-1, occurrence="", playing=False, position=0)
+    stopped = await acknowledge(env.alice, "source", stop, state=empty)
+    assert stopped["error"] and stopped["handoff"]["phase"] == "failed"
+    assert stopped["owner"] == "source" and stopped["state"] == empty
+    assert (await heartbeat(env.alice, "target"))["commands"] == []
+    stale = await heartbeat(env.alice, "source", state=snapshot(), revision=source["revision"])
+    assert stale["state"] == empty
+    restored = await heartbeat(env.alice, "source", state=snapshot(), revision=stopped["revision"])
+    assert restored["state"] == snapshot()
+
+
+@pytest.mark.parametrize("offline", ["source", "target"])
+async def test_start_only_requires_target_online_after_confirmed_stop(env, offline):
+    command = await prepare(env)
+    await acknowledge(env.alice, "target", command)
+    [stop] = (await heartbeat(env.alice, "source"))["commands"]
+    paused = snapshot(playing=False, position=37)
+    await acknowledge(env.alice, "source", stop, state=paused)
+    [start] = (await heartbeat(env.alice, "target"))["commands"]
+
+    env.clock.now += 10
+    await heartbeat(env.alice, "target" if offline == "source" else "source")
+    env.clock.now += 6  # past the offline device's lease, within the 25-second start deadline
+    done = await acknowledge(env.alice, "target", start, state=start["state"])
+    if offline == "target":
+        assert done["error"] and done["handoff"]["phase"] == "failed"
+        assert done["owner"] == "source" and done["state"] == paused
+    else:
+        assert not done["error"] and done["handoff"]["phase"] == "done"
+        assert done["owner"] == "target" and done["state"] == snapshot(position=37)
+
+
 @pytest.mark.parametrize("playing,reported", [
     (True, {"playing": False}), (False, {"playing": True}),
     (True, {"index": 0}), (True, {"occurrence": "duplicate-1"}),

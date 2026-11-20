@@ -84,7 +84,9 @@ def _expire(data: dict, now: float) -> None:
             data["error"] = error
     if _active(data):
         transfer = data["handoff"]
-        needs_source = not transfer.get("recovery") or transfer["phase"] == "stopping"
+        needs_source = transfer["phase"] == "stopping" or (
+            transfer["phase"] == "preparing" and not transfer.get("recovery")
+        )
         if not _online(data, transfer["target"], now) or (needs_source and not _online(data, transfer["source"], now)):
             _abort(data, "Устройство отключилось во время передачи")
 
@@ -213,6 +215,10 @@ def _ack(data: dict, body: Ack, now: float) -> str | None:
             transfer["phase"] = "stopping"
             _enqueue(data, transfer["source"], "stop", now, handoff_id=handoff_id)
     elif kind == "stop":
+        if not state["queue"]:
+            _publish(data, state)
+            _abort(data, "Очередь опустела во время передачи")
+            return None
         data["state"] = state
         final = {**state, "playing": transfer["playing"]}
         transfer["phase"] = "starting"
