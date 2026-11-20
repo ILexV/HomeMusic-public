@@ -174,11 +174,8 @@ export function App() {
   }, [me, resolved]);
 
   const logout = useCallback(async () => {
-    try {
-      await api.logout();
-    } catch {
-      /* ignore: we drop the session anyway */
-    }
+    const result = await api.logout();
+    if (!result?.ok) throw new Error('Хаб не подтвердил завершение сеанса.');
     invalidateCache();
     restoreWave(null);
     setListeningAccount(null);

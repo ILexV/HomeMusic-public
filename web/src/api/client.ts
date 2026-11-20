@@ -162,11 +162,14 @@ export async function request<T>(method: string, path: string, opts: RequestOpts
 // Short-lived cache for GET pages (back navigation feels instant).
 const cache = new Map<string, { at: number; data: unknown }>();
 const CACHE_TTL = 3 * 60 * 1000;
+let cacheGeneration = 0;
 
 export async function cachedGet<T>(path: string, signal?: AbortSignal, fresh = false): Promise<T> {
   const hit = cache.get(path);
   if (!fresh && hit && Date.now() - hit.at < CACHE_TTL) return hit.data as T;
+  const generation = cacheGeneration;
   const data = await request<T>('GET', path, { signal });
+  if (generation !== cacheGeneration) throw new DOMException('Сеанс завершён', 'AbortError');
   cache.set(path, { at: Date.now(), data });
   return data;
 }
@@ -176,8 +179,9 @@ export function peekCache<T>(path: string): T | undefined {
   return hit && Date.now() - hit.at < CACHE_TTL ? (hit.data as T) : undefined;
 }
 
-export function invalidateCache(prefix = '') {
-  for (const key of cache.keys()) if (key.startsWith(prefix)) cache.delete(key);
+export function invalidateCache() {
+  cacheGeneration++;
+  cache.clear();
 }
 
 /** multipart POST via XMLHttpRequest to get upload progress (0..1). */

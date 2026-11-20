@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { errorMessage } from '../api/client';
 import { STANDALONE } from '../lib/embedded';
 import { useSession } from '../lib/session';
 import { Icon, type IconName } from '../components/Icon';
@@ -24,6 +25,8 @@ export function MorePage() {
   const { me, logout } = useSession();
   const [perm, setPerm] = useState<NotifyPermission>(notifyPermission);
   const [canInstall, setCanInstall] = useState(!!deferredInstall);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
   const smart = useSmartEnabled();
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
 
@@ -53,7 +56,15 @@ export function MorePage() {
   };
 
   const doLogout = async () => {
-    if (await confirmDialog({ title: 'Выйти из аккаунта?', okLabel: 'Выйти' })) await logout();
+    if (!(await confirmDialog({ title: 'Выйти из аккаунта?', okLabel: 'Выйти' }))) return;
+    setLoggingOut(true);
+    setLogoutError('');
+    try {
+      await logout();
+    } catch (e) {
+      setLogoutError(`Выход не подтверждён (${errorMessage(e)}). Сеанс мог остаться активным. Повторите выход.`);
+      setLoggingOut(false);
+    }
   };
 
   const permText: Record<NotifyPermission, string> = {
@@ -108,8 +119,9 @@ export function MorePage() {
           right={perm === 'granted' ? <Icon name="check" size={20} className="text-accent" /> : undefined}
         />
         {canInstall && !standalone && <Item icon="install" title="Установить приложение" sub="На домашний экран, с «Поделиться» → HomeMusic" onClick={install} />}
-        <Item icon="logout" title="Выйти" onClick={doLogout} danger />
+        <Item icon="logout" title={loggingOut ? 'Выходим…' : 'Выйти'} onClick={loggingOut ? undefined : doLogout} danger />
       </ul>
+      {logoutError && <p role="alert" className="mx-4 mt-3 text-sm text-danger">{logoutError}</p>}
 
       <p className="px-6 py-6 text-center text-xs text-dim">HomeMusic · личный музыкальный сервис</p>
     </div>

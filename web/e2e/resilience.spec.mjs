@@ -111,6 +111,24 @@ test('revoked session returns to login and closes the old playback', async ({ pa
   await expect(page.getByText('Browser tone', { exact: true })).toHaveCount(0);
 });
 
+test('offline logout warns that the session may still be active and allows a retry', async ({ page, context }) => {
+  await login(page, 'offline', '/more');
+  const logout = page.getByRole('button', { name: 'Выйти', exact: true });
+  const confirm = page.getByRole('alertdialog', { name: 'Выйти из аккаунта?' }).getByRole('button', { name: 'Выйти', exact: true });
+  await context.setOffline(true);
+  await logout.click();
+  await confirm.click();
+  await expect(page.getByRole('alert')).toContainText('Выход не подтверждён');
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeHidden();
+
+  await context.setOffline(false);
+  expect((await page.request.get('/api/auth/me')).status()).toBe(200);
+  await logout.click();
+  await confirm.click();
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeVisible();
+  expect((await page.request.get('/api/auth/me')).status()).toBe(401);
+});
+
 test('explicit logout and account switch do not expose the previous queue or downloads', async ({ page }) => {
   await playLibrary(page, 'alice');
   await page.evaluate(() => { location.hash = '/more'; });
