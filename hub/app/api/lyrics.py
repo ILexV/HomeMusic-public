@@ -63,7 +63,9 @@ class Metadata:
     duration_s: float | None
 
 
-_STAMP = re.compile(r"\[(\d{1,3}):([0-5]\d)(?:[.:](\d{1,3}))?\]")
+_LRC_TIME = r"(\d{1,3}):([0-5]\d)(?:[.:](\d{1,3}))?"
+_STAMP = re.compile(rf"\[{_LRC_TIME}\]")
+_WORD_STAMP = re.compile(rf"<{_LRC_TIME}>")
 _OFFSET = re.compile(r"\[offset:\s*([+-]?\d+)\s*\]", re.IGNORECASE)
 
 
@@ -88,6 +90,8 @@ def parse_lrc(text: str) -> list[LyricLine]:
             seconds = int(match[1]) * 60 + int(match[2]) + (int(fraction) / 10 ** len(fraction) if fraction else 0)
             stamps.append(max(0.0, seconds - offset))
             rest = rest[match.end():].lstrip()
+        if stamps and "<" in rest:
+            rest = _WORD_STAMP.sub("", rest).strip()
         for stamp in stamps:
             expanded_size += len(rest) + 1
             timed.append((stamp, rest))

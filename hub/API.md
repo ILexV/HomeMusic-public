@@ -211,6 +211,8 @@ stays that file).
 
 The response distinguishes `synced`, `plain`, `instrumental`, and `unavailable`; `lines` contain text and optional `time_s`. Only timed lines support seeking. LRCLIB results must match full title, artist, album when provided, and duration within two seconds. Version qualifiers are retained. Insufficient evidence or unavailable lyrics is not an audio playback error. Provider requests and response sizes are bounded; the process-local cache keeps at most 128 entries (24 hours for successful results, five minutes for unavailable results).
 
+Enhanced LRC uses `<mm:ss.xx>` timestamps for individual words. The API removes those markers from synced text and uses the line's `[mm:ss.xx]` timestamp for seeking; it does not provide word-level highlighting.
+
 ## Smart playlists
 
 All definitions and evaluations belong to the authenticated account; another user's ID returns `404`.

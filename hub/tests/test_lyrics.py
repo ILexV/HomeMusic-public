@@ -88,6 +88,18 @@ async def test_real_provider_shape_is_parsed_and_cached(respx_mock):
     assert route.call_count == 1
 
 
+async def test_enhanced_lrc_displays_words_and_keeps_line_seek_times(respx_mock):
+    record = {**RECORD, "syncedLyrics": (
+        "[00:10.00][00:30.00]<00:10.00>Я <00:10.50>здесь <эхо><00:11.00>\n"
+        "[00:12.00]<00:12.00>\n[00:14.00]а < б"
+    )}
+    respx_mock.get(api.PROVIDER_URL).respond(json=record)
+    result = await api.fetch_lyrics(META)
+    assert result.status == "synced"
+    assert [(line.time_s, line.text) for line in result.lines] == [
+        (10.0, "Я здесь <эхо>"), (12.0, ""), (14.0, "а < б"), (30.0, "Я здесь <эхо>")]
+
+
 @pytest.mark.parametrize("record,status,times", [
     ({**RECORD, "instrumental": True}, "instrumental", []),
     ({**RECORD, "syncedLyrics": None}, "plain", [None, None]),
