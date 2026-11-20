@@ -106,6 +106,8 @@ pub fn wave_caption(busy: bool, personal: bool, playing: bool) -> &'static str {
     }
 }
 
+pub(super) const NEWEST_TITLE: &str = "Новое в библиотеке";
+
 pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row> {
     let mut rows = Vec::new();
     rows.push(Row {
@@ -127,6 +129,7 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
         song_id: String::new(),
         accent: false,
     });
+    push_albums(&mut rows, NEWEST_TITLE, &feed.newest);
     if !feed.radio.is_empty() {
         rows.push(section("Радиостанции"));
         for artist in &feed.radio {
@@ -144,7 +147,6 @@ pub fn home_rows(wave_line: &str, mix: &MixSnapshot, feed: &HomeFeed) -> Vec<Row
     push_albums(&mut rows, "Недавно слушали", &feed.recent);
     push_albums(&mut rows, "Часто слушаете", &feed.frequent);
     push_albums(&mut rows, "Понравившиеся альбомы", &feed.starred);
-    push_albums(&mut rows, "Новое в библиотеке", &feed.newest);
     rows
 }
 

@@ -1,3 +1,4 @@
+import { Button } from "std-widgets.slint";
 import { AlbumMenu, TrackList, TrackMenu } from "item-menus.slint";
 import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
@@ -120,6 +121,70 @@ component HomeCard inherits Rectangle {
     }
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
     if root.item.kind == "album" : AlbumMenu { album-id: root.item.album-id; }
+}
+
+// New arrivals are scanned by name: keep covers small and use the available pane width for text.
+component NewArrivals inherits VerticalLayout {
+    in property <HomeSection> section;
+    in-out property <bool> expanded;
+    callback open-album(int);
+    callback all-albums();
+    spacing: 6px;
+    HorizontalLayout {
+        spacing: 8px;
+        cross-axis-alignment: center;
+        Text { text: root.section.title; color: Theme.text; font-size: 15px; font-weight: 600; horizontal-stretch: 1; }
+        Button { text: "Все альбомы"; horizontal-stretch: 0; clicked => { root.all-albums(); } }
+    }
+    grid := Rectangle {
+        property <int> columns: max(1, floor((self.width + 8px) / 248px));
+        property <int> preview-count: self.columns * 3;
+        property <int> count: root.expanded ? root.section.items.length : min(self.preview-count, root.section.items.length);
+        property <length> cell-width: (self.width - (self.columns - 1) * 8px) / self.columns;
+        height: ceil(self.count / self.columns) * 58px - 4px;
+        for index in grid.count : card := Rectangle {
+            property <HomeRow> item: root.section.items[index];
+            x: mod(index, grid.columns) * (grid.cell-width + 8px);
+            y: floor(index / grid.columns) * 58px;
+            width: grid.cell-width;
+            height: 54px;
+            border-radius: 5px;
+            background: touch.has-hover || keys.has-focus ? Theme.raised : Theme.panel;
+            border-color: Theme.orange;
+            border-width: keys.has-focus ? 1px : 0px;
+            accessible-role: button;
+            accessible-label: card.item.title + " · " + card.item.detail;
+            accessible-action-default => { root.open-album(card.item.source); }
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 9px;
+                cross-axis-alignment: center;
+                CoverArt { width: 42px; height: 42px; cover: card.item.cover; has-cover: card.item.has-cover; mark: 22px; }
+                VerticalLayout {
+                    horizontal-stretch: 1; alignment: center; spacing: 3px;
+                    Text { text: card.item.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    if card.item.detail != "" : Text { text: card.item.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
+                }
+                if card.item.accent : Glyph { kind: "heart"; tint: Theme.orange; width: 13px; height: 13px; }
+            }
+            keys := FocusScope {
+                key-pressed(event) => {
+                    if event.text == Key.Return || event.text == " " { root.open-album(card.item.source); return accept; }
+                    return reject;
+                }
+            }
+            touch := TouchArea { mouse-cursor: pointer; clicked => { root.open-album(card.item.source); } }
+            AlbumMenu { album-id: card.item.album-id; }
+            Tooltip { text: @markdown("\{card.item.title}  \n\{card.item.detail}"); }
+        }
+    }
+    if root.section.items.length > grid.preview-count : HorizontalLayout {
+        alignment: center;
+        Button {
+            text: root.expanded ? "Свернуть" : "Показать ещё " + (root.section.items.length - grid.preview-count);
+            clicked => { root.expanded = !root.expanded; }
+        }
+    }
 }
 
 component AlbumCard inherits Rectangle {
@@ -245,6 +310,9 @@ export component Large inherits Rectangle {
     callback open-album(int);
     callback navigate(string);
     callback pick-home(int);
+
+    private property <bool> newest-expanded;
+    private property <length> home-scroll-y;
 
     // Album detail overlays its source pane; mix and taste belong to Home.
     private property <string> active-section: root.catalog-open ? "network" :
@@ -378,6 +446,7 @@ export component Large inherits Rectangle {
                     vertical-stretch: 1;
                     min-height: 40px;
                     ScrollPort {
+                        scroll-y <=> root.home-scroll-y;
                         VerticalLayout {
                             spacing: 16px;
                             if root.home-notice != "" : Text { text: root.home-notice; color: Theme.orange; font-size: 12px; wrap: word-wrap; }
@@ -391,8 +460,14 @@ export component Large inherits Rectangle {
                             }
                             for section in root.home-sections : VerticalLayout {
                                 spacing: 8px;
-                                Text { text: section.title; color: Theme.text; font-size: 15px; font-weight: 600; }
-                                Rectangle {
+                                if section.newest : NewArrivals {
+                                    section: section;
+                                    expanded <=> root.newest-expanded;
+                                    open-album(index) => { root.pick-home(index); }
+                                    all-albums => { root.navigate("albums"); }
+                                }
+                                if !section.newest : Text { text: section.title; color: Theme.text; font-size: 15px; font-weight: 600; }
+                                if !section.newest : Rectangle {
                                     height: section.items[0].kind == "radio" ? 68px : 198px;
                                     clip: true;
                                     Flickable {

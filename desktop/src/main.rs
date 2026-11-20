@@ -2539,6 +2539,7 @@ fn refresh_home(ui: &AppWindow, hub: &HubState, playing: bool) {
     let sections: Vec<HomeSection> = if pane == home::Pane::Home {
         home::sections(&rows).into_iter().map(|(title, range)| HomeSection {
             title: title.into(),
+            newest: title == home::NEWEST_TITLE,
             items: Rc::new(slint::VecModel::from(model[range].to_vec())).into(),
         }).collect()
     } else {
