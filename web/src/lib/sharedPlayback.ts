@@ -379,8 +379,8 @@ export function localPlaybackAllowed(onChooseLocal?: () => void) {
 export function claimPlayback() {
   return runtime?.action('claim');
 }
-export function controlPlayback(kind: PlaybackControl, value?: number) {
-  return runtime?.action('command', state.view?.owner ?? undefined, kind, value);
+export function controlPlayback(kind: PlaybackControl, value?: number, revision = state.view?.revision) {
+  return runtime?.action('command', state.view?.owner ?? undefined, kind, value, revision);
 }
 export function handoffPlayback(target: string) {
   return runtime?.action('handoff', target);

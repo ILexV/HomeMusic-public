@@ -50,10 +50,53 @@ test('device panel clears the connection warning on reconnect without losing a p
   await expect(alert).toContainText('Сначала передайте трек');
 });
 
+test('remote seek stays bound to the track visible when the drag began', async ({ page }) => {
+  await login(page, 'seek', '/player');
+  const send = async (route, body) => {
+    const response = await page.request.post(`/api/playback/${route}`, { data: { device_id: 'source', ...body } });
+    expect(response.ok()).toBeTruthy();
+    return response.json();
+  };
+  const heartbeat = (body = {}) => send('heartbeat', { name: 'Source', kind: 'desktop', ...body });
+  const view = await heartbeat();
+  const tracks = ['First', 'Second'].map((title) => ({
+    title, artist: 'Test', album: '', ref: `nd:${title}`, duration_s: 120,
+  }));
+  const state = { queue: tracks, index: 0, occurrence: 'first', position: 0, playing: true, volume: 1, repeat: 'off', shuffle: false };
+  const first = await send('claim', { revision: view.revision, state });
+  const panel = page.getByRole('region', { name: 'Устройства и общий сеанс' });
+  await expect(panel.getByText('Test — First', { exact: true })).toBeVisible();
+  const slider = panel.getByRole('slider', { name: 'Позиция на устройстве' });
+  await slider.scrollIntoViewIfNeeded();
+  const drag = async () => {
+    const box = await slider.boundingBox();
+    await page.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2);
+    await page.mouse.down();
+  };
+  const release = () => Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/playback/command'), page.mouse.up(),
+  ]);
+  await drag();
+  const next = { ...state, index: 1, occurrence: 'second' };
+  const second = await heartbeat({ revision: first.revision, state: next });
+  await expect(panel.getByText('Test — Second', { exact: true })).toBeVisible();
+  await release();
+  expect((await heartbeat()).commands).toEqual([]);
+
+  await drag();
+  await heartbeat({ revision: second.revision, state: { ...next, position: 9 } });
+  await expect(panel).toContainText('Позиция устройства: 0:09');
+  await release();
+  const [command] = (await heartbeat()).commands;
+  expect(command.kind).toBe('seek');
+  expect(command.value).toBeGreaterThan(60);
+});
+
 test('revoked session returns to login and closes the old playback', async ({ page }) => {
   await playLibrary(page, 'expiry');
   // Revoke the real server-side session without replacing the application's HTTP client.
   const logout = await page.request.post('/api/auth/logout');
+  const library = page.getByRole('navigation', { name: 'Разделы' }).getByRole('link', { name: 'Библиотека' });
   expect(logout.ok()).toBeTruthy();
   await page.evaluate(() => { location.hash = '/downloads'; });
   await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeVisible();
@@ -62,6 +105,7 @@ test('revoked session returns to login and closes the old playback', async ({ pa
   await page.getByLabel('Пароль', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByText('bob download 0', { exact: true })).toBeVisible();
+  await expect(library).toHaveAttribute('href', '#/library');
   await openPlayer(page);
   await expect(page.getByText('Сейчас ничего не играет', { exact: true })).toBeVisible();
   await expect(page.getByText('Browser tone', { exact: true })).toHaveCount(0);
@@ -70,6 +114,8 @@ test('revoked session returns to login and closes the old playback', async ({ pa
 test('explicit logout and account switch do not expose the previous queue or downloads', async ({ page }) => {
   await playLibrary(page, 'alice');
   await page.evaluate(() => { location.hash = '/more'; });
+  const library = page.getByRole('navigation', { name: 'Разделы' }).getByRole('link', { name: 'Библиотека' });
+  await expect(library).toHaveAttribute('href', '#/liked');
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await page.getByRole('alertdialog', { name: 'Выйти из аккаунта?' }).getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeVisible();
@@ -79,6 +125,8 @@ test('explicit logout and account switch do not expose the previous queue or dow
   await page.evaluate(() => { location.hash = '/downloads'; });
   await expect(page.getByText('bob download 0', { exact: true })).toBeVisible();
   await expect(page.getByText('alice download 0', { exact: true })).toHaveCount(0);
+  await library.click();
+  await expect(page).toHaveURL(/#\/library$/);
   await openPlayer(page);
   await expect(page.getByText('Сейчас ничего не играет', { exact: true })).toBeVisible();
 });

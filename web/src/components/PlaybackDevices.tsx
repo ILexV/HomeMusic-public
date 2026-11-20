@@ -3,13 +3,36 @@ import { fmtDuration } from '../lib/format';
 import { useListen } from '../lib/listen';
 import { attachPlayback, claimPlayback, controlPlayback, detachPlayback, handoffPlayback, unlockPlayback, useSharedPlayback } from '../lib/sharedPlayback';
 
+function RemoteSlider({ kind, value, duration = 0, revision, disabled }: {
+  kind: 'seek' | 'volume'; value: number; duration?: number; revision: number; disabled: boolean;
+}) {
+  const [drag, setDrag] = useState<{ revision: number; value?: number } | null>(null);
+  const seek = kind === 'seek';
+  const shown = drag?.value ?? (seek ? value : value * 100);
+  const cancel = () => setDrag(null);
+  const commit = () => {
+    if (drag?.value !== undefined) void controlPlayback(kind, seek ? drag.value : drag.value / 100, drag.revision);
+    cancel();
+  };
+  return <label className="block text-sm">
+    {seek ? `Позиция устройства: ${fmtDuration(value)} / ${fmtDuration(duration)}` : `Громкость: ${Math.round(shown)}%`}
+    <input type="range" aria-label={seek ? 'Позиция на устройстве' : 'Громкость на устройстве'}
+      min={0} max={seek ? Math.max(duration, value, 1) : 100} step={seek ? 0.1 : 1} value={shown} disabled={disabled}
+      onPointerDown={() => setDrag({ revision })}
+      onChange={(event) => {
+        const next = event.currentTarget.valueAsNumber;
+        setDrag((previous) => ({ revision: previous?.revision ?? revision, value: next }));
+      }}
+      onPointerUp={commit} onKeyUp={commit} onPointerCancel={cancel} onBlur={cancel}
+      className="block w-full accent-accent" />
+  </label>;
+}
+
 /** Kept outside the local-track branch: an empty phone is still a remote control. */
 export function PlaybackDevices() {
   const { view, busy, connected, connectionError, error, enabled, localOnly } = useSharedPlayback();
   const alert = connectionError ?? error;
   const localTrack = useListen((s) => s.track);
-  const [seekValue, setSeekValue] = useState<number | null>(null);
-  const [volumeValue, setVolumeValue] = useState<number | null>(null);
   if (!enabled) return null;
   const session = view?.state;
   const current = session?.queue[session.index];
@@ -18,15 +41,6 @@ export function PlaybackDevices() {
   const transferring = !!transfer && ['preparing', 'stopping', 'starting'].includes(transfer.phase);
   const recoveryFenced = !!transfer?.recovery && transfer.source === view?.owner;
   const unavailable = !connected || busy || transferring || recoveryFenced || !owner?.online || !session;
-  const duration = current?.duration_s ?? 0;
-  const commitSeek = () => {
-    if (seekValue !== null) void controlPlayback('seek', seekValue);
-    setSeekValue(null);
-  };
-  const commitVolume = () => {
-    if (volumeValue !== null) void controlPlayback('volume', volumeValue / 100);
-    setVolumeValue(null);
-  };
   return (
     <section aria-label="Устройства и общий сеанс" className="mx-4 my-4 space-y-3 rounded-xl border border-white/10 p-4">
       <h2 className="font-semibold">Устройства и общий сеанс</h2>
@@ -40,28 +54,17 @@ export function PlaybackDevices() {
         {transfer.error ? `: ${transfer.error}` : ''}
       </p>}
       {recoveryFenced && <p className="text-sm text-muted">Восстановление после отключения источника. Старое устройство остановлено до явного подтверждения продолжения или новой передачи.</p>}
-      {current && session && <div className="space-y-2">
+      {view && current && session && <div className="space-y-2">
         <div className="font-medium">{current.artist} — {current.title}</div>
         <p className="text-xs text-muted">{session.playing ? 'Играет' : 'Пауза'} · {session.index + 1} / {session.queue.length} · Повтор: {session.repeat === 'one' ? 'трек' : session.repeat === 'all' ? 'очередь' : 'выключен'} · Перемешивание: {session.shuffle ? 'включено' : 'выключено'}</p>
-        <label className="block text-sm">
-          Позиция устройства: {fmtDuration(session.position)} / {fmtDuration(duration)}
-          <input aria-label="Позиция на устройстве" type="range" min={0} max={Math.max(duration, session.position, 1)} step={0.1}
-            value={seekValue ?? session.position} disabled={unavailable}
-            onChange={(event) => setSeekValue(Number(event.target.value))} onPointerUp={commitSeek} onKeyUp={commitSeek}
-            className="block w-full accent-accent" />
-        </label>
+        <RemoteSlider kind="seek" value={session.position} duration={current.duration_s} revision={view.revision} disabled={unavailable} />
         <div className="flex flex-wrap gap-2">
           <button className="rounded-lg bg-white/10 px-3 py-2 disabled:opacity-40" disabled={unavailable} onClick={() => void controlPlayback('prev')}>Предыдущий</button>
           <button className="rounded-lg bg-white/10 px-3 py-2 disabled:opacity-40" disabled={unavailable} onClick={() => void controlPlayback('play')}>Играть</button>
           <button className="rounded-lg bg-white/10 px-3 py-2 disabled:opacity-40" disabled={unavailable} onClick={() => void controlPlayback('pause')}>Пауза</button>
           <button className="rounded-lg bg-white/10 px-3 py-2 disabled:opacity-40" disabled={unavailable} onClick={() => void controlPlayback('next')}>Следующий</button>
         </div>
-        <label className="block text-sm">Громкость: {Math.round(volumeValue ?? session.volume * 100)}%
-          <input aria-label="Громкость на устройстве" type="range" min={0} max={100} step={1}
-            value={volumeValue ?? session.volume * 100} disabled={unavailable}
-            onChange={(event) => setVolumeValue(Number(event.target.value))} onPointerUp={commitVolume} onKeyUp={commitVolume}
-            className="block w-full accent-accent" />
-        </label>
+        <RemoteSlider kind="volume" value={session.volume} revision={view.revision} disabled={unavailable} />
         <details className="text-sm"><summary>Очередь общего сеанса</summary>
           <ol className="max-h-48 overflow-y-auto py-2">
             {session.queue.map((track, index) => <li key={index} aria-current={index === session.index ? 'true' : undefined} className={index === session.index ? 'font-semibold text-accent' : 'text-muted'}>

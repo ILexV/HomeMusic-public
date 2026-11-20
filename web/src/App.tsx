@@ -1,5 +1,5 @@
 import { setListeningAccount } from './lib/plays';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ApiError, UNAUTHORIZED_EVENT, api, errorMessage, invalidateCache } from './api/client';
 import type { MeOut } from './api/types';
 import { MiniPlayer, PlayerSpacer } from './components/MiniPlayer';
@@ -107,8 +107,6 @@ const ROUTES: RouteDef[] = [
   ['/share', null, () => <SharePage />],
 ];
 
-const lastByTab: Partial<Record<Tab, string>> = {};
-
 function resolve(route: Route): { tab: Tab | null; node: ReactNode } | null {
   for (const [pattern, tab, render] of ROUTES) {
     const params = matchPath(pattern, route.path);
@@ -165,8 +163,12 @@ export function App() {
 
   // Unknown or empty route → the start screen.
   const resolved = resolve(route);
-  // Each tab remembers where you were (Spotify-like); tapping the active tab goes to its root.
-  if (resolved?.tab) lastByTab[resolved.tab] = route.full;
+  // Tab destinations can include search queries and item IDs. Forget them at the session boundary.
+  const lastByTab = useMemo<Partial<Record<Tab, string>>>(() => ({}), [me?.id]);
+  const tab = resolved?.tab;
+  useEffect(() => {
+    if (me && tab) lastByTab[tab] = route.full;
+  }, [me, tab, route.full, lastByTab]);
   useEffect(() => {
     if (me && !resolved) navigate(START, { replace: true });
   }, [me, resolved]);
