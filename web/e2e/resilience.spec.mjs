@@ -46,6 +46,32 @@ test('an automatic update waits for an unsent screenshot even without message te
   await expect(page.getByRole('textbox', { name: 'Сообщение ассистенту' })).toBeVisible();
 });
 
+test('a new chat clears the composer but the first reply in the same chat does not', async ({ page }) => {
+  await login(page, 'alice', '/assistant');
+  const input = page.getByRole('textbox', { name: 'Сообщение ассистенту' });
+  const send = page.getByRole('button', { name: 'Отправить' });
+  const file = page.locator('input[type=file][accept="image/*"]');
+  await input.fill('Это для другого разговора');
+  await file.setInputFiles({ name: 'old.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>') });
+  await expect(page.getByRole('img', { name: 'old.svg' })).toBeVisible();
+  await page.getByRole('button', { name: 'Новый чат' }).click();
+  await expect(input).toHaveValue('');
+  await expect(page.getByRole('img', { name: 'old.svg' })).toHaveCount(0);
+  await expect(send).toBeDisabled();
+
+  let capture;
+  const pending = new Promise(resolve => { capture = resolve; });
+  await page.route('**/api/assistant/chat', route => { capture(route); });
+  await input.fill('Первое сообщение');
+  await send.click();
+  const request = await pending;
+  await input.fill('Уточнение к первому вопросу');
+  await request.fulfill({ json: { chat_id: 57, reply: 'Первый ответ' } });
+  await expect(page.getByText('Первый ответ', { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#\/assistant\?chat=57$/);
+  await expect(input).toHaveValue('Уточнение к первому вопросу');
+});
+
 test('an automatic update preserves a pending chat reply across navigation', async ({ page }) => {
   await login(page, 'alice', '/assistant');
   let capture;
@@ -72,6 +98,35 @@ test('an automatic update preserves a pending chat reply across navigation', asy
     page.evaluate(() => { location.hash = '/more'; }),
   ]);
   await expect(page.getByRole('heading', { name: 'Ещё', exact: true })).toBeVisible();
+});
+
+test('switching accounts starts a separate assistant conversation', async ({ page }) => {
+  const turns = [];
+  await page.route('**/api/assistant/chat', route => {
+    turns.push(route.request().postDataJSON());
+    return route.fulfill({ json: { chat_id: turns.length, reply: `Ответ ${turns.length}` } });
+  });
+  await login(page, 'alice', '/assistant');
+  const input = page.getByRole('textbox', { name: 'Сообщение ассистенту' });
+  const send = page.getByRole('button', { name: 'Отправить' });
+  await input.fill('Плейлист для Алисы');
+  await send.click();
+  await expect(page.getByText('Ответ 1', { exact: true })).toBeVisible();
+  await page.evaluate(() => { location.hash = '/more'; });
+  await page.getByRole('button', { name: 'Выйти', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Выйти', exact: true }).click();
+  await page.getByLabel('Имя или почта').fill('bob');
+  await page.getByLabel('Пароль', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Разделы' })).toBeVisible();
+  await page.evaluate(() => { location.hash = '/assistant'; });
+  await expect(input).toBeVisible();
+  await expect(page.getByText('Плейлист для Алисы', { exact: true })).toHaveCount(0);
+  await input.fill('Музыка для Боба');
+  await send.click();
+  await expect(page.getByText('Ответ 2', { exact: true })).toBeVisible();
+  expect(turns[1].messages).toEqual([{ role: 'user', content: 'Музыка для Боба' }]);
+  expect(turns[1].chat_id ?? null).toBeNull();
 });
 
 test('network loss keeps the account and a retry restores the real library', async ({ page, context }) => {

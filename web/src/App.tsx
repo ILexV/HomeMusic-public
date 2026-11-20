@@ -24,6 +24,7 @@ import { TrackWeightPage } from './pages/insights/Track';
 import { AlbumPage } from './pages/Album';
 import { ArtistPage } from './pages/Artist';
 import { AssistantChatsPage, AssistantPage } from './pages/Assistant';
+import { setChatAccount } from './pages/AssistantChat';
 import { AssistantTaskPage } from './pages/AssistantTask';
 import { DownloadDetailPage } from './pages/DownloadDetail';
 import { DownloadsPage } from './pages/Downloads';
@@ -120,16 +121,21 @@ export function App() {
   const [bootError, setBootError] = useState<string>();
   const route = useRoute();
 
+  const setSessionUser = useCallback((account: MeOut | null) => {
+    setChatAccount(account?.id ?? null);
+    setMe(account);
+  }, []);
+
   const boot = useCallback(() => {
     setBootError(undefined);
     api
       .me()
-      .then(setMe)
+      .then(setSessionUser)
       .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) setMe(null);
+        if (e instanceof ApiError && e.status === 401) setSessionUser(null);
         else setBootError(errorMessage(e));
       });
-  }, []);
+  }, [setSessionUser]);
 
   useEffect(boot, [boot]);
 
@@ -145,11 +151,11 @@ export function App() {
       resetApiSession();
       restoreWave(null);
       setListeningAccount(null);
-      setMe(null);
+      setSessionUser(null);
     };
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
-  }, []);
+  }, [setSessionUser]);
 
   useEffect(() => {
     if (!me) return;
@@ -181,9 +187,9 @@ export function App() {
     setListeningAccount(null);
     stopListening();
     resetStars();
-    setMe(null);
+    setSessionUser(null);
     navigate(START, { replace: true });
-  }, []);
+  }, [setSessionUser]);
 
   if (me === undefined) {
     return (
@@ -206,7 +212,7 @@ export function App() {
       <>
         <LoginPage onLogin={(account) => {
           resetApiSession();
-          setMe(account);
+          setSessionUser(account);
         }} />
         <Overlays />
       </>

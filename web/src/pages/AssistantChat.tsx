@@ -51,7 +51,8 @@ interface ChatState {
   sending: boolean;
 }
 
-const CURRENT_KEY = 'hm.chat.current';
+let currentKey: string | null = null;
+let draft: { text: string; images: File[] } | null = null;
 let state: ChatState = { id: null, entries: [], loading: false, sending: false };
 // bumps when another chat opens: a reply to the previous one then only stays on the Hub
 let gen = 0;
@@ -64,9 +65,10 @@ function update(patch: Partial<ChatState> | ((s: ChatState) => Partial<ChatState
 }
 
 function remember(id: number | null) {
+  if (currentKey === null) return;
   try {
-    if (id) sessionStorage.setItem(CURRENT_KEY, String(id));
-    else sessionStorage.removeItem(CURRENT_KEY);
+    if (id) sessionStorage.setItem(currentKey, String(id));
+    else sessionStorage.removeItem(currentKey);
   } catch {
     /* storage unavailable: the route still holds the chat */
   }
@@ -75,8 +77,9 @@ function remember(id: number | null) {
 /** The chat open last in this tab (the assistant's tab returns to it). */
 export function currentChatId(): number | null {
   if (state.id) return state.id;
+  if (currentKey === null) return null;
   try {
-    return Number(sessionStorage.getItem(CURRENT_KEY)) || null;
+    return Number(sessionStorage.getItem(currentKey)) || null;
   } catch {
     return null;
   }
@@ -98,11 +101,18 @@ const fromSaved = (m: SavedChatMessage): Entry => ({
   },
 });
 
+function selectChat(id: number | null) {
+  const generation = ++gen;
+  for (const entry of state.entries) entry.images?.forEach(url => URL.revokeObjectURL(url));
+  draft = null;
+  remember(id);
+  update({ id, entries: [], loading: id !== null, error: undefined, sending: false });
+  return generation;
+}
+
 function openChat(id: number) {
   if (state.id === id && !state.error) return;
-  const g = ++gen;
-  remember(id);
-  update({ id, entries: [], loading: true, error: undefined, sending: false });
+  const g = selectChat(id);
   api.savedChat(id).then(
     (c) => g === gen && update({ entries: c.messages.map(fromSaved), loading: false }),
     (e) => g === gen && update({ loading: false, error: errorMessage(e) }),
@@ -111,9 +121,7 @@ function openChat(id: number) {
 
 /** Starts a new chat; the previous one stays in the history. */
 export function newChat() {
-  gen++;
-  remember(null);
-  update({ id: null, entries: [], loading: false, error: undefined, sending: false });
+  selectChat(null);
 }
 
 /** Forgets a chat deleted from the history if it is the open one. */
@@ -121,7 +129,12 @@ export function forgetChat(id: number) {
   if (currentChatId() === id) newChat();
 }
 
-let draft: { text: string; images: File[] } | null = null;
+export function setChatAccount(account: number | null) {
+  const key = account === null ? null : `hm.chat.current:${account}`;
+  if (key === currentKey) return;
+  newChat();
+  currentKey = key;
+}
 
 /** Opens a new chat with a message ready to send (Android "Share" → HomeMusic). */
 export function startChatWith(text: string, images: File[] = []) {
@@ -189,10 +202,20 @@ const setProposal = (id: number, st: Proposal['state']) =>
   update((s) => ({ entries: s.entries.map((e) => (e.id === id && e.proposal ? { ...e, proposal: { ...e.proposal, state: st } } : e)) }));
 
 export function AssistantChat({ chatId }: { chatId: number | null }) {
-  const { id, entries, loading, error, sending } = useSyncExternalStore(
+  const chat = useSyncExternalStore(
     (l) => (listeners.add(l), () => listeners.delete(l)),
     () => state,
   );
+  useEffect(() => {
+    if (chatId) openChat(chatId);
+  }, [chatId]);
+  if (chatId && chat.error) return <ErrorState text={chat.error} onRetry={() => openChat(chatId)} />;
+  if (chatId && (chat.loading || chat.id !== chatId)) return <Loading />;
+  // The first reply assigns a server ID without starting another conversation.
+  return <Conversation key={gen} {...chat} />;
+}
+
+function Conversation({ id, entries, loading, error, sending }: ChatState) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<File[]>([]);
   const textChars = Array.from(text).length;
@@ -200,10 +223,6 @@ export function AssistantChat({ chatId }: { chatId: number | null }) {
   const imagePreviews = useMemo(() => images.map((f) => URL.createObjectURL(f)), [images]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (chatId) openChat(chatId);
-  }, [chatId]);
 
   useEffect(() => {
     if (!draft) return;
@@ -261,9 +280,6 @@ export function AssistantChat({ chatId }: { chatId: number | null }) {
   };
 
   const totalCost = entries.reduce((s, e) => s + (e.cost ?? 0), 0);
-
-  if (chatId && error) return <ErrorState text={error} onRetry={() => openChat(chatId)} />;
-  if (chatId && (loading || id !== chatId)) return <Loading />;
 
   return (
     <div className={images.length ? 'pb-52' : 'pb-32'}>
