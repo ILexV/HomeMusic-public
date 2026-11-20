@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -15,7 +16,7 @@ from app import listen
 from app.api.library import track_out
 from app.api.schemas import ProviderSearchOut, SearchHistoryIn, SearchHistoryOut, SearchOut, SearchTracksOut
 from app.auth import current_user
-from app.catalog.models import CatalogTrack, SearchResults
+from app.catalog.models import CatalogTrack
 from app.config import get_settings
 from app.db import get_session
 from app.events import bus
@@ -110,28 +111,35 @@ async def search(q: str = Query(min_length=1), user: User = Depends(current_user
                  s: AsyncSession = Depends(get_session, scope="function")):
     q = q.strip()
     out = SearchOut(library=[track_out(t) for t in await search_library(s, q)])
-    res: SearchResults | None = None
-    if svc.deezer is not None:
+
+    async def section[T](label: str, request: Awaitable[T]) -> T | None:
         try:
-            res, (tracks, out.tracks_next) = await asyncio.gather(
-                svc.deezer.search(q, kinds=("artist", "album"), limit=ROW_LIMIT),
-                svc.deezer.search_track_page(q, 0, TRACK_PAGE),
-            )
-            res.tracks = tracks
+            return await request
         except Exception as e:
-            log.warning("deezer search failed: %r", e)
-            out.errors.append("Каталог Deezer недоступен")
-    if (res is None or not (res.artists or res.tracks)) and has_cyrillic(q) and svc.hitmoz_catalog is not None:
+            log.warning("deezer search (%s) failed: %r", label, e)
+            out.errors.append(f"Поиск Deezer недоступен: {label}")
+            return None
+
+    artists = None
+    if svc.deezer is not None:
+        artists, albums, page = await asyncio.gather(
+            section("исполнители", svc.deezer.search(q, kinds=("artist",), limit=ROW_LIMIT)),
+            section("альбомы", svc.deezer.search(q, kinds=("album",), limit=ROW_LIMIT)),
+            section("треки", svc.deezer.search_track_page(q, 0, TRACK_PAGE)),
+        )
+        if artists is not None:
+            out.artists = artists.artists
+        if albums is not None:
+            out.albums = await annotate_albums(s, albums.albums, user.id)
+        if page is not None:
+            tracks, out.tracks_next = page
+            out.tracks = await annotate_tracks(s, _unique(tracks), user.id)
+    if not out.artists and (artists is None or not out.tracks) and has_cyrillic(q) and svc.hitmoz_catalog is not None:
         try:
-            artists = await svc.hitmoz_catalog.search_artists(q)
-            res = SearchResults(artists=artists, albums=res.albums if res else [], tracks=res.tracks if res else [])
+            out.artists = await svc.hitmoz_catalog.search_artists(q)
         except Exception as e:
             log.warning("hitmoz catalog search failed: %r", e)
             out.errors.append("Каталог hitmoz недоступен")
-    if res is not None:
-        out.artists = res.artists
-        out.albums = await annotate_albums(s, res.albums, user.id)
-        out.tracks = await annotate_tracks(s, _unique(res.tracks), user.id)
     return out
 
 

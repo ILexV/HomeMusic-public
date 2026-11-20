@@ -78,13 +78,31 @@ async def _after_edit(s: AsyncSession, user: User, album_id: int | None) -> None
 
 
 @router.get("/api/library/albums", response_model=list[LibAlbumOut])
-async def list_albums(q: str | None = None, offset: int = 0, limit: int = Query(50, le=200),
+async def list_albums(q: str | None = None, offset: int = Query(0, ge=0, le=2**63 - 1), limit: int = Query(50, ge=1, le=200),
                       user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
-    rows = (await s.execute(select(Album).order_by(Album.updated_at.desc()))).scalars().all()
-    if q:
-        nq = normalize_title(q).text
-        rows = [a for a in rows if all(w in normalize_title(f"{a.album_artist} {a.title}").text for w in nq.split())]
-    rows = rows[offset: offset + limit]
+    query = select(Album).order_by(Album.updated_at.desc(), Album.id.desc())
+    words = normalize_title(q).text.split() if q else []
+    if not words:
+        rows = (await s.scalars(query.offset(offset).limit(limit))).all()
+    else:
+        # Normalization runs in Python: skip matching albums, not raw database rows.
+        rows = []
+        candidates = await s.stream_scalars(query.execution_options(yield_per=128))
+        try:
+            async for album in candidates:
+                text = normalize_title(f"{album.album_artist} {album.title}").text
+                if not all(word in text for word in words):
+                    continue
+                if offset:
+                    offset -= 1
+                    continue
+                rows.append(album)
+                if len(rows) == limit:
+                    break
+        finally:
+            await candidates.close()
+    if not rows:
+        return []
     counts = dict((await s.execute(
         select(Track.album_id, func.count(Track.id)).where(Track.album_id.in_([a.id for a in rows]))
         .group_by(Track.album_id)

@@ -76,7 +76,7 @@ async def env(hub_env):
             mock.route(host="navidrome.test").mock(side_effect=nd)
             async with app_client(app) as client:
                 await add_track("Кино", "Группа крови", "ndK", deezer_track_id="100")
-                yield {"client": client, "state": state}
+                yield {"client": client, "state": state, "mock": mock}
 
 
 async def add_track(artist: str, title: str, nd_song_id: str, **kw) -> int:
@@ -109,6 +109,65 @@ async def test_library_search_finds_substrings_regardless_of_unicode_case(env, m
         response = await env["client"].get("/api/search", params={"q": query})
         assert response.status_code == 200, response.text
         assert {t["nd_song_id"] for t in response.json()["library"]} == expected, query
+
+
+@pytest.mark.parametrize("failed", ["artist", "album", "track"])
+async def test_search_keeps_available_sections_on_partial_catalog_failure(env, monkeypatch, failed):
+    from app.catalog.deezer import BASE_URL
+    from app.catalog.models import CatalogArtist
+    from app.services import svc
+
+    artist = {"id": 1, "name": "Кино"}
+    for kind, row in {"artist": artist, "album": {"id": 10, "title": "Ночь", "artist": artist},
+                      "track": {"id": 100, "title": "Группа крови", "artist": artist}}.items():
+        route = env["mock"].get(f"{BASE_URL}/search/{kind}")
+        if kind == failed:
+            route.respond(400)
+        else:
+            route.respond(json={"data": [row], "total": 2})
+
+    async def fallback(q):
+        return [CatalogArtist(id="9", ref="hm:9", source="hm", name="Кино")]
+
+    monkeypatch.setattr(svc.hitmoz_catalog, "search_artists", fallback)
+    response = await env["client"].get("/api/search", params={"q": "Кино"})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert [t["nd_song_id"] for t in data["library"]] == ["ndK"]
+    assert [a["ref"] for a in data["artists"]] == (["hm:9"] if failed == "artist" else ["dz:1"])
+    assert [a["ref"] for a in data["albums"]] == ([] if failed == "album" else ["dz:10"])
+    assert [(t["ref"], t["owned"]) for t in data["tracks"]] == ([] if failed == "track" else [("dz:100", True)])
+    assert data["tracks_next"] == (None if failed == "track" else 1)
+    assert data["errors"]
+
+
+@pytest.mark.parametrize("params", [{"limit": -1}, {"limit": 0}, {"offset": -1}])
+async def test_managed_album_list_rejects_invalid_page_bounds(env, params):
+    response = await env["client"].get("/api/library/albums", params=params)
+    assert response.status_code == 422
+
+
+async def test_managed_album_pages_order_ties_and_skip_only_matching_albums(env):
+    from datetime import datetime
+
+    from app.db import session_scope
+    from app.models import Album
+
+    async with session_scope() as s:
+        for title in ("Ночь первая", "Ночь вторая", "День", "Ночь третья"):
+            album = Album(uid=str(uuid.uuid4()), title=title, album_artist="Кино", updated_at=datetime(2020, 1, 1))
+            s.add(album)
+        await s.flush()
+        newest_id = album.id
+    await add_track("Кино", "Дорога", "ndRoad", album_id=newest_id)
+    for params, expected in [
+        ({}, [("Ночь третья", 1), ("День", 0)]),
+        ({"q": "ночь КИНО", "offset": 1}, [("Ночь вторая", 0), ("Ночь первая", 0)]),
+        ({"q": "ночь КИНО", "offset": 3}, []),
+    ]:
+        response = await env["client"].get("/api/library/albums", params={"limit": 2, **params})
+        assert response.status_code == 200, response.text
+        assert [(a["title"], a["track_count"]) for a in response.json()] == expected
 
 
 async def test_album_songs_are_owned_tracks_with_the_hubs_refs(env):
