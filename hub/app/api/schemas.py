@@ -525,6 +525,9 @@ class NdSongOut(TrackOut):
     nd_artist_id: str | None = None
 
 
+CatalogStatus = Literal["matched", "not_found", "ambiguous", "unavailable"]
+
+
 class NdAlbumOut(BaseModel):
     id: str
     title: str
@@ -536,6 +539,7 @@ class NdAlbumOut(BaseModel):
     cover_url: str | None = None
     starred: bool = False
     tracks: list[NdSongOut] | None = None
+    catalog_status: CatalogStatus | None = None
 
 
 class NdArtistOut(BaseModel):

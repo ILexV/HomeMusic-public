@@ -182,7 +182,7 @@ class HitmozCatalog:
     async def _produce_album(self, album_id: str) -> dict:
         html, base = await self.provider.fetch_page(f"/album/{album_id}")
         d = parse_album_page(html, base)
-        if not d["title"]:
+        if not d["title"] or (d["id"] and d["id"] != album_id):
             raise ProviderError(f"hitmoz: не удалось разобрать страницу альбома {album_id}")
         artist_ref = make_ref("hm", d["artist_id"]) if d["artist_id"] else None
         album = CatalogAlbum(
@@ -190,7 +190,7 @@ class HitmozCatalog:
             source="hm",
             id=album_id,
             title=d["title"],
-            artist=d["artist"] or (d["tracks"][0].artist if d["tracks"] else ""),
+            artist=d["artist"] or "",
             artist_ref=artist_ref,
             year=d["year"],
             cover_url=yandex_size(d["cover_url"], COVER_SIZE),
@@ -207,5 +207,5 @@ class HitmozCatalog:
     async def get_album(self, album_id: str) -> CatalogAlbum:
         """`/album/{id}`: «Название (Год)», artist, genre, cover and tracks in order."""
         album_id = str(album_id)
-        data = await cached(f"hm:album:{album_id}", TTL_S, lambda: self._produce_album(album_id))
+        data = await cached(f"hm:album:v2:{album_id}", TTL_S, lambda: self._produce_album(album_id))
         return CatalogAlbum.model_validate(data)

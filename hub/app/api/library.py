@@ -120,7 +120,9 @@ async def get_album(album_id: int, catalog: bool = False, user: User = Depends(c
                     s: AsyncSession = Depends(get_session, scope="function")):
     out = await album_out(s, await _album(s, album_id), with_tracks=True)
     if catalog:
-        release = await library_album_tracks(s, user.id, out.album_artist, out.title, out.year, out.deezer_album_id)
+        _, release = await library_album_tracks(
+            s, user.id, out.album_artist, out.title, out.year, out.deezer_album_id, out.tracks or [],
+        )
         local_ids = {t.id for t in out.tracks or ()}
         local_refs = {t.ref for t in out.tracks or () if t.ref}
         out.other_tracks = [t for t in release if t.library_track_id not in local_ids and t.ref not in local_refs]

@@ -1,5 +1,5 @@
 export struct QueueItem {
-    // `source` is the index in the real queue. A search hides rows without renumbering them.
+    // Stable index in the source queue or album, independent of filtering and sections.
     source: int,
     number: string,
     title: string,
@@ -11,6 +11,12 @@ export struct QueueItem {
     identified: bool,
     can-move-next: bool,
     can-move-end: bool,
+}
+
+export struct AlbumSections {
+    library: [QueueItem],
+    external: [QueueItem],
+    external-note: string,
 }
 
 export struct AlbumItem {

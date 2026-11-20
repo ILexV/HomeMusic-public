@@ -375,7 +375,8 @@ def parse_album_page(html: str, base_url: str) -> dict:
     if cover is None:
         og = tree.css_first('meta[property="og:image"]')
         cover = clean_image_url(abs_url(og.attributes.get("content"), base_url)) if og is not None else None
-    content = tree.css_first(".p-info ul.tracks__list") or tree.css_first("ul.tracks__list") or tree
+    # Lists outside the album block can be recommendations, not tracks of this release.
+    content = tree.css_first(".p-info ul.tracks__list")
     return {
         "id": m.group(1) if m else None,
         "title": title,
@@ -385,7 +386,7 @@ def parse_album_page(html: str, base_url: str) -> dict:
         "artist_id": artist_id,
         "genre": _text(genre) or None,
         "cover_url": cover,
-        "tracks": parse_track_items(content, base_url),
+        "tracks": parse_track_items(content, base_url) if content is not None else [],
     }
 
 

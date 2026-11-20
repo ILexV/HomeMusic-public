@@ -59,7 +59,7 @@ async def env(hub_env):
         elif name == "getAlbum":
             if p["id"] != "alK":
                 return httpx.Response(200, json={"subsonic-response": {"status": "failed", "error": {"code": 70, "message": "not found"}}})
-            body = {"album": {**ALBUMS[0], "song": SONGS}}
+            body = {"album": {**ALBUMS[0], "song": SONGS, **state.get("album", {})}}
         elif name == "getArtist":
             body = {"artist": {**ARTISTS[1], "album": state.get("artist_albums", ALBUMS)}}
         elif name == "getStarred2":
@@ -97,6 +97,7 @@ async def test_album_songs_are_owned_tracks_with_the_hubs_refs(env):
     assert r.status_code == 200, r.text
     a = r.json()
     assert (a["title"], a["year"], a["cover_url"]) == ("Группа крови", 1988, "/api/nd/cover/al-alK?size=300")
+    assert a["catalog_status"] is None
     k, z = a["tracks"]
     # the Hub's record gives the Deezer ref; a song only Navidrome knows plays by nd:<song>
     assert (k["ref"], k["nd_song_id"], k["owned"], k["library_track_id"] is not None) == ("dz:100", "ndK", True, True)
@@ -130,6 +131,7 @@ async def test_partial_album_catalog_preview_is_metadata_only(env, monkeypatch):
     client = env["client"]
     nd = await client.get("/api/nd/albums/alK?catalog=true")
     assert nd.status_code == 200, nd.text
+    assert nd.json()["catalog_status"] == "matched"
     assert [(t["ref"], t["owned"], t["nd_song_id"]) for t in nd.json()["tracks"]] == [
         ("dz:100", True, "ndK"), ("dz:101", False, None), ("nd:ndZ", True, "ndZ")]
     managed = await client.get(f"/api/library/albums/{album_id}?catalog=true")
@@ -147,6 +149,9 @@ async def test_album_falls_back_to_second_catalog(env, monkeypatch, down):
     from tests.support import FakeDeezer
 
     catalog = FakeDeezer()
+    catalog.track.album_ref = None
+    catalog.track.album_title = None
+
     async def no_match(artist, title):
         if down:
             raise httpx.ConnectError("unavailable")
@@ -154,19 +159,22 @@ async def test_album_falls_back_to_second_catalog(env, monkeypatch, down):
 
     class Hitmoz:
         async def search_albums(self, query):
-            return [catalog.album.model_copy(update={"ref": "hm:99", "source": "hm", "id": "99"})]
+            assert query == catalog.album.title
+            return [catalog.album.model_copy(update={"ref": "hm:99", "source": "hm", "id": "99", "artist": ""})]
 
         async def get_album(self, id_):
             assert id_ == "99"
             missing = catalog.track.model_copy(update={"ref": "hm:2", "source": "hm", "id": "2",
                                                        "title": "Недостающий трек", "isrc": None})
-            return catalog.album.model_copy(update={"tracks": [missing]})
+            local = catalog.track.model_copy(update={"ref": "hm:1", "source": "hm", "id": "1", "isrc": None})
+            return catalog.album.model_copy(update={"id": "99", "ref": "hm:99", "source": "hm", "tracks": [missing, local]})
 
     monkeypatch.setattr(catalog, "search_albums", no_match)
     monkeypatch.setattr(svc, "deezer", catalog)
     monkeypatch.setattr(svc, "hitmoz_catalog", Hitmoz())
     response = await env["client"].get("/api/nd/albums/alK?catalog=true")
     assert response.status_code == 200, response.text
+    assert response.json()["catalog_status"] == "matched"
     assert [(t["ref"], t["owned"]) for t in response.json()["tracks"]] == [
         ("hm:2", False), ("dz:100", True), ("nd:ndZ", True)]
 
@@ -176,13 +184,201 @@ async def test_unidentified_album_requires_unambiguous_release(env, monkeypatch)
     from tests.support import FakeDeezer
 
     catalog = FakeDeezer()
+    catalog.track.album_ref = None
+    catalog.track.album_title = None
+
     async def ambiguous(artist, title):
-        return [catalog.album, catalog.album.model_copy(update={"ref": "dz:11"})]
+        return [catalog.album, catalog.album.model_copy(update={"ref": "dz:11", "id": "11"})]
+
+    async def detail(id_):
+        return catalog.album.model_copy(update={"ref": f"dz:{id_}", "id": id_})
+
+    monkeypatch.setattr(catalog, "get_album", detail)
     monkeypatch.setattr(catalog, "search_albums", ambiguous)
     monkeypatch.setattr(svc, "deezer", catalog)
     response = await env["client"].get("/api/nd/albums/alK?catalog=true")
     assert response.status_code == 200, response.text
+    assert response.json()["catalog_status"] == "ambiguous"
     assert [t["ref"] for t in response.json()["tracks"]] == ["dz:100", "nd:ndZ"]
+
+
+@pytest.mark.parametrize("with_album_id", [True, False])
+async def test_recording_identifies_renamed_and_misdated_release(env, monkeypatch, with_album_id):
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    env["state"]["album"] = {"name": "Имя на диске", "artist": "Локальный тег", "year": 2000, "song": SONGS[:1]}
+    if not with_album_id:
+        catalog.track.album_ref = None  # the recording only has the original album name
+    extra = catalog.track.model_copy(update={"ref": "dz:101", "id": "101", "title": "Новый трек", "isrc": None})
+    catalog.album.tracks = [catalog.track, extra]
+    queries = []
+
+    async def search(artist, title):
+        queries.append((artist, title))
+        return [catalog.album] if (artist, title) == (catalog.album.artist, catalog.album.title) else []
+
+    monkeypatch.setattr(catalog, "search_albums", search)
+    monkeypatch.setattr(svc, "deezer", catalog)
+    response = await env["client"].get("/api/nd/albums/alK?catalog=true")
+    album = response.json()
+    assert album["catalog_status"] == "matched"
+    assert [(t["ref"], t["owned"]) for t in album["tracks"]] == [("dz:100", True), ("dz:101", False)]
+    assert queries == ([] if with_album_id else [(catalog.album.artist, catalog.album.title)])
+
+
+async def test_single_stays_a_single_instead_of_searching_for_more_music(env, monkeypatch):
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    env["state"]["album"] = {"song": SONGS[:1]}
+    monkeypatch.setattr(svc, "deezer", catalog)
+    album = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
+    assert album["catalog_status"] == "matched" and album["song_count"] == 1
+    assert [(t["ref"], t["owned"]) for t in album["tracks"]] == [("dz:100", True)]
+
+
+@pytest.mark.parametrize(("failure", "expected"), [("error", "unavailable"), ("missing", "not_found"),
+                                                  ("wrong_year", "not_found"), ("no_overlap", "not_found")])
+async def test_missing_and_unavailable_editions_are_distinct(env, monkeypatch, failure, expected):
+    from app.catalog.deezer import CatalogNotFound
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+
+    async def track(id_):
+        raise CatalogNotFound(id_)
+
+    async def search(artist, title):
+        if failure == "error":
+            raise httpx.ConnectError("unavailable")
+        if failure == "missing":
+            return []
+        return [catalog.album.model_copy(update={"year": None, "release_date": None})]
+
+    if failure == "wrong_year":
+        catalog.album.year = 2000  # absent on the search card, visible on the album itself
+    if failure == "no_overlap":
+        catalog.album.tracks = [catalog.track.model_copy(update={"ref": "dz:200", "id": "200", "title": "Не из альбома"})]
+    monkeypatch.setattr(catalog, "get_track", track)
+    monkeypatch.setattr(catalog, "search_albums", search)
+    monkeypatch.setattr(svc, "deezer", catalog)
+    monkeypatch.setattr(svc, "hitmoz_catalog", None)
+    data = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
+    assert data["catalog_status"] == expected
+    assert [t["ref"] for t in data["tracks"]] == ["dz:100", "nd:ndZ"]
+
+
+async def test_album_search_without_any_catalog_ids_preserves_navidrome_song(env, monkeypatch):
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    env["state"]["album"] = {"song": SONGS[1:]}
+    catalog = FakeDeezer()
+    missing = catalog.track.model_copy(update={"id": "101", "ref": "dz:101", "title": "Первая", "isrc": None})
+    owned = catalog.track.model_copy(update={"id": "102", "ref": "dz:102", "title": "Звезда", "track_no": 2,
+                                             "duration_s": 221, "isrc": None})
+    catalog.album.tracks = [missing, owned]
+    monkeypatch.setattr(svc, "deezer", catalog)
+    data = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
+    assert data["catalog_status"] == "matched"
+    assert [(t["ref"], t["owned"], t["nd_song_id"]) for t in data["tracks"]] == [
+        ("dz:101", False, None), ("dz:102", True, "ndZ")]
+
+
+async def test_stored_release_on_second_library_row_wins_over_recording_lookup(env, monkeypatch):
+    from app.db import session_scope
+    from app.models import Album
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    async with session_scope() as s:
+        a = Album(uid=str(uuid.uuid4()), title="Группа крови", album_artist="Кино", deezer_album_id="10")
+        s.add(a)
+        await s.flush()
+        album_id = a.id
+    await add_track("Кино", "Звезда", "ndZ", album_id=album_id)
+    lookups = []
+
+    async def record(id_):
+        lookups.append(id_)
+        return catalog.track
+
+    monkeypatch.setattr(catalog, "get_track", record)
+    monkeypatch.setattr(svc, "deezer", catalog)
+    data = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
+    assert data["catalog_status"] == "matched"
+    assert not lookups
+
+
+@pytest.mark.parametrize("failure", ["empty", "timeout", "different_edition"])
+async def test_empty_or_slow_exact_album_tries_backup_catalog(env, monkeypatch, failure):
+    import asyncio
+
+    from app.api import catalog as catalog_api
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    # The primary catalog knows the exact album, but its tracklist is unavailable.
+    async def broken_album(id_):
+        if failure == "timeout":
+            await asyncio.Event().wait()
+        return catalog.album.model_copy(update={"tracks": [], "nb_tracks": 1 if failure == "different_edition" else 2})
+
+    class Hitmoz:
+        album = catalog.album.model_copy(update={"id": "99", "source": "hm", "ref": "hm:99"})
+
+        async def search_albums(self, query):
+            return [self.album]
+
+        async def get_album(self, id_):
+            track = catalog.track.model_copy(update={"id": "8", "ref": "hm:8", "source": "hm", "album_ref": "hm:99"})
+            other = track.model_copy(update={"id": "9", "ref": "hm:9", "title": "Бонус", "isrc": None})
+            return self.album.model_copy(update={"tracks": [track, other]})
+
+    monkeypatch.setattr(catalog_api, "_PROVIDER_SECONDS", 0.1)
+    monkeypatch.setattr(catalog, "get_album", broken_album)
+    monkeypatch.setattr(svc, "deezer", catalog)
+    monkeypatch.setattr(svc, "hitmoz_catalog", Hitmoz())
+    data = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
+    if failure == "different_edition":
+        assert data["catalog_status"] == "unavailable"
+        assert [t["ref"] for t in data["tracks"]] == ["dz:100", "nd:ndZ"]
+        return
+    assert data["catalog_status"] == "matched"
+    assert [(t["ref"], t["owned"]) for t in data["tracks"]] == [("dz:100", True), ("hm:9", False), ("nd:ndZ", True)]
+
+
+async def test_conflicting_recording_releases_are_not_combined(env, monkeypatch):
+    from app.services import svc
+    from tests.support import FakeDeezer
+
+    catalog = FakeDeezer()
+    await add_track("Кино", "Звезда", "ndZ", deezer_track_id="300")
+    monkeypatch.setattr(svc, "deezer", catalog)
+    data = (await env["client"].get("/api/nd/albums/alK?catalog=true")).json()
+    assert data["catalog_status"] == "ambiguous"
+    assert [t["ref"] for t in data["tracks"]] == ["dz:100", "dz:300"]
+
+
+def test_album_merge_reserves_exact_refs_and_isrcs_before_name_matching():
+    from app.api.medialib import complete_tracklist
+    from app.api.schemas import NdSongOut, TrackOut
+
+    local = NdSongOut(ref="nd:1", id="1", source="nd", nd_song_id="1", owned=True, artist="Кино", title="Песня",
+                      duration_s=200, isrc="RU-A1D-88-00001")
+    # Library-wide ownership falls back to a fingerprint without edition qualifiers. It is not
+    # proof that either version is the local file.
+    remix = TrackOut(ref="dz:2", id="2", source="dz", owned=True, nd_song_id="1", artist="Кино",
+                     title="Песня (Remix)", duration_s=200, isrc="RUA1D8800002")
+    original = remix.model_copy(update={"ref": "dz:3", "id": "3", "title": "Song", "isrc": "rua1d8800001"})
+    rows = complete_tracklist([local], [remix, original])
+    assert [(t.ref, t.owned, t.nd_song_id) for t in rows] == [("dz:2", False, None), ("dz:3", True, "1")]
 
 
 async def test_liked_lists_the_newest_like_first(env):

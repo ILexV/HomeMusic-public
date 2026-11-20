@@ -116,8 +116,7 @@ pub struct Album {
     pub artist: String,
     pub artist_id: String,
     pub song_count: u32,
-    /// `single` when Navidrome says so. Empty when the server did not say.
-    pub release: String,
+    pub is_single: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -647,15 +646,11 @@ fn artist_parts(value: &Value) -> Option<Artist> {
 }
 
 fn album_list(value: &Value) -> Vec<Album> {
-    let rows = if let Some(rows) = value.as_array() {
-        rows.iter().filter_map(album_parts).collect::<Vec<_>>()
+    if let Some(rows) = value.as_array() {
+        rows.iter().filter_map(album_parts).collect()
     } else {
         album_parts(value).into_iter().collect()
-    };
-    // A single is one track under its own title. The album column keeps albums, EPs, and compilations.
-    rows.into_iter()
-        .filter(|album| album.release != "single")
-        .collect()
+    }
 }
 
 fn album_parts(value: &Value) -> Option<Album> {
@@ -675,34 +670,26 @@ fn album_parts(value: &Value) -> Option<Album> {
         artist: text_field(value, "artist"),
         artist_id: text_field(value, "artistId"),
         song_count: number_field(value, "songCount"),
-        release: release_kind(value),
+        is_single: is_single(value.get("releaseTypes")),
     })
 }
 
-/// `single` hides the row. `album` covers an album, an EP, and a compilation. Empty keeps the row.
-fn release_kind(value: &Value) -> String {
-    let mut kinds = Vec::new();
-    match value.get("releaseTypes") {
-        Some(Value::Array(items)) => {
-            for item in items {
-                if let Some(text) = item.as_str() {
-                    kinds.push(text.to_ascii_lowercase());
+// An explicit album, EP or compilation tag takes precedence over a secondary single tag.
+fn is_single(types: Option<&Value>) -> bool {
+    match types {
+        Some(Value::String(kind)) => kind.eq_ignore_ascii_case("single"),
+        Some(Value::Array(kinds)) => {
+            let mut single = false;
+            for kind in kinds.iter().filter_map(Value::as_str) {
+                if ["album", "ep", "compilation"].iter().any(|tag| kind.eq_ignore_ascii_case(tag)) {
+                    return false;
                 }
+                single |= kind.eq_ignore_ascii_case("single");
             }
+            single
         }
-        Some(Value::String(text)) => kinds.push(text.to_ascii_lowercase()),
-        _ => {}
+        _ => false,
     }
-    if kinds
-        .iter()
-        .any(|kind| kind == "album" || kind == "ep" || kind == "compilation")
-    {
-        return "album".into();
-    }
-    if kinds.iter().any(|kind| kind == "single") {
-        return "single".into();
-    }
-    String::new()
 }
 
 fn album_name(value: &Value) -> String {
@@ -1013,10 +1000,10 @@ mod tests {
             ]}}
         });
         let albums = albums_from_list(&albums);
-        assert_eq!(albums.len(), 2);
+        assert_eq!(albums.len(), 3);
         assert_eq!(albums[0].name, "Visions");
         assert_eq!(albums[0].song_count, 8);
-        assert_eq!(albums[0].release, "album");
+        assert!(!albums[0].is_single);
         assert_eq!(albums[1].name, "Клуб");
         let owned = albums_for_artist(&albums, "ar1", "Damned Anthem");
         assert_eq!(owned.len(), 1);
@@ -1029,13 +1016,16 @@ mod tests {
                 artist: "Damned Anthem".into(),
                 artist_id: String::new(),
                 song_count: 1,
-                release: String::new(),
+                is_single: false,
             }],
             "ar1",
             "Damned Anthem",
         );
         assert_eq!(by_name.len(), 1);
-        assert_eq!(albums_for_artist(&albums, "", "").len(), 2);
+        assert_eq!(albums_for_artist(&albums, "", "").len(), 3);
+        let escala = albums_for_artist(&albums, "ar3", "Escala");
+        assert_eq!(escala.iter().map(|a| (a.id.as_str(), a.is_single)).collect::<Vec<_>>(),
+                   [("al2", false), ("al4", true)]);
 
         let album = serde_json::json!({
             "subsonic-response": {"status": "ok", "album": {

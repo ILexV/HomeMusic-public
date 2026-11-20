@@ -6,7 +6,6 @@ has these as native screens (Tempus); the PWA in a plain browser shows them from
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 from datetime import datetime
 from urllib.parse import quote
 
@@ -16,7 +15,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.catalog import library_album_tracks
+from app.api.catalog import library_album_tracks, match_album_tracks
 from app.api.schemas import NdAlbumOut, NdArtistOut, NdArtistPageOut, NdHomeOut, NdLikedOut, NdSongOut, TrackOut
 from app.auth import current_user, user_navidrome
 from app.db import get_session
@@ -49,14 +48,21 @@ def artist_out(a: dict) -> NdArtistOut:
                        cover_url=cover_url(a.get("coverArt")), starred=bool(a.get("starred")))
 
 
-async def songs_out(s: AsyncSession, songs: list[dict]) -> list[NdSongOut]:
+async def songs_out(s: AsyncSession, songs: list[dict], *, album_refs: bool = False) -> list[NdSongOut]:
     """Navidrome songs as tracks: the Hub's own record of the file gives the Deezer ref (mixes, «Моя волна» and
     listening data know the song by it), the rest are `nd:<song>`."""
     ids = [x["id"] for x in songs if x.get("id")]
     rows: dict[str, Track] = {}
+    album_ids: dict[str, str] = {}
     for i in range(0, len(ids), 500):
         q = select(Track).where(Track.nd_song_id.in_(ids[i:i + 500]))
-        rows.update((t.nd_song_id, t) for t in (await s.execute(q)).scalars())
+        if album_refs:
+            for t, album_id in await s.execute(q.outerjoin(Album, Track.album_id == Album.id).add_columns(Album.deezer_album_id)):
+                rows[t.nd_song_id] = t
+                if album_id:
+                    album_ids[t.nd_song_id] = album_id
+        else:
+            rows.update((t.nd_song_id, t) for t in (await s.execute(q)).scalars())
     out = []
     for x in songs:
         sid = x.get("id")
@@ -66,11 +72,15 @@ async def songs_out(s: AsyncSession, songs: list[dict]) -> list[NdSongOut]:
         ref = library_track(t).ref if t is not None else f"nd:{sid}"
         artist = x.get("artist") or ""
         names = [a["name"] for a in x.get("artists") or [] if a.get("name")] or ([artist] if artist else [])
+        isrc = x.get("isrc")
+        if isinstance(isrc, list):
+            isrc = next((value for value in isrc if value), None)
         out.append(NdSongOut(
             ref=ref, source="dz" if ref.startswith("dz:") else "nd", id=ref.split(":", 1)[1], title=x.get("title") or "",
             artist=artist, artists=names, album_title=x.get("album"), album_artist=x.get("displayAlbumArtist"),
             duration_s=x.get("duration"), track_no=x.get("track"), disc_no=x.get("discNumber"),
-            isrc=(x.get("isrc") or [None])[0] if isinstance(x.get("isrc"), list) else x.get("isrc"),
+            album_ref=f"dz:{album_ids[sid]}" if sid in album_ids else None,
+            isrc=isrc or (t.isrc if t is not None else None),
             explicit=t.explicit if t is not None else None,
             cover_url=cover_url(x.get("coverArt"), BIG_COVER), cover_small_url=cover_url(x.get("coverArt")),
             owned=True, library_track_id=t.id if t is not None else None, nd_song_id=sid,
@@ -125,30 +135,23 @@ async def albums(type: str = "alphabeticalByName", offset: int = Query(0, ge=0),
 
 def complete_tracklist(local: list[NdSongOut], release: list[TrackOut]) -> list[NdSongOut]:
     """Keep Navidrome identities (and local-only bonus tracks), in catalog order."""
-    by_song = {t.nd_song_id: i for i, t in enumerate(local) if t.nd_song_id}
-    by_ref = {t.ref: i for i, t in enumerate(local)}
-    by_name = defaultdict(list)
-    for i, t in enumerate(local):
-        by_name[t.artist.casefold(), t.title.casefold()].append(i)
-    used = set()
+    matches = match_album_tracks(local, release)
+    used = set(matches.values())
+    song_ids = {t.nd_song_id for t in local if t.nd_song_id}
     rows = []
-    for track in release:
-        index = by_ref.get(track.ref)
+    for j, track in enumerate(release):
+        index = matches.get(j)
         if index is None:
-            index = by_song.get(track.nd_song_id)
-        if index is None:
-            candidates = [i for i in by_name[track.artist.casefold(), track.title.casefold()] if i not in used
-                          and (not track.duration_s or not local[i].duration_s or abs(track.duration_s - local[i].duration_s) <= 3)
-                          and (not track.track_no or not local[i].track_no or track.track_no == local[i].track_no)
-                          and (track.disc_no or 1) == (local[i].disc_no or 1)]
-            if len(candidates) == 1:
-                index = candidates[0]
-        if index is None or index in used:
+            if track.nd_song_id in song_ids:
+                # Global ownership also uses a version-blind fingerprint. Don't mark another
+                # version as this local file if album matching rejected it.
+                track = track.model_copy(update={"owned": False, "nd_song_id": None, "library_track_id": None})
             rows.append(NdSongOut(**track.model_dump()))
         else:
-            used.add(index)
+            # Keep the local identity used by the player, not an external copy of the song.
             song = local[index]
-            update = {"album_ref": track.album_ref, "track_no": track.track_no or song.track_no}
+            update = {"album_ref": track.album_ref, "track_no": track.track_no or song.track_no,
+                      "disc_no": track.disc_no or song.disc_no}
             if song.source == "nd":
                 update.update(ref=track.ref, id=track.id, source=track.source)
             rows.append(song.model_copy(update=update))
@@ -163,11 +166,15 @@ async def album(album_id: str, catalog: bool = False, user: User = Depends(curre
     if not a.get("id"):
         raise HTTPException(404, "Альбом не найден")
     out = album_out(a)
-    out.tracks = await songs_out(s, a.get("song") or [])
-    if catalog and out.tracks:
-        local_id = next((t.library_track_id for t in out.tracks if t.library_track_id), None)
-        deezer_id = await s.scalar(select(Album.deezer_album_id).join(Track).where(Track.id == local_id)) if local_id else None
-        release = await library_album_tracks(s, user.id, out.artist, out.title, out.year, deezer_id)
+    out.tracks = await songs_out(s, a.get("song") or [], album_refs=catalog)
+    if catalog:
+        album_ids = {t.album_ref.split(":", 1)[1] for t in out.tracks if t.album_ref}
+        if len(album_ids) > 1:
+            out.catalog_status = "ambiguous"
+            return out
+        out.catalog_status, release = await library_album_tracks(
+            s, user.id, out.artist, out.title, out.year, next(iter(album_ids), None), out.tracks,
+        )
         if release:
             out.tracks = complete_tracklist(out.tracks, release)
             out.song_count = len(out.tracks)

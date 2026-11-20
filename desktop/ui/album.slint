@@ -1,13 +1,13 @@
 import { TrackList } from "item-menus.slint";
-import { CoverArt, EmptyNote, EqButton, QueueRow, ScrollPort, Theme } from "theme.slint";
-import { QueueItem } from "types.slint";
+import { CoverArt, EmptyNote, EqButton, Heading, QueueRow, ScrollPort, Theme } from "theme.slint";
+import { AlbumSections } from "types.slint";
 
 export component AlbumDetail inherits Rectangle {
     in property <string> album-title;
     in property <string> album-artist;
     in property <image> album-cover;
     in property <bool> album-has-cover;
-    in property <[QueueItem]> album-tracks;
+    in property <AlbumSections> album-sections;
     in property <string> album-total;
     in property <bool> album-busy;
     in property <string> album-error;
@@ -19,7 +19,8 @@ export component AlbumDetail inherits Rectangle {
     callback album-enqueue();
     callback album-download();
     callback album-play-row(int);
-    private property <bool> can-play: !root.album-busy && root.album-error == "" && root.album-tracks.length > 0;
+    private property <bool> loaded: !root.album-busy && root.album-error == "";
+    private property <bool> can-play: root.loaded && (root.album-sections.library.length > 0 || root.album-sections.external.length > 0);
     vertical-stretch: 1;
     min-height: root.compact ? 160px : 240px;
 
@@ -58,9 +59,22 @@ export component AlbumDetail inherits Rectangle {
             min-height: 28px;
             if root.album-busy : EmptyNote { message: "Загрузка альбома…"; }
             if !root.album-busy && root.album-error != "" : EmptyNote { message: root.album-error; error: true; }
-            if !root.album-busy && root.album-error == "" && root.album-tracks.length == 0 : EmptyNote { message: "В альбоме нет треков"; }
-            if root.can-play : ScrollPort {
-                for item in root.album-tracks : QueueRow {
+            if root.loaded : ScrollPort {
+                Heading { height: 28px; title: "В библиотеке"; aside: "\{root.album-sections.library.length}"; }
+                if root.album-sections.library.length == 0 : Text {
+                    text: "В библиотеке нет треков этого релиза."; color: Theme.muted; font-size: 12px; wrap: word-wrap;
+                }
+                for item in root.album-sections.library : QueueRow {
+                    item: item;
+                    list: TrackList.album;
+                    clicked => { root.album-play-row(item.source); }
+                }
+                Rectangle { height: 1px; background: Theme.line; }
+                Heading { height: 28px; title: "На внешних сервисах"; }
+                if root.album-sections.external.length == 0 : Text {
+                    text: root.album-sections.external-note; color: Theme.muted; font-size: 12px; wrap: word-wrap;
+                }
+                for item in root.album-sections.external : QueueRow {
                     item: item;
                     list: TrackList.album;
                     clicked => { root.album-play-row(item.source); }

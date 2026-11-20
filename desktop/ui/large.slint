@@ -3,7 +3,7 @@ import { AlbumMenu, TrackList } from "item-menus.slint";
 import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TrackActions, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
-import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
+import { AlbumItem, AlbumSections, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
 
 component NavigationItem inherits Rectangle {
     in property <string> label;
@@ -274,7 +274,7 @@ export component Large inherits Rectangle {
     in property <string> album-artist;
     in property <image> album-cover;
     in property <bool> album-has-cover;
-    in property <[QueueItem]> album-tracks;
+    in property <AlbumSections> album-sections;
     in property <string> album-total;
     in property <bool> album-busy;
     in property <string> album-error;
@@ -402,7 +402,7 @@ export component Large inherits Rectangle {
                     album-artist: root.album-artist;
                     album-cover: root.album-cover;
                     album-has-cover: root.album-has-cover;
-                    album-tracks: root.album-tracks;
+                    album-sections: root.album-sections;
                     album-total: root.album-total;
                     album-busy: root.album-busy;
                     album-error: root.album-error;
@@ -555,8 +555,8 @@ export component Large inherits Rectangle {
                         property <int> columns: max(2, floor(self.width / 148px));
                         property <length> card-width: (self.width - 8px - (self.columns - 1) * 8px) / self.columns;
                         if root.albums.length == 0 : SearchEmpty {
-                            message: root.search != "" ? "По запросу «\{root.search}» альбомов не найдено." :
-                                root.artists.length > 1 ? "У выбранного исполнителя пока нет альбомов." : "В библиотеке пока нет альбомов.";
+                            message: root.search != "" ? "По запросу «\{root.search}» релизов не найдено." :
+                                root.artists.length > 1 ? "У выбранного исполнителя пока нет релизов в библиотеке." : "В библиотеке пока нет релизов.";
                             can-clear: root.search != "";
                             clear => { root.clear-query(); }
                         }

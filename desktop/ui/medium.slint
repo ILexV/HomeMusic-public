@@ -1,7 +1,7 @@
 import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, Heading, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
-import { CatalogHit, QueueItem } from "types.slint";
+import { AlbumSections, CatalogHit, QueueItem } from "types.slint";
 
 export component Medium inherits Rectangle {
     in property <string> track-title;
@@ -44,7 +44,7 @@ export component Medium inherits Rectangle {
     in property <string> album-artist;
     in property <image> album-cover;
     in property <bool> album-has-cover;
-    in property <[QueueItem]> album-tracks;
+    in property <AlbumSections> album-sections;
     in property <string> album-total;
     in property <bool> album-busy;
     in property <string> album-error;
@@ -251,7 +251,7 @@ export component Medium inherits Rectangle {
                 album-artist: root.album-artist;
                 album-cover: root.album-cover;
                 album-has-cover: root.album-has-cover;
-                album-tracks: root.album-tracks;
+                album-sections: root.album-sections;
                 album-total: root.album-total;
                 album-busy: root.album-busy;
                 album-error: root.album-error;

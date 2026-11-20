@@ -809,11 +809,13 @@ export component TrackActions inherits Rectangle {
         border-width: self.focused ? 1px : 0px;
         border-color: Theme.orange;
         background: touch.has-hover ? Theme.raised : transparent;
-        Text {
+        for dot[index] in 3 : Rectangle {
             visible: root.row-active || dots.focused || touch.has-hover;
-            text: "⋯"; color: dots.focused || touch.has-hover ? Theme.orange : Theme.text;
-            font-size: 18px;
-            horizontal-alignment: center; vertical-alignment: center;
+            width: 3px; height: 3px;
+            border-radius: 1.5px;
+            x: (dots.width - 15px) / 2 + index * 6px;
+            y: (dots.height - self.height) / 2;
+            background: dots.focused || touch.has-hover ? Theme.orange : Theme.text;
         }
         keys := FocusScope {
             enabled: root.tab-stop;

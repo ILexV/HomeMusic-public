@@ -4,7 +4,7 @@ import { Mini } from "mini.slint";
 import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
 
 export { ItemActions, TrackList, TrackPlacement } from "item-menus.slint";
-import { AlbumItem, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
+import { AlbumItem, AlbumSections, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
 import { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow } from "tools.slint";
 export { ToolsWindow, ModeRecommendation, OfflineRow, LyricLine, SmartPlaylistRow, SmartRuleRow, DeviceRow, RecommendationRow }
 import { DiscographyPanel } from "discography.slint";
@@ -93,7 +93,7 @@ export component AppWindow inherits Window {
     in-out property <string> album-artist;
     in-out property <image> album-cover;
     in-out property <bool> album-has-cover;
-    in-out property <[QueueItem]> album-tracks;
+    in-out property <AlbumSections> album-sections;
     in-out property <string> album-total;
     in-out property <bool> album-busy;
     in-out property <string> album-error;
@@ -292,7 +292,7 @@ export component AppWindow inherits Window {
                         album-artist: root.album-artist;
                         album-cover: root.album-cover;
                         album-has-cover: root.album-has-cover;
-                        album-tracks: root.album-tracks;
+                        album-sections: root.album-sections;
                         album-total: root.album-total;
                         album-busy: root.album-busy;
                         album-error: root.album-error;
@@ -368,7 +368,7 @@ export component AppWindow inherits Window {
                         album-artist: root.album-artist;
                         album-cover: root.album-cover;
                         album-has-cover: root.album-has-cover;
-                        album-tracks: root.album-tracks;
+                        album-sections: root.album-sections;
                         album-total: root.album-total;
                         album-busy: root.album-busy;
                         album-error: root.album-error;

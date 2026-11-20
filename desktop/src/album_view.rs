@@ -6,9 +6,9 @@ use std::sync::Arc;
 use slint::{ComponentHandle, Model};
 
 use crate::{
-    cancel_queue_load, clear_wave, jump, library_to_queue, navidrome, note_wave_leave,
+    cancel_queue_load, clear_wave, jump, library_item, navidrome, note_wave_leave,
     player::Player, push_event, queue, request_cover, row_duration, show_queue, wave,
-    AlbumPreview, AppWindow, HubEvent, HubState, QueueItem,
+    AlbumPreview, AlbumSections, AppWindow, HubEvent, HubState, QueueItem,
 };
 
 pub(super) enum Tracks {
@@ -93,7 +93,7 @@ fn begin_preview(ui: &AppWindow, hub: &HubState, title: &str, artist: &str, cove
     });
     ui.set_album_title(title.into());
     ui.set_album_artist(artist.into());
-    ui.set_album_tracks(slint::ModelRc::default());
+    ui.set_album_sections(AlbumSections::default());
     ui.set_album_total(String::new().into());
     ui.set_album_error(String::new().into());
     ui.set_album_note(String::new().into());
@@ -125,65 +125,99 @@ pub fn apply_album_result(
     ui.set_album_busy(false);
     match result {
         Ok((id, Tracks::Catalog(value))) => {
+            // A catalog card already identifies the exact release. Library cards require a match.
+            let status = if id.is_empty() { Some("matched") } else { value["catalog_status"].as_str() };
             if let Some(preview) = hub.album_preview.borrow_mut().as_mut() { preview.id = id; }
-            show_catalog(ui, hub, &value);
+            show_catalog(ui, hub, &value, status);
         }
         Ok((id, Tracks::Library(library))) => {
             if let Some(preview) = hub.album_preview.borrow_mut().as_mut() { preview.id = id; }
-            let album = library_to_queue(library);
-            ui.set_album_title(album.name().into());
-            ui.set_album_total(album.total_label().into());
-            if let Some(first) = album.items().first() {
-                if ui.get_album_artist().is_empty() {
-                    ui.set_album_artist(first.artist.clone().into());
+            if ui.get_album_artist().is_empty() {
+                if let Some(first) = library.tracks.first() {
+                    ui.set_album_artist(first.artist.as_str().into());
                 }
             }
-            show_rows(ui, hub, album, std::iter::repeat(true));
+            let tracks = library.tracks.into_iter().map(|track| (library_item(track), true));
+            show_rows(ui, hub, &library.name, tracks, Some("unavailable"));
         }
         Err(message) => ui.set_album_error(message.into()),
     }
 }
 
-pub(super) fn show_catalog(ui: &AppWindow, hub: &HubState, value: &serde_json::Value) {
+fn show_catalog(ui: &AppWindow, hub: &HubState, value: &serde_json::Value, status: Option<&str>) {
     let title = value["title"].as_str().unwrap_or_default();
-    ui.set_album_title(title.into());
     ui.set_album_artist(value["artist"].as_str().unwrap_or_default().into());
-    let (items, owned): (Vec<_>, Vec<_>) = value["tracks"].as_array().into_iter().flatten().filter_map(|row| {
+    let tracks = value["tracks"].as_array().into_iter().flatten().filter_map(|row| {
         let t = crate::hub::playable(row)?;
         Some((queue::Item { id: t.nd_song_id, listen_ref: t.reference, title: t.title,
             artist: t.artist, album: t.album, duration_s: t.duration_s, path: String::new(), meta: String::new() },
             row["owned"].as_bool().unwrap_or(false)))
-    }).unzip();
-    let album = queue::Queue::from_tracks(title, items);
-    ui.set_album_total(album.total_label().into());
-    show_rows(ui, hub, album, owned.into_iter());
+    });
+    show_rows(ui, hub, title, tracks, status);
 }
 
-fn show_rows(ui: &AppWindow, hub: &HubState, album: queue::Queue, owned: impl Iterator<Item = bool>) {
-    let marks = hub.marks.borrow();
-    let rows = album.items().iter().zip(owned).enumerate().map(|(index, (item, owned))| QueueItem {
-        source: index as i32,
-        number: (index + 1).to_string().into(),
-        title: item.title.as_str().into(),
-        meta: if owned { item.artist.as_str().into() } else { format!("Не скачан · {}", item.artist).into() },
-        liked: crate::track_liked(&marks, item),
-        song_id: if owned { item.id.as_str() } else { "" }.into(),
-        identified: !item.id.is_empty() || !item.listen_ref.is_empty(),
-        duration: row_duration(item).into(),
-        ..QueueItem::default()
-    }).collect::<Vec<_>>();
-    ui.set_album_tracks(slint::ModelRc::new(slint::VecModel::from(rows)));
+fn album_sections(tracks: impl Iterator<Item = (queue::Item, bool)>, marks: &crate::hub::Marks, status: Option<&str>)
+    -> (Vec<queue::Item>, AlbumSections)
+{
+    let mut library = Vec::new();
+    let mut external = Vec::new();
+    // The display is grouped, but row.source and the playback queue always use release order.
+    let items = tracks.enumerate().map(|(source, (item, owned))| {
+        let row = QueueItem {
+            source: source as i32,
+            number: (source + 1).to_string().into(),
+            title: item.title.as_str().into(),
+            meta: if owned { item.artist.as_str().into() } else if item.artist.is_empty() {
+                "Не скачан".into()
+            } else { format!("Не скачан · {}", item.artist).into() },
+            liked: crate::track_liked(marks, &item),
+            song_id: if owned { item.id.as_str() } else { "" }.into(),
+            identified: !item.id.is_empty() || !item.listen_ref.is_empty(),
+            duration: row_duration(&item).into(),
+            ..QueueItem::default()
+        };
+        if owned { library.push(row); } else { external.push(row); }
+        item
+    }).collect();
+    let external_note = if external.is_empty() {
+        match status {
+            Some("matched") if !library.is_empty() => "Полный треклист этого релиза уже в библиотеке.",
+            Some("matched") => "Каталог не вернул треклист этого релиза.",
+            Some("not_found") => "Этот релиз не найден во внешних каталогах.",
+            Some("ambiguous") => "Не удалось однозначно определить версию релиза.",
+            _ => "Не удалось проверить треклист во внешних каталогах.",
+        }
+    } else { "" };
+    (items, AlbumSections {
+        library: slint::ModelRc::new(slint::VecModel::from(library)),
+        external: slint::ModelRc::new(slint::VecModel::from(external)),
+        external_note: external_note.into(),
+    })
+}
+
+fn show_rows(ui: &AppWindow, hub: &HubState, title: &str,
+    tracks: impl Iterator<Item = (queue::Item, bool)>, status: Option<&str>)
+{
+    let (items, sections) = album_sections(tracks, &hub.marks.borrow(), status);
+    let album = queue::Queue::from_tracks(title, items);
+    ui.set_album_title(title.into());
+    ui.set_album_total(album.total_label().into());
+    ui.set_album_sections(sections);
     if let Some(preview) = hub.album_preview.borrow_mut().as_mut() { preview.tracks = album.into_items(); }
 }
 
 pub(super) fn refresh_likes(ui: &AppWindow, hub: &HubState) {
     let preview = hub.album_preview.borrow();
     let Some(preview) = preview.as_ref() else { return };
-    let marks = hub.marks.borrow();
-    let rows = ui.get_album_tracks();
-    for (i, item) in preview.tracks.iter().enumerate() {
-        if let Some(mut row) = rows.row_data(i) {
-            let liked = crate::track_liked(&marks, item);
+    let sections = ui.get_album_sections();
+    refresh_section_likes(&sections, &preview.tracks, &hub.marks.borrow());
+}
+
+fn refresh_section_likes(sections: &AlbumSections, tracks: &[queue::Item], marks: &crate::hub::Marks) {
+    for rows in [&sections.library, &sections.external] {
+        for (i, mut row) in rows.iter().enumerate() {
+            let Some(item) = tracks.get(row.source as usize) else { continue };
+            let liked = crate::track_liked(marks, item);
             if row.liked != liked {
                 row.liked = liked;
                 rows.set_row_data(i, row);
@@ -309,5 +343,50 @@ mod tests {
         assert_eq!(album.context(), "album");
         assert_eq!(select_album_start(&mut album, Some(0)), Some(queue::Start::Manual));
         assert_eq!(select_album_start(&mut album, Some(1)), None);
+    }
+
+    #[test]
+    fn grouped_album_rows_keep_release_indices_for_playback_menus_and_likes() {
+        let tracks = [("A", false), ("B", true), ("C", false), ("D", true)].into_iter().map(|(name, owned)| {
+            let mut track = queue::Item::file("", name);
+            if owned { track.id = name.to_owned(); } else { track.listen_ref = format!("dz:{name}"); }
+            (track, owned)
+        });
+        let mut marks = crate::hub::Marks::default();
+        let (tracks, sections) = album_sections(tracks, &marks, Some("matched"));
+        assert_eq!(sections.library.iter().map(|row| row.source).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(sections.external.iter().map(|row| row.source).collect::<Vec<_>>(), [0, 2]);
+        assert!(sections.external.iter().all(|row| row.meta.starts_with("Не скачан")));
+
+        let mut album = queue::Queue::from_tracks("Mixed", tracks);
+        assert_eq!(album.items().iter().map(|item| item.title.as_str()).collect::<Vec<_>>(), ["A", "B", "C", "D"]);
+        for row in sections.library.iter().chain(sections.external.iter()) {
+            let source = row.source as usize;
+            assert_eq!(album.items()[source].id, row.song_id.as_str());
+            assert_eq!(select_album_start(&mut album, Some(source)), Some(queue::Start::Manual));
+            assert_eq!(album.current().unwrap().title, row.title.as_str());
+        }
+        marks.songs.insert("B".into());
+        marks.refs.insert("dz:C".into());
+        refresh_section_likes(&sections, album.items(), &marks);
+        assert_eq!(sections.library.iter().map(|row| row.liked).collect::<Vec<_>>(), [true, false]);
+        assert_eq!(sections.external.iter().map(|row| row.liked).collect::<Vec<_>>(), [false, true]);
+    }
+
+    #[test]
+    fn only_matched_releases_are_reported_as_complete() {
+        let note = |status| album_sections(
+            std::iter::once((queue::Item::file("one", "One"), true)),
+            &crate::hub::Marks::default(), status,
+        ).1.external_note;
+        let matched = note(Some("matched"));
+        let missing = note(Some("not_found"));
+        let ambiguous = note(Some("ambiguous"));
+        let unavailable = note(Some("unavailable"));
+        let notes = [matched.as_str(), missing.as_str(), ambiguous.as_str(), unavailable.as_str()];
+        assert!(matched.contains("уже в библиотеке"));
+        assert!(notes.iter().all(|note| !note.is_empty()));
+        assert_eq!(notes.into_iter().collect::<std::collections::HashSet<_>>().len(), 4);
+        assert_eq!(note(None), unavailable);
     }
 }

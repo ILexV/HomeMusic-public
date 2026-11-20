@@ -100,6 +100,12 @@ def test_parse_album_page():
     assert d["tracks"][0].title == "Ели мясо мужики"
 
 
+def test_parse_album_page_excludes_recommendations_when_tracklist_is_missing():
+    # Keep the real tracks' markup, but move its list outside the album block.
+    html = fx("album.html").replace('class="p-info p-inner"', 'class="related"')
+    assert parse_album_page(html, BASE)["tracks"] == []
+
+
 def test_parse_search_blocks():
     html = fx("search_artist_kino.html")
     artists = parse_search_artists(html, BASE)

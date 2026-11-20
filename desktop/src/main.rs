@@ -2780,6 +2780,9 @@ fn append_playables(queue: &RefCell<queue::Queue>, songs: &[hub::Playable]) {
 }
 
 fn album_line(album: &navidrome::Album) -> String {
+    if album.is_single {
+        return if album.artist.is_empty() { "Сингл".into() } else { format!("Сингл · {}", album.artist) };
+    }
     if album.song_count <= 1 {
         return album.artist.clone();
     }
