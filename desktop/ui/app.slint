@@ -56,6 +56,7 @@ export component AppWindow inherits Window {
     in-out property <bool> has-cover: false;
     in-out property <VisualizationMode> visualizer-mode: VisualizationMode.cover;
     in-out property <[float]> spectrum-levels: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    in-out property <[float]> scope-samples;
     in-out property <float> meter-left;
     in-out property <float> meter-right;
     in-out property <float> peak-left;
@@ -253,6 +254,7 @@ export component AppWindow inherits Window {
                         has-cover: root.has-cover;
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
+                        scope-samples: root.scope-samples;
                         levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
@@ -290,6 +292,7 @@ export component AppWindow inherits Window {
                         has-cover: root.has-cover;
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
+                        scope-samples: root.scope-samples;
                         levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
@@ -414,6 +417,7 @@ export component AppWindow inherits Window {
                         has-cover: root.has-cover;
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
+                        scope-samples: root.scope-samples;
                         levels: root.levels;
                         play-pause => { root.play-pause(); }
                         stop => { root.stop(); }

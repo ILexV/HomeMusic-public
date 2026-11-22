@@ -234,6 +234,7 @@ export component Large inherits Rectangle {
     in property <bool> eq-on;
     in-out property <VisualizationMode> visualizer-mode;
     in property <[float]> spectrum-levels;
+    in property <[float]> scope-samples;
     in property <StereoLevels> levels;
     in property <bool> liked;
     in property <bool> disliked;
@@ -366,6 +367,7 @@ export component Large inherits Rectangle {
                         has-cover: root.has-cover;
                         visualizer-mode: root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
+                        scope-samples: root.scope-samples;
                         levels: root.levels;
                     }
                     Text { height: 24px; text: root.track-title; color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; vertical-alignment: center; }

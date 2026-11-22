@@ -114,6 +114,7 @@ fn save_at(path: &Path, place: Place) -> std::io::Result<bool> {
         VisualizationMode::Cover => {}
         VisualizationMode::Stereo => body.push_str("visualizer = \"stereo\"\n"),
         VisualizationMode::Spectrum => body.push_str("visualizer = \"spectrum\"\n"),
+        VisualizationMode::Scope => body.push_str("visualizer = \"scope\"\n"),
     }
     if let Some(preamp) = place.preamp {
         body.push_str(&format!("preamp = {preamp}\n"));
@@ -184,6 +185,7 @@ pub fn parse(text: &str) -> Option<Place> {
             "eq-open" => eq_open = parse_bool(value),
             "visualizer" => visualizer_mode = match value {
                 "spectrum" => VisualizationMode::Spectrum,
+                "scope" => VisualizationMode::Scope,
                 "stereo" => VisualizationMode::Stereo,
                 // Earlier versions saved the L/R toggle as a boolean.
                 _ if parse_bool(value) == Some(true) => VisualizationMode::Stereo,
@@ -409,7 +411,7 @@ mod tests {
         let mut place = bare(80.0, 60.0);
         assert!(save_at(&path, place).unwrap());
         assert!(!save_at(&path, place).unwrap());
-        for change in 0..15 {
+        for change in 0..16 {
             match change {
                 0 => place.x = 100.0,
                 1 => place.mode = Some(0),
@@ -425,6 +427,7 @@ mod tests {
                 11 => place.large_queue_width = Some(375.5),
                 12 => place.visualizer_mode = VisualizationMode::Stereo,
                 13 => place.visualizer_mode = VisualizationMode::Spectrum,
+                14 => place.visualizer_mode = VisualizationMode::Scope,
                 _ => place.visualizer_mode = VisualizationMode::Cover,
             }
             assert!(save_at(&path, place).unwrap(), "change {change}");

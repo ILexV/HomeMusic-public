@@ -14,8 +14,26 @@ pub use analysis::{AudioTrack, Normalization};
 mod spectrum;
 use spectrum::SpectrumTap;
 
+#[path = "scope.rs"]
+mod scope;
+pub(crate) use scope::SCOPE_POINTS;
+
+enum SideTap {
+    Spectrum(Box<SpectrumTap>),
+    Scope(Box<scope::ScopeTap>),
+}
+
+impl SideTap {
+    fn clear(&self) {
+        match self {
+            Self::Spectrum(tap) => tap.clear(),
+            Self::Scope(tap) => tap.clear(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum MeterMode { #[default] Off, Stereo, Spectrum }
+pub(crate) enum MeterMode { #[default] Off, Stereo, Spectrum, Scope }
 
 // Use mpv's direct lavfi bridge so it rejects a missing astats even while idle.
 // reset=1 measures the latest decoded frame, not the entire track.
@@ -78,8 +96,8 @@ pub struct Player {
     eq: Settings,
     eq_filter_active: bool,
     meter_mode: MeterMode,
-    spectrum_tap: Option<Box<SpectrumTap>>,
-    spectrum_pending: bool,
+    side_tap: Option<SideTap>,
+    tap_pending: bool,
     notice: Option<String>,
     phase: PlaybackPhase,
     /// Ignore the replaced file's trailing events until the next StartFile.
@@ -190,7 +208,7 @@ impl Player {
                     mpv: Some(mpv),
                     volume: 0.8,
                     eq: Settings::default(),
-                    eq_filter_active: false, meter_mode: MeterMode::Off, spectrum_tap: None, spectrum_pending: false,
+                    eq_filter_active: false, meter_mode: MeterMode::Off, side_tap: None, tap_pending: false,
                     notice: None,
                     phase: PlaybackPhase::Idle,
                     awaiting_start: false,
@@ -212,7 +230,7 @@ impl Player {
                 mpv: None,
                 volume: 0.8,
                 eq: Settings::default(),
-                eq_filter_active: false, meter_mode: MeterMode::Off, spectrum_tap: None, spectrum_pending: false,
+                eq_filter_active: false, meter_mode: MeterMode::Off, side_tap: None, tap_pending: false,
                 notice: Some(open_error(&err)),
                 phase: PlaybackPhase::Error,
                 awaiting_start: false,
@@ -355,12 +373,12 @@ impl Player {
 
     /// 20 ms envelope tick. Never consumes foreground EOF/promotion notifications.
     pub fn audio_tick(&mut self) {
-        if self.spectrum_pending { self.attach_spectrum(); }
+        if self.tap_pending { self.attach_side_tap(); }
         if let Some(prepared) = &mut self.prepared {
             if let Some(deck) = &mut prepared.deck { deck.take_natural_end(); }
         }
         if let Some(fade) = &mut self.fade {
-            if fade.outgoing.spectrum_pending { fade.outgoing.attach_spectrum(); }
+            if fade.outgoing.tap_pending { fade.outgoing.attach_side_tap(); }
             let position = self.mpv.as_ref().and_then(|m| prop_f64(m, "time-pos")).unwrap_or(0.0);
             let progress = (position / fade.seconds).clamp(0.0, 1.0);
             self.fade_factor = progress;
@@ -406,8 +424,8 @@ impl Player {
         next.set_paused(false);
         std::mem::swap(&mut self.mpv, &mut next.mpv);
         std::mem::swap(&mut self.eq_filter_active, &mut next.eq_filter_active);
-        std::mem::swap(&mut self.spectrum_tap, &mut next.spectrum_tap);
-        std::mem::swap(&mut self.spectrum_pending, &mut next.spectrum_pending);
+        std::mem::swap(&mut self.side_tap, &mut next.side_tap);
+        std::mem::swap(&mut self.tap_pending, &mut next.tap_pending);
         std::mem::swap(&mut self.entry_id, &mut next.entry_id);
         std::mem::swap(&mut self.hub_source, &mut next.hub_source);
         next.phase = PlaybackPhase::Playing;
@@ -490,7 +508,7 @@ impl Player {
                 .and_then(|_| mpv.set_property("start", start.as_str()))
                 .and_then(|_| mpv.command("loadfile", &[target, "replace"]))
         };
-        if let Some(tap) = &self.spectrum_tap { tap.clear(); }
+        if let Some(tap) = &self.side_tap { tap.clear(); }
         if loaded.is_err() {
             let text = "Не удалось открыть файл".to_string();
             self.notice = Some(text.clone());
@@ -532,7 +550,7 @@ impl Player {
         if let Some(mpv) = self.mpv.as_ref() {
             let _ = mpv.set_property("pause", paused);
         }
-        if let Some(tap) = &self.spectrum_tap { tap.clear(); }
+        if let Some(tap) = &self.side_tap { tap.clear(); }
         if let Some(fade) = &mut self.fade {
             fade.outgoing.set_paused(paused);
         }
@@ -595,7 +613,7 @@ impl Player {
                         self.native_ending = false;
                     }
                     self.entry_id = Some(entry);
-                    if let Some(tap) = &self.spectrum_tap { tap.clear(); }
+                    if let Some(tap) = &self.side_tap { tap.clear(); }
                     self.awaiting_start = false;
                     self.phase = PlaybackPhase::Loading;
                     eof = false;
@@ -694,7 +712,7 @@ impl Player {
         }
         let target = format!("{target:.9}");
         let _ = mpv.command("seek", &[&target, "absolute+exact"]);
-        if let Some(tap) = &self.spectrum_tap { tap.clear(); }
+        if let Some(tap) = &self.side_tap { tap.clear(); }
     }
 
     /// Native timestamp and seekability; unseekable streams still have a playhead.
@@ -716,26 +734,24 @@ impl Player {
     /// Attach/detach just our labeled tap without loading, seeking or changing gain.
     pub(crate) fn set_meter_mode(&mut self, mode: MeterMode) {
         if self.meter_mode == mode { return; }
-        self.spectrum_pending = mode == MeterMode::Spectrum;
+        let previous = std::mem::replace(&mut self.meter_mode, mode);
+        self.tap_pending = matches!(mode, MeterMode::Spectrum | MeterMode::Scope);
         let attached = match mode {
             MeterMode::Off => false,
             MeterMode::Stereo => self.mpv.as_ref().is_some_and(|m| m.command("af", &["add", METER_FILTER]).is_ok()),
-            MeterMode::Spectrum => self.attach_spectrum(),
+            MeterMode::Spectrum | MeterMode::Scope => self.attach_side_tap(),
         };
-        if !attached && self.meter_mode != MeterMode::Off {
+        if !attached && previous != MeterMode::Off {
             if let Some(mpv) = &self.mpv { let _ = mpv.command("af", &["remove", "@meter"]); }
         }
-        if mode != MeterMode::Spectrum {
-            self.spectrum_tap = None;
-        }
-        self.meter_mode = mode;
+        if !attached || !matches!(mode, MeterMode::Spectrum | MeterMode::Scope) { self.side_tap = None; }
         if let Some(deck) = self.prepared.as_mut().and_then(|p| p.deck.as_mut()) {
             deck.set_meter_mode(mode);
         }
         if let Some(fade) = &mut self.fade { fade.outgoing.set_meter_mode(mode); }
     }
 
-    fn attach_spectrum(&mut self) -> bool {
+    fn attach_side_tap(&mut self) -> bool {
         // An idle mpv accepts even an invalid lavfi graph and can subsequently
         // fail the file open. On a live filter chain `af add` validates the
         // graph (including the UDP protocol) and rolls back an unsupported tap.
@@ -743,10 +759,15 @@ impl Player {
         if self.phase != PlaybackPhase::Playing || mpv.get_property::<i64>("audio-out-params/channel-count").is_err() {
             return false;
         }
-        self.spectrum_pending = false;
-        let Ok((tap, filter)) = SpectrumTap::open() else { return false; };
+        self.tap_pending = false;
+        let opened = match self.meter_mode {
+            MeterMode::Spectrum => SpectrumTap::open().map(|(tap, graph)| (SideTap::Spectrum(Box::new(tap)), graph)),
+            MeterMode::Scope => scope::ScopeTap::open().map(|(tap, graph)| (SideTap::Scope(Box::new(tap)), graph)),
+            _ => return false,
+        };
+        let Ok((tap, filter)) = opened else { return false; };
         if mpv.command("af", &["add", &filter]).is_err() { return false; }
-        self.spectrum_tap = Some(Box::new(tap));
+        self.side_tap = Some(tap);
         true
     }
 
@@ -763,8 +784,27 @@ impl Player {
 
     pub(crate) fn spectrum_levels(&self) -> [f32; 10] {
         self.mixed_levels(MeterMode::Spectrum, 60.0, |deck, _| {
-            deck.spectrum_tap.as_deref().map_or([f64::NEG_INFINITY; 10], SpectrumTap::peaks)
+            match &deck.side_tap {
+                Some(SideTap::Spectrum(tap)) => tap.peaks(),
+                _ => [f64::NEG_INFINITY; 10],
+            }
         })
+    }
+
+    pub(crate) fn scope_samples(&self) -> [f32; SCOPE_POINTS] {
+        if self.meter_mode != MeterMode::Scope { return [0.0; SCOPE_POINTS]; }
+        let mut mixed = [0.0; scope::HISTORY];
+        self.mix_scope_deck(&mut mixed);
+        if let Some(fade) = &self.fade { fade.outgoing.mix_scope_deck(&mut mixed); }
+        scope::triggered(&mixed)
+    }
+
+    fn mix_scope_deck(&self, mixed: &mut [f32; scope::HISTORY]) {
+        let Some(SideTap::Scope(tap)) = &self.side_tap else { return; };
+        if self.audible_mpv().is_some() {
+            let gain = self.linear_volume() * 10f64.powf(self.gain_db / 20.0);
+            tap.mix_into(mixed, gain as f32);
+        }
     }
 
     fn mixed_levels<const N: usize>(&self, mode: MeterMode, range_db: f64, read: fn(&Self, &Mpv) -> [f64; N]) -> [f32; N] {
@@ -782,16 +822,25 @@ impl Player {
         db.map(|value| ((value + range_db) / range_db).clamp(0.0, 1.0) as f32)
     }
 
-    fn deck_levels_db<const N: usize>(&self, read: fn(&Self, &Mpv) -> [f64; N]) -> [f64; N] {
+    fn audible_mpv(&self) -> Option<&Mpv> {
         let audible = self.phase == PlaybackPhase::Playing && self.volume > 0.0 && self.fade_factor > 0.0;
         // core-idle includes explicit pause, cache underruns, seeking and EOF;
         // the last decoded measurement alone doesn't reflect those states.
-        let Some(mpv) = self.mpv.as_ref().filter(|m| audible && flag(m, "core-idle") == Some(false)) else {
-            if let Some(tap) = &self.spectrum_tap { tap.clear(); }
-            return [f64::NEG_INFINITY; N];
-        };
+        let mpv = self.mpv.as_ref().filter(|m| audible && flag(m, "core-idle") == Some(false));
+        if mpv.is_none() {
+            if let Some(tap) = &self.side_tap { tap.clear(); }
+        }
+        mpv
+    }
+
+    fn linear_volume(&self) -> f64 {
         // mpv applies its cubic volume curve, normalization and fade after user filters.
-        let gain_db = self.gain_db + 20.0 * (f64::from(self.volume).powi(3) * self.fade_factor).log10();
+        f64::from(self.volume).powi(3) * self.fade_factor
+    }
+
+    fn deck_levels_db<const N: usize>(&self, read: fn(&Self, &Mpv) -> [f64; N]) -> [f64; N] {
+        let Some(mpv) = self.audible_mpv() else { return [f64::NEG_INFINITY; N]; };
+        let gain_db = self.gain_db + 20.0 * self.linear_volume().log10();
         read(self, mpv).map(|db| if db.is_finite() { db + gain_db } else { f64::NEG_INFINITY })
     }
 
@@ -1263,7 +1312,35 @@ mod tests {
         assert_eq!(player.spectrum_levels(), [0.0; 10]);
         player.set_meter_mode(MeterMode::Off);
         assert!(!player.audio_filter().contains("astats"));
-        assert!(player.spectrum_tap.is_none());
+        assert!(player.side_tap.is_none());
+        player.stop();
+    }
+
+    #[test]
+    fn scope_tracks_signed_tone_frequency_after_eq_and_clears_on_pause() {
+        // 300 Hz at the 4.8 kHz scope rate is exactly 16 points/period.
+        let tone = serve_wav(frequency_wav(6.0, 48_000, 300.0, &[16_384.0]));
+        let mut player = open_null();
+        player.set_volume(1.0);
+        player.set_meter_mode(MeterMode::Scope);
+        player.load(&tone).unwrap();
+        let matches_tone = |samples: [f32; SCOPE_POINTS], amplitude: f32| {
+            samples.iter().enumerate().all(|(n, &sample)| {
+                let expected = amplitude * (n as f32 * std::f32::consts::TAU / 16.0).sin();
+                (sample - expected).abs() < 0.025
+            })
+        };
+        wait_for_levels(&mut player, Player::scope_samples, |s| matches_tone(s, 0.5));
+        player.set_eq_enabled(true);
+        player.set_preamp(-6.0);
+        wait_for_levels(&mut player, Player::scope_samples, |s| matches_tone(s, 0.25));
+        player.set_paused(true);
+        assert_eq!(player.scope_samples(), [0.0; SCOPE_POINTS]);
+        player.set_paused(false);
+        wait_for_levels(&mut player, Player::scope_samples, |s| matches_tone(s, 0.25));
+        player.set_meter_mode(MeterMode::Off);
+        assert!(!player.audio_filter().contains("astats"));
+        assert_eq!(player.scope_samples(), [0.0; SCOPE_POINTS]);
         player.stop();
     }
 

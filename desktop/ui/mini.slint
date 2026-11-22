@@ -7,6 +7,7 @@ export component Mini inherits Rectangle {
     in property <bool> has-cover;
     in-out property <VisualizationMode> visualizer-mode;
     in property <[float]> spectrum-levels;
+    in property <[float]> scope-samples;
     in property <StereoLevels> levels;
     in property <string> time-label;
     in property <string> duration-label;
@@ -49,6 +50,7 @@ export component Mini inherits Rectangle {
             NowPlayingArt {
                 visualizer-mode: root.visualizer-mode;
                 spectrum-levels: root.spectrum-levels;
+                scope-samples: root.scope-samples;
                 levels: root.levels;
                 width: 64px;
                 height: self.width;

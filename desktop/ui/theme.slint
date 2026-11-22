@@ -13,7 +13,7 @@ export global Theme {
     out property <color> dim: #8a8a8a;
 }
 
-export enum VisualizationMode { cover, stereo, spectrum }
+export enum VisualizationMode { cover, stereo, spectrum, scope }
 
 
 export component Glyph inherits Rectangle {
@@ -154,6 +154,17 @@ export component Glyph inherits Rectangle {
         stroke: root.tint;
         stroke-width: 2px;
     }
+    if root.kind == "scope" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M1 8 H3 C5 8 4 2 6 2 S8 14 10 14 S11 8 13 8 H15";
+        fill: transparent;
+        stroke: root.tint;
+        stroke-width: 1.6px;
+        stroke-line-cap: round;
+    }
     if root.kind == "settings" : Path {
         width: 100%;
         height: 100%;
@@ -222,15 +233,18 @@ export component PlaybackActions inherits HorizontalLayout {
     Rectangle { width: 4px; }
     ActionButton { icon: "equalizer"; tip: "Эквалайзер"; surface: root.surface; active: root.eq-on; clicked => { root.toggle-eq(); } }
     ActionButton {
-        icon: root.visualizer-mode == VisualizationMode.spectrum ? "spectrum" : "visualizer";
+        icon: root.visualizer-mode == VisualizationMode.scope ? "scope"
+            : root.visualizer-mode == VisualizationMode.spectrum ? "spectrum" : "visualizer";
         tip: root.visualizer-mode == VisualizationMode.cover ? "Визуализация: обложка. Показать уровни L/R"
             : root.visualizer-mode == VisualizationMode.stereo ? "Визуализация: уровни L/R. Показать спектр"
-            : "Визуализация: спектр. Показать обложку";
+            : root.visualizer-mode == VisualizationMode.spectrum ? "Визуализация: спектр. Показать осциллограмму"
+            : "Визуализация: осциллограмма. Показать обложку";
         surface: root.surface;
         active: root.visualizer-mode != VisualizationMode.cover;
         clicked => {
             root.visualizer-mode = root.visualizer-mode == VisualizationMode.cover ? VisualizationMode.stereo
-                : root.visualizer-mode == VisualizationMode.stereo ? VisualizationMode.spectrum : VisualizationMode.cover;
+                : root.visualizer-mode == VisualizationMode.stereo ? VisualizationMode.spectrum
+                : root.visualizer-mode == VisualizationMode.spectrum ? VisualizationMode.scope : VisualizationMode.cover;
         }
     }
 }
@@ -1163,10 +1177,69 @@ component MeterChannel inherits Rectangle {
     }
 }
 
+component ScopeTrace inherits Rectangle {
+    in property <[float]> samples;
+
+    pure function sample-y(index: int) -> float {
+        let amplitude = index < root.samples.length ? root.samples[index] : 0;
+        return root.height / 1px * (0.5 - 0.48 * amplitude);
+    }
+
+    for tick[i] in 3 : Rectangle {
+        width: 1px;
+        height: 100%;
+        x: root.width * (i + 1) / 4 - self.width / 2;
+        background: Theme.line;
+    }
+    for tick[i] in 3 : Rectangle {
+        width: 100%;
+        height: 1px;
+        y: root.height * (i + 1) / 4 - self.height / 2;
+        background: i == 1 ? Theme.dim.transparentize(50%) : Theme.line;
+    }
+
+    // Slint cannot repeat LineTo inside a Path. Five adjoining strokes cover
+    // the 95 intervals, sharing their endpoints without one item per sample.
+    for chunk[i] in 5 : trace := Path {
+        private property <int> first: i * 19;
+        private property <float> step: self.width / 1px / 19;
+        x: root.width * i / 5;
+        y: 0px;
+        width: root.width / 5;
+        height: root.height;
+        fit: preserve;
+        fill: transparent;
+        stroke: Theme.orange;
+        stroke-width: clamp(root.height * 0.012, 1px, 1.75px);
+        stroke-line-cap: round;
+        MoveTo { x: 0; y: root.sample-y(trace.first); }
+        LineTo { x: trace.step; y: root.sample-y(trace.first + 1); }
+        LineTo { x: 2 * trace.step; y: root.sample-y(trace.first + 2); }
+        LineTo { x: 3 * trace.step; y: root.sample-y(trace.first + 3); }
+        LineTo { x: 4 * trace.step; y: root.sample-y(trace.first + 4); }
+        LineTo { x: 5 * trace.step; y: root.sample-y(trace.first + 5); }
+        LineTo { x: 6 * trace.step; y: root.sample-y(trace.first + 6); }
+        LineTo { x: 7 * trace.step; y: root.sample-y(trace.first + 7); }
+        LineTo { x: 8 * trace.step; y: root.sample-y(trace.first + 8); }
+        LineTo { x: 9 * trace.step; y: root.sample-y(trace.first + 9); }
+        LineTo { x: 10 * trace.step; y: root.sample-y(trace.first + 10); }
+        LineTo { x: 11 * trace.step; y: root.sample-y(trace.first + 11); }
+        LineTo { x: 12 * trace.step; y: root.sample-y(trace.first + 12); }
+        LineTo { x: 13 * trace.step; y: root.sample-y(trace.first + 13); }
+        LineTo { x: 14 * trace.step; y: root.sample-y(trace.first + 14); }
+        LineTo { x: 15 * trace.step; y: root.sample-y(trace.first + 15); }
+        LineTo { x: 16 * trace.step; y: root.sample-y(trace.first + 16); }
+        LineTo { x: 17 * trace.step; y: root.sample-y(trace.first + 17); }
+        LineTo { x: 18 * trace.step; y: root.sample-y(trace.first + 18); }
+        LineTo { x: 19 * trace.step; y: root.sample-y(trace.first + 19); }
+    }
+}
+
 // Only the now-playing artwork switches; library and album covers keep using CoverArt.
 export component NowPlayingArt inherits Rectangle {
     in property <VisualizationMode> visualizer-mode;
     in property <[float]> spectrum-levels;
+    in property <[float]> scope-samples;
     in property <StereoLevels> levels;
     in property <image> cover;
     in property <bool> has-cover;
@@ -1191,51 +1264,34 @@ export component NowPlayingArt inherits Rectangle {
             MeterChannel { vertical-stretch: 1; label: "L"; level: root.levels.left; peak: root.levels.peak-left; }
             MeterChannel { vertical-stretch: 1; label: "R"; level: root.levels.right; peak: root.levels.peak-right; }
         }
-        if root.visualizer-mode == VisualizationMode.spectrum : Rectangle {
+        if root.visualizer-mode == VisualizationMode.scope : ScopeTrace {
             x: root.width * 0.08;
             y: root.height * 0.10;
             width: root.width - 2 * self.x;
             height: root.height - 2 * self.y;
-            plot := Rectangle {
-                y: 0px;
+            samples: root.scope-samples;
+        }
+        if root.visualizer-mode == VisualizationMode.spectrum : plot := Rectangle {
+            x: root.width * 0.08;
+            y: root.height * 0.10;
+            width: root.width - 2 * self.x;
+            height: root.height - 2 * self.y;
+            property <length> gap: max(1px, plot.width * 0.019);
+            property <int> band-count: 10;
+            for line[i] in 4 : Rectangle {
                 width: 100%;
-                height: parent.height - legend.height - 3px;
-                property <length> gap: max(1px, plot.width * 0.019);
-                property <int> band-count: 10;
-                for line[i] in 4 : Rectangle {
-                    width: 100%;
-                    height: 1px;
-                    y: (plot.height - self.height) * (i + 1) / 4;
-                    background: Theme.line;
-                }
-                // Keep the bars in place even when a new sample model arrives.
-                for band[i] in plot.band-count : Rectangle {
-                    width: (plot.width - plot.gap * (plot.band-count - 1)) / plot.band-count;
-                    x: (self.width + plot.gap) * i;
-                    height: i < root.spectrum-levels.length ? plot.height * clamp(root.spectrum-levels[i], 0, 1) : 0px;
-                    y: plot.height - self.height;
-                    border-radius: min(2px, self.height / 2);
-                    background: Theme.orange;
-                }
+                height: 1px;
+                y: (plot.height - self.height) * (i + 1) / 4;
+                background: Theme.line;
             }
-            legend := Rectangle {
-                width: 100%;
-                height: clamp(root.height * 0.14, 10px, 16px);
-                y: parent.height - self.height;
-                Text {
-                    width: 100%;
-                    horizontal-alignment: left;
-                    text: "НЧ";
-                    font-size: parent.height - 1px;
-                    color: Theme.muted;
-                }
-                Text {
-                    width: 100%;
-                    horizontal-alignment: right;
-                    text: "ВЧ";
-                    font-size: parent.height - 1px;
-                    color: Theme.muted;
-                }
+            // Keep the bars in place even when a new sample model arrives.
+            for band[i] in plot.band-count : Rectangle {
+                width: (plot.width - plot.gap * (plot.band-count - 1)) / plot.band-count;
+                x: (self.width + plot.gap) * i;
+                height: i < root.spectrum-levels.length ? plot.height * clamp(root.spectrum-levels[i], 0, 1) : 0px;
+                y: plot.height - self.height;
+                border-radius: min(2px, self.height / 2);
+                background: Theme.orange;
             }
         }
     }
