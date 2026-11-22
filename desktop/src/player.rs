@@ -18,9 +18,14 @@ use spectrum::SpectrumTap;
 mod scope;
 pub(crate) use scope::SCOPE_POINTS;
 
+#[path = "pcm_tap.rs"]
+mod pcm_tap;
+
 enum SideTap {
     Spectrum(Box<SpectrumTap>),
     Scope(Box<scope::ScopeTap>),
+    Vectorscope(Box<pcm_tap::PcmTap<192, 2>>),
+    Chroma(Box<pcm_tap::PcmTap<4096, 1>>),
 }
 
 impl SideTap {
@@ -28,12 +33,14 @@ impl SideTap {
         match self {
             Self::Spectrum(tap) => tap.clear(),
             Self::Scope(tap) => tap.clear(),
+            Self::Vectorscope(tap) => tap.clear(),
+            Self::Chroma(tap) => tap.clear(),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum MeterMode { #[default] Off, Stereo, Spectrum, Scope }
+pub(crate) enum MeterMode { #[default] Off, Stereo, Spectrum, Scope, Vectorscope, Chroma }
 
 // Use mpv's direct lavfi bridge so it rejects a missing astats even while idle.
 // reset=1 measures the latest decoded frame, not the entire track.
@@ -735,16 +742,16 @@ impl Player {
     pub(crate) fn set_meter_mode(&mut self, mode: MeterMode) {
         if self.meter_mode == mode { return; }
         let previous = std::mem::replace(&mut self.meter_mode, mode);
-        self.tap_pending = matches!(mode, MeterMode::Spectrum | MeterMode::Scope);
+        self.tap_pending = !matches!(mode, MeterMode::Off | MeterMode::Stereo);
         let attached = match mode {
             MeterMode::Off => false,
             MeterMode::Stereo => self.mpv.as_ref().is_some_and(|m| m.command("af", &["add", METER_FILTER]).is_ok()),
-            MeterMode::Spectrum | MeterMode::Scope => self.attach_side_tap(),
+            _ => self.attach_side_tap(),
         };
         if !attached && previous != MeterMode::Off {
             if let Some(mpv) = &self.mpv { let _ = mpv.command("af", &["remove", "@meter"]); }
         }
-        if !attached || !matches!(mode, MeterMode::Spectrum | MeterMode::Scope) { self.side_tap = None; }
+        if !attached || matches!(mode, MeterMode::Off | MeterMode::Stereo) { self.side_tap = None; }
         if let Some(deck) = self.prepared.as_mut().and_then(|p| p.deck.as_mut()) {
             deck.set_meter_mode(mode);
         }
@@ -763,6 +770,8 @@ impl Player {
         let opened = match self.meter_mode {
             MeterMode::Spectrum => SpectrumTap::open().map(|(tap, graph)| (SideTap::Spectrum(Box::new(tap)), graph)),
             MeterMode::Scope => scope::ScopeTap::open().map(|(tap, graph)| (SideTap::Scope(Box::new(tap)), graph)),
+            MeterMode::Vectorscope => pcm_tap::PcmTap::open().map(|(tap, graph)| (SideTap::Vectorscope(tap), graph)),
+            MeterMode::Chroma => pcm_tap::PcmTap::open().map(|(tap, graph)| (SideTap::Chroma(tap), graph)),
             _ => return false,
         };
         let Ok((tap, filter)) = opened else { return false; };
@@ -805,6 +814,41 @@ impl Player {
             let gain = self.linear_volume() * 10f64.powf(self.gain_db / 20.0);
             tap.mix_into(mixed, gain as f32);
         }
+    }
+
+    pub(crate) fn vectorscope_samples(&self) -> [[f32; 2]; 192] {
+        let mut out = [[0.0; 2]; 192];
+        if self.meter_mode == MeterMode::Vectorscope {
+            for deck in std::iter::once(self).chain(self.fade.as_ref().map(|f| f.outgoing.as_ref())) {
+                if let Some(SideTap::Vectorscope(tap)) = &deck.side_tap {
+                    if let Some(gain) = deck.pcm_gain() {
+                        tap.read(|i, [l, r]| { out[i][0] += l * gain; out[i][1] += r * gain; });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Latest contiguous 12 kHz mono window. Repeated polls without new audio
+    /// do not advance the waterfall, and silence is not a pitch observation.
+    pub(crate) fn chroma_samples(&self, out: &mut [f32; 4096]) -> bool {
+        out.fill(0.0);
+        if self.meter_mode != MeterMode::Chroma { return false; }
+        let mut fresh = false;
+        for deck in std::iter::once(self).chain(self.fade.as_ref().map(|f| f.outgoing.as_ref())) {
+            if let Some(SideTap::Chroma(tap)) = &deck.side_tap {
+                if let Some(gain) = deck.pcm_gain() {
+                    fresh |= tap.read(|i, [s]| out[i] += s * gain);
+                }
+            }
+        }
+        fresh && out.iter().any(|s| s.abs() > 1e-6)
+    }
+
+    fn pcm_gain(&self) -> Option<f32> {
+        self.audible_mpv()?;
+        Some((self.linear_volume() * 10f64.powf(self.gain_db / 20.0)) as f32)
     }
 
     fn mixed_levels<const N: usize>(&self, mode: MeterMode, range_db: f64, read: fn(&Self, &Mpv) -> [f64; N]) -> [f32; N] {
@@ -1341,6 +1385,132 @@ mod tests {
         player.set_meter_mode(MeterMode::Off);
         assert!(!player.audio_filter().contains("astats"));
         assert_eq!(player.scope_samples(), [0.0; SCOPE_POINTS]);
+        player.stop();
+    }
+
+    #[test]
+    fn vectorscope_reads_signed_synchronized_channels_and_post_eq_gain() {
+        let source = serve_wav(frequency_wav(6.0, 48_000, 375.0, &[16384.0, -8192.0]));
+        let mut player = open_null();
+        player.set_volume(1.0);
+        player.set_meter_mode(MeterMode::Vectorscope);
+        player.load(&source).unwrap();
+        for amplitude in [0.5, 0.25] {
+            if amplitude < 0.5 {
+                player.set_eq_enabled(true);
+                player.set_preamp(-6.0);
+            }
+            let deadline = Instant::now() + Duration::from_secs(4);
+            loop {
+                assert!(!player.take_natural_end());
+                let frame = player.vectorscope_samples();
+                let high = frame.iter().map(|p| p[0]).fold(0.0, f32::max);
+                let low = frame.iter().map(|p| p[0]).fold(0.0, f32::min);
+                if (high - amplitude).abs() < 0.025 && (low + amplitude).abs() < 0.025
+                    && frame.iter().all(|[l, r]| (l + r * 2.0).abs() < 0.003) { break; }
+                assert!(Instant::now() < deadline, "L extrema {low}, {high}; af={}", player.audio_filter());
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+        player.set_paused(true);
+        assert_eq!(player.vectorscope_samples(), [[0.0; 2]; 192]);
+        player.set_meter_mode(MeterMode::Off);
+        assert!(player.side_tap.is_none());
+        assert!(!player.audio_filter().contains("asplit"));
+    }
+
+    #[test]
+    fn chroma_captures_contiguous_resampled_pcm_including_right_only_music() {
+        let source = serve_wav(frequency_wav(5.0, 44_100, 375.0, &[0.0, 16384.0]));
+        let mut player = open_null();
+        player.set_meter_mode(MeterMode::Chroma);
+        player.set_volume(1.0);
+        player.load(&source).unwrap();
+        let mut out = [0.0; 4096];
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            assert!(!player.take_natural_end());
+            if player.chroma_samples(&mut out) {
+                // 375 Hz at 12 kHz: opposite signed samples half a period apart.
+                assert!(out.iter().copied().fold(0.0, f32::max) > 0.2);
+                assert!(out[16..].iter().zip(&out).all(|(a, b)| (a + b).abs() < 0.02));
+                break;
+            }
+            assert!(Instant::now() < deadline, "incomplete PCM frame; af={}", player.audio_filter());
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        player.set_paused(true);
+        assert!(!player.chroma_samples(&mut out));
+        player.set_meter_mode(MeterMode::Off);
+        assert!(player.side_tap.is_none());
+        assert!(!player.audio_filter().contains("asplit"));
+    }
+
+    #[test]
+    fn pcm_side_branches_leave_native_dry_output_bit_exact_through_eof() {
+        use libmpv2::{events::Event, mpv_end_file_reason};
+        ensure_c_numeric();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.wav");
+        let output = dir.path().join("output.raw");
+        let wav = frequency_wav(0.217, 44_100, 331.0, &[16000.0, -8153.0]);
+        std::fs::write(&source, &wav).unwrap();
+        let (_v, vectorscope) = pcm_tap::PcmTap::<192, 2>::open().unwrap();
+        let (_c, chroma) = pcm_tap::PcmTap::<4096, 1>::open().unwrap();
+        for filter in [vectorscope, chroma] {
+            let mpv = Mpv::with_initializer(|init| {
+                init.set_option("vid", "no")?;
+                init.set_option("audio-display", "no")?;
+                init.set_option("msg-level", "all=no")?;
+                init.set_option("ao", "pcm")?;
+                init.set_option("ao-pcm-file", output.to_str().unwrap())?;
+                init.set_option("ao-pcm-waveheader", "no")?;
+                init.set_option("audio-format", "s16")?;
+                Ok(())
+            }).unwrap();
+            mpv.command("af", &["add", &filter]).unwrap();
+            mpv.command("loadfile", &[source.to_str().unwrap(), "replace"]).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(4);
+            loop {
+                match mpv.wait_event(0.02) {
+                    Some(Ok(Event::EndFile(mpv_end_file_reason::Eof))) => break,
+                    Some(Err(error)) => panic!("dry capture failed: {error}"),
+                    _ => assert!(Instant::now() < deadline, "no EOF with {filter}"),
+                }
+            }
+            drop(mpv);
+            let pcm = std::fs::read(&output).unwrap();
+            assert_eq!(pcm.len(), wav.len() - 44, "dry frame count with {filter}");
+            assert!(pcm == wav[44..], "dry samples changed with {filter}");
+        }
+    }
+
+    #[test]
+    fn vectorscope_mixes_both_audible_decks_during_crossfade() {
+        let left = serve_wav(frequency_wav(3.0, 48_000, 375.0, &[16384.0, 0.0]));
+        let right = serve_wav(frequency_wav(4.0, 44_100, 625.0, &[0.0, 16384.0]));
+        let mut player = open_null();
+        player.set_volume(1.0);
+        player.set_crossfade(1.5, false);
+        player.set_meter_mode(MeterMode::Vectorscope);
+        player.load(&left).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        player.prepare_next(&right, "", "right", false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(!player.take_natural_end());
+            let frame = player.vectorscope_samples();
+            let peaks = frame.iter().fold([0f32; 2], |[l, r], p| [l.max(p[0].abs()), r.max(p[1].abs())]);
+            if peaks.into_iter().all(|v| v > 0.08 && v < 0.42) {
+                assert!(player.fade.is_some());
+                break;
+            }
+            assert!(Instant::now() < deadline, "no weighted stereo overlap: {peaks:?}");
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        player.set_meter_mode(MeterMode::Off);
+        assert!(player.side_tap.is_none());
+        assert!(player.fade.as_ref().unwrap().outgoing.side_tap.is_none());
         player.stop();
     }
 

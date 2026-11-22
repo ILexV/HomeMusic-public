@@ -19,6 +19,8 @@ mod player;
 mod queue;
 mod queue_actions;
 mod wave;
+mod chroma;
+mod vectorscope;
 mod visualizer;
 mod window_place;
 mod audio_features;

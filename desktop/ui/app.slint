@@ -57,7 +57,7 @@ export component AppWindow inherits Window {
     in-out property <VisualizationMode> visualizer-mode: VisualizationMode.cover;
     in-out property <[float]> spectrum-levels: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     in-out property <[float]> scope-samples;
-    in-out property <image> waterfall-image;
+    in-out property <image> visualizer-image;
     out property <bool> visualizer-expanded: expanded-view.is-open;
     in-out property <float> meter-left;
     in-out property <float> meter-right;
@@ -203,7 +203,7 @@ export component AppWindow inherits Window {
                 visualizer-mode: root.visualizer-mode;
                 spectrum-levels: root.spectrum-levels;
                 scope-samples: root.scope-samples;
-                waterfall-image: root.waterfall-image;
+                visualizer-image: root.visualizer-image;
                 levels: root.levels;
                 toggle-expanded => { expanded-view.close(); }
             }
@@ -298,7 +298,7 @@ export component AppWindow inherits Window {
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
-                        waterfall-image: root.waterfall-image;
+                        visualizer-image: root.visualizer-image;
                         draw-visualizer: !root.visualizer-expanded;
                         expand-visualizer => { expanded-view.show(); }
                         levels: root.levels;
@@ -339,7 +339,7 @@ export component AppWindow inherits Window {
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
-                        waterfall-image: root.waterfall-image;
+                        visualizer-image: root.visualizer-image;
                         draw-visualizer: !root.visualizer-expanded;
                         expand-visualizer => { expanded-view.show(); }
                         levels: root.levels;
@@ -467,7 +467,7 @@ export component AppWindow inherits Window {
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
-                        waterfall-image: root.waterfall-image;
+                        visualizer-image: root.visualizer-image;
                         draw-visualizer: !root.visualizer-expanded;
                         expand-visualizer => { expanded-view.show(); }
                         levels: root.levels;

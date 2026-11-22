@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::time::{Duration, Instant};
 
 pub(crate) const SCOPE_POINTS: usize = 96;
-// 20 ms of display at 4.8 kHz, plus 30 ms in which to find a rising zero crossing.
+// 20 ms of display at 4.8 kHz, plus 30 ms in which to find a rising trigger.
 pub(super) const HISTORY: usize = SCOPE_POINTS + 144;
 const PACKET: usize = 1400;
 const MAX_PACKETS: usize = 64;
@@ -127,13 +127,91 @@ impl Frames {
 
 pub(super) fn triggered(history: &[f32; HISTORY]) -> [f32; SCOPE_POINTS] {
     let latest = HISTORY - SCOPE_POINTS;
-    let crossing = (0..latest).rev().find(|&i| history[i] <= 0.0 && history[i + 1] > 0.0);
+    let (min, max) = history.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| {
+        (lo.min(v), hi.max(v))
+    });
+    // Trigger relative to the signal (not necessarily zero), but display the
+    // measured samples including their actual DC offset and amplitude.
+    let span = max - min;
+    let center = min + 0.5 * span;
+    let arm = min + 0.2 * span;
+    let confirm = min + 0.65 * span;
+    let mut crossing = None;
+    if span > 0.00002 {
+        // The buffer may begin partway out of a bass trough; don't discard the
+        // only usable edge just because its arming excursion preceded the history.
+        let mut armed = history[0] <= center;
+        let mut pending = None;
+        for (i, pair) in history.windows(2).enumerate() {
+            if i >= latest && pending.is_none() { break; }
+            let (a, b) = (pair[0], pair[1]);
+            if a <= arm { armed = true; }
+            if !armed { continue; }
+            // A deep trough arms one edge. Shallow harmonic crossings cannot
+            // rearm it, and chatter around center must clear the upper threshold.
+            if b <= center { pending = None; }
+            if i < latest && a <= center && b > center { pending = Some(i); }
+            if b >= confirm {
+                if let Some(edge) = pending.take() {
+                    crossing = Some(edge);
+                }
+                armed = false;
+            }
+        }
+    }
     let Some(i) = crossing else { return std::array::from_fn(|n| history[latest + n].clamp(-1.0, 1.0)); };
-    // Subsample alignment avoids the one-sample horizontal jitter of rounding
-    // the trigger; interpolate the measured waveform, never synthesize a tone.
-    let fraction = -history[i] / (history[i + 1] - history[i]);
+    let fraction = (center - history[i]) / (history[i + 1] - history[i]);
     std::array::from_fn(|n| {
         let a = history[i + n];
         (a + fraction * (history[i + n + 1] - a)).clamp(-1.0, 1.0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::TAU;
+
+    #[test]
+    fn quiet_dc_biased_tone_locks_without_display_gain() {
+        let signal = |n: f32| 0.42 + 0.001 * (TAU * n / 80.0).sin();
+        for phase in [4.5, 28.5, 59.5] {
+            let history = std::array::from_fn(|n| signal(n as f32 + phase));
+            let trace = triggered(&history);
+            for (n, &sample) in trace.iter().enumerate() {
+                assert!((sample - signal(n as f32)).abs() < 0.000003);
+            }
+        }
+    }
+
+    #[test]
+    fn locks_when_slow_bass_trough_precedes_history() {
+        let signal = |n: usize| 0.5 * (TAU * (n % 160) as f32 / 160.0).sin();
+        let trace = triggered(&std::array::from_fn(|n| signal(n + 156)));
+        assert!(trace[0].abs() < 0.00001);
+        assert!((trace[40] - 0.5).abs() < 0.00001);
+    }
+
+    #[test]
+    fn locks_to_bass_cycle_not_shallow_secondary_edges() {
+        let signal = |n: usize| {
+            let phase = n % 80;
+            let angle = TAU * phase as f32 / 80.0;
+            let bump = (1.0 - (phase as f32 - 46.0).abs() / 3.0).max(0.0);
+            0.8 * angle.sin() + 0.6 * bump + 0.005 * (14.0 * angle).sin()
+        };
+        for phase in [3, 21, 64] {
+            let trace = triggered(&std::array::from_fn(|n| signal(n + phase)));
+            for (n, &sample) in trace.iter().enumerate() {
+                assert!((sample - signal(n)).abs() < 0.002);
+            }
+        }
+    }
+
+    #[test]
+    fn untriggered_signal_uses_latest_real_samples() {
+        let falling = std::array::from_fn(|n| 0.9 - n as f32 / HISTORY as f32);
+        assert_eq!(&triggered(&falling)[..], &falling[HISTORY - SCOPE_POINTS..]);
+        assert_eq!(triggered(&[0.0; HISTORY]), [0.0; SCOPE_POINTS]);
+    }
 }

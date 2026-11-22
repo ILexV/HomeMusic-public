@@ -13,7 +13,7 @@ export global Theme {
     out property <color> dim: #8a8a8a;
 }
 
-export enum VisualizationMode { cover, stereo, spectrum, scope, waterfall }
+export enum VisualizationMode { cover, stereo, spectrum, scope, waterfall, vectorscope, chroma }
 
 
 export component Glyph inherits Rectangle {
@@ -174,6 +174,26 @@ export component Glyph inherits Rectangle {
         stroke: root.tint;
         stroke-width: 1.8px;
     }
+    if root.kind == "vectorscope" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M8 1L15 8L8 15L1 8Z M5 11L7 6L9 10L11 5";
+        fill: transparent;
+        stroke: root.tint;
+        stroke-width: 1.4px;
+    }
+    if root.kind == "chroma" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M2 3H14V13H2Z M6 3V13 M10 3V13 M5 3V8 M9 3V8";
+        fill: transparent;
+        stroke: root.tint;
+        stroke-width: 1.4px;
+    }
     if root.kind == "settings" : Path {
         width: 100%;
         height: 100%;
@@ -243,20 +263,26 @@ export component PlaybackActions inherits HorizontalLayout {
     ActionButton { icon: "equalizer"; tip: "Эквалайзер"; surface: root.surface; active: root.eq-on; clicked => { root.toggle-eq(); } }
     ActionButton {
         icon: root.visualizer-mode == VisualizationMode.waterfall ? "waterfall"
+            : root.visualizer-mode == VisualizationMode.vectorscope ? "vectorscope"
+            : root.visualizer-mode == VisualizationMode.chroma ? "chroma"
             : root.visualizer-mode == VisualizationMode.scope ? "scope"
             : root.visualizer-mode == VisualizationMode.spectrum ? "spectrum" : "visualizer";
         tip: root.visualizer-mode == VisualizationMode.cover ? "Визуализация: обложка. Показать уровни L/R"
             : root.visualizer-mode == VisualizationMode.stereo ? "Визуализация: уровни L/R. Показать спектр"
             : root.visualizer-mode == VisualizationMode.spectrum ? "Визуализация: спектр. Показать осциллограмму"
             : root.visualizer-mode == VisualizationMode.scope ? "Визуализация: осциллограмма. Показать водопад"
-            : "Визуализация: водопад. Показать обложку";
+            : root.visualizer-mode == VisualizationMode.waterfall ? "Визуализация: водопад. Показать стереоскоп"
+            : root.visualizer-mode == VisualizationMode.vectorscope ? "Визуализация: стереоскоп. Показать нотный водопад"
+            : "Визуализация: нотный водопад. Показать обложку";
         surface: root.surface;
         active: root.visualizer-mode != VisualizationMode.cover;
         clicked => {
             root.visualizer-mode = root.visualizer-mode == VisualizationMode.cover ? VisualizationMode.stereo
                 : root.visualizer-mode == VisualizationMode.stereo ? VisualizationMode.spectrum
                 : root.visualizer-mode == VisualizationMode.spectrum ? VisualizationMode.scope
-                : root.visualizer-mode == VisualizationMode.scope ? VisualizationMode.waterfall : VisualizationMode.cover;
+                : root.visualizer-mode == VisualizationMode.scope ? VisualizationMode.waterfall
+                : root.visualizer-mode == VisualizationMode.waterfall ? VisualizationMode.vectorscope
+                : root.visualizer-mode == VisualizationMode.vectorscope ? VisualizationMode.chroma : VisualizationMode.cover;
         }
     }
 }
@@ -1252,7 +1278,7 @@ export component NowPlayingArt inherits Rectangle {
     in property <VisualizationMode> visualizer-mode;
     in property <[float]> spectrum-levels;
     in property <[float]> scope-samples;
-    in property <image> waterfall-image;
+    in property <image> visualizer-image;
     in property <bool> draw-visualizer: true;
     in property <bool> expanded;
     callback toggle-expanded();
@@ -1310,13 +1336,59 @@ export component NowPlayingArt inherits Rectangle {
                 background: Theme.orange;
             }
         }
-        if root.visualizer-mode == VisualizationMode.waterfall : Image {
+        if root.visualizer-mode == VisualizationMode.vectorscope : Image {
+            width: min(root.width * 0.84, root.height * 0.80);
+            height: self.width;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            source: root.visualizer-image;
+            image-fit: contain;
+        }
+        if root.visualizer-mode == VisualizationMode.waterfall || root.visualizer-mode == VisualizationMode.chroma : raster := Rectangle {
             x: root.width * 0.08;
             y: root.height * 0.10;
             width: root.width - 2 * self.x;
             height: root.height - 2 * self.y;
-            source: root.waterfall-image;
-            image-fit: fill;
+            property <bool> show-labels: root.visualizer-mode == VisualizationMode.chroma && self.width >= 156px && self.height >= 64px;
+            if root.visualizer-mode == VisualizationMode.waterfall : Image {
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                source: root.visualizer-image;
+                image-fit: fill;
+            }
+            // Give each note its own display column. Enlarging a 12px-wide
+            // bitmap in one blit can drift away from the labels at high zoom.
+            if root.visualizer-mode == VisualizationMode.chroma : Rectangle {
+                y: 0px;
+                width: raster.width;
+                height: raster.height - (raster.show-labels ? 16px : 0px);
+                for lane[i] in 12 : Image {
+                    x: round(parent.width / 1px * i / 12) * 1px;
+                    width: round(parent.width / 1px * (i + 1) / 12) * 1px - self.x;
+                    height: 100%;
+                    source: root.visualizer-image;
+                    source-clip-x: i;
+                    source-clip-width: 1;
+                    source-clip-height: root.visualizer-image.height;
+                    image-fit: fill;
+                    image-rendering: pixelated;
+                }
+            }
+            if raster.show-labels : Rectangle {
+                y: raster.height - self.height;
+                height: 16px;
+                for note[i] in ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"] : Text {
+                    width: raster.width / 12;
+                    x: self.width * i;
+                    height: 100%;
+                    text: note;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 10px;
+                    color: Theme.muted;
+                }
+            }
         }
         TouchArea {
             mouse-cursor: pointer;

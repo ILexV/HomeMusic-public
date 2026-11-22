@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Image, Model, ModelNotify, ModelTracker, Rgb8Pixel, SharedPixelBuffer, VecModel};
 
-use crate::{player::{MeterMode, SCOPE_POINTS}, AppWindow, Player, VisualizationMode};
+use crate::{chroma::Chroma, player::{MeterMode, SCOPE_POINTS}, vectorscope::Vectorscope, AppWindow, Player, VisualizationMode};
 
 // mpv delivers measurements in decoder bursts. Ease toward the last real
 // measurement on every display tick instead of stepping, then holding it.
@@ -67,25 +67,25 @@ impl ScopeFrame {
     }
 }
 
-// Each row is one measurement of the ten logarithmic bands, low to high.
+// A row is either logarithmic frequency bands or the twelve pitch classes.
 // Ping-pong the immutable Slint images instead of allocating pixel storage per tick.
 const ROW_TIME: Duration = Duration::from_millis(40);
 const HISTORY_ROWS: usize = 120;
 const BANDS: usize = 10;
 
-struct Waterfall {
+struct Waterfall<const N: usize> {
     front: SharedPixelBuffer<Rgb8Pixel>,
     back: SharedPixelBuffer<Rgb8Pixel>,
-    peaks: [f32; BANDS],
+    peaks: [f32; N],
     last: Option<Instant>,
 }
 
-impl Waterfall {
+impl<const N: usize> Waterfall<N> {
     fn new() -> Self {
-        let mut front = SharedPixelBuffer::new(BANDS as u32, HISTORY_ROWS as u32);
+        let mut front = SharedPixelBuffer::new(N as u32, HISTORY_ROWS as u32);
         front.make_mut_slice().fill(Self::color(0.0));
-        let back = SharedPixelBuffer::new(BANDS as u32, HISTORY_ROWS as u32);
-        Self { front, back, peaks: [0.0; BANDS], last: None }
+        let back = SharedPixelBuffer::new(N as u32, HISTORY_ROWS as u32);
+        Self { front, back, peaks: [0.0; N], last: None }
     }
 
     fn color(level: f32) -> Rgb8Pixel {
@@ -101,7 +101,12 @@ impl Waterfall {
         Rgb8Pixel::new(channel(0), channel(1), channel(2))
     }
 
-    fn update(&mut self, now: Instant, samples: [f32; BANDS]) -> Option<Image> {
+    fn freeze(&mut self) {
+        self.last = None;
+        self.peaks.fill(0.0);
+    }
+
+    fn update(&mut self, now: Instant, samples: [f32; N]) -> Option<Image> {
         let steps = match self.last {
             None => 1,
             Some(last) => ((now - last).as_millis() / ROW_TIME.as_millis()).min(HISTORY_ROWS as u128) as usize,
@@ -113,10 +118,10 @@ impl Waterfall {
             Some(last) if steps < HISTORY_ROWS => last + ROW_TIME * steps as u32,
             _ => now,
         });
-        let retained = (HISTORY_ROWS - steps) * BANDS;
-        let newest = (HISTORY_ROWS - 1) * BANDS;
+        let retained = (HISTORY_ROWS - steps) * N;
+        let newest = (HISTORY_ROWS - 1) * N;
         let pixels = self.back.make_mut_slice();
-        pixels[..retained].copy_from_slice(&self.front.as_slice()[steps * BANDS..]);
+        pixels[..retained].copy_from_slice(&self.front.as_slice()[steps * N..]);
         // A delayed UI frame is a gap, not a repeated audio measurement.
         pixels[retained..newest].fill(Self::color(0.0));
         for (p, peak) in pixels[newest..].iter_mut().zip(&mut self.peaks) {
@@ -127,6 +132,31 @@ impl Waterfall {
     }
 }
 
+struct NoteWaterfall {
+    plot: Waterfall<12>,
+    analyzer: Chroma,
+    pcm: [f32; 4096],
+    levels: [f32; 12],
+}
+
+impl NoteWaterfall {
+    fn new() -> Self {
+        Self { plot: Waterfall::new(), analyzer: Chroma::new(), pcm: [0.0; 4096], levels: [0.0; 12] }
+    }
+
+    fn update(&mut self, now: Instant, player: &Player) -> Option<Image> {
+        if self.plot.last.is_some_and(|last| now - last < ROW_TIME) { return None; }
+        if player.chroma_samples(&mut self.pcm) {
+            self.levels = self.analyzer.levels(&self.pcm);
+        } else if !self.pcm.iter().any(|s| s.abs() > 1e-6) {
+            self.levels.fill(0.0);
+        }
+        // Decoder reads arrive in bursts. If the last complete PCM window is
+        // still valid, retain its analysis rather than drawing a false silence.
+        self.plot.update(now, self.levels)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Meter {
     active: VisualizationMode,
@@ -134,7 +164,9 @@ pub(crate) struct Meter {
     channels: [Channel; 2],
     spectrum: Option<Rc<VecModel<f32>>>,
     scope: Option<Rc<ScopeFrame>>,
-    waterfall: Option<Waterfall>,
+    waterfall: Option<Waterfall<BANDS>>,
+    notes: Option<Box<NoteWaterfall>>,
+    vectorscope: Option<Vectorscope>,
 }
 
 impl Meter {
@@ -151,6 +183,8 @@ impl Meter {
                 VisualizationMode::Stereo => MeterMode::Stereo,
                 VisualizationMode::Spectrum | VisualizationMode::Waterfall => MeterMode::Spectrum,
                 VisualizationMode::Scope => MeterMode::Scope,
+                VisualizationMode::Chroma => MeterMode::Chroma,
+                VisualizationMode::Vectorscope => MeterMode::Vectorscope,
             });
             match self.active {
                 VisualizationMode::Stereo => {
@@ -165,9 +199,11 @@ impl Meter {
                 VisualizationMode::Scope => {
                     if let Some(frame) = &self.scope { frame.replace([0.0; SCOPE_POINTS]); }
                 }
-                VisualizationMode::Waterfall => {
+                VisualizationMode::Waterfall | VisualizationMode::Chroma | VisualizationMode::Vectorscope => {
                     self.waterfall = None;
-                    ui.set_waterfall_image(Image::default());
+                    self.notes = None;
+                    self.vectorscope = None;
+                    ui.set_visualizer_image(Image::default());
                 }
                 VisualizationMode::Cover => {}
             }
@@ -183,11 +219,25 @@ impl Meter {
                 if ui.get_playing() {
                     let waterfall = self.waterfall.get_or_insert_with(Waterfall::new);
                     if let Some(image) = waterfall.update(Instant::now(), player.spectrum_levels()) {
-                        ui.set_waterfall_image(image);
+                        ui.set_visualizer_image(image);
                     }
                 } else if let Some(waterfall) = &mut self.waterfall {
-                    waterfall.last = None; // Freeze the picture rather than counting paused time.
-                    waterfall.peaks = [0.0; BANDS];
+                    waterfall.freeze();
+                }
+            }
+            VisualizationMode::Chroma => {
+                if ui.get_playing() {
+                    let notes = self.notes.get_or_insert_with(|| Box::new(NoteWaterfall::new()));
+                    if let Some(image) = notes.update(Instant::now(), player) { ui.set_visualizer_image(image); }
+                } else if let Some(notes) = &mut self.notes { notes.plot.freeze(); }
+            }
+            VisualizationMode::Vectorscope => {
+                if ui.get_playing() || self.vectorscope.is_none() {
+                    let elapsed = self.elapsed();
+                    let plot = self.vectorscope.get_or_insert_with(Vectorscope::new);
+                    ui.set_visualizer_image(plot.draw(&player.vectorscope_samples(), elapsed));
+                } else {
+                    self.last_sample = None;
                 }
             }
             VisualizationMode::Scope => self.update_scope(ui, player.scope_samples()),
@@ -263,10 +313,10 @@ mod tests {
         // Skip one row: a delayed tick must not stretch the burst across the gap.
         plot.update(start + ROW_TIME * 3, bass);
         let rows = plot.front.as_slice().chunks_exact(BANDS).rev().take(4).collect::<Vec<_>>();
-        assert_eq!(rows[0][0], Waterfall::color(0.75));
-        assert!(rows[1].iter().all(|&pixel| pixel == Waterfall::color(0.0)));
-        assert_eq!(rows[2][BANDS - 1], Waterfall::color(1.0));
-        assert_eq!(rows[2][0], Waterfall::color(0.0));
-        assert_eq!(rows[3][0], Waterfall::color(0.75));
+        assert_eq!(rows[0][0], Waterfall::<BANDS>::color(0.75));
+        assert!(rows[1].iter().all(|&pixel| pixel == Waterfall::<BANDS>::color(0.0)));
+        assert_eq!(rows[2][BANDS - 1], Waterfall::<BANDS>::color(1.0));
+        assert_eq!(rows[2][0], Waterfall::<BANDS>::color(0.0));
+        assert_eq!(rows[3][0], Waterfall::<BANDS>::color(0.75));
     }
 }

@@ -116,6 +116,8 @@ fn save_at(path: &Path, place: Place) -> std::io::Result<bool> {
         VisualizationMode::Spectrum => body.push_str("visualizer = \"spectrum\"\n"),
         VisualizationMode::Scope => body.push_str("visualizer = \"scope\"\n"),
         VisualizationMode::Waterfall => body.push_str("visualizer = \"waterfall\"\n"),
+        VisualizationMode::Vectorscope => body.push_str("visualizer = \"vectorscope\"\n"),
+        VisualizationMode::Chroma => body.push_str("visualizer = \"chroma\"\n"),
     }
     if let Some(preamp) = place.preamp {
         body.push_str(&format!("preamp = {preamp}\n"));
@@ -188,6 +190,8 @@ pub fn parse(text: &str) -> Option<Place> {
                 "spectrum" => VisualizationMode::Spectrum,
                 "scope" => VisualizationMode::Scope,
                 "waterfall" => VisualizationMode::Waterfall,
+                "vectorscope" => VisualizationMode::Vectorscope,
+                "chroma" => VisualizationMode::Chroma,
                 "stereo" => VisualizationMode::Stereo,
                 // Earlier versions saved the L/R toggle as a boolean.
                 _ if parse_bool(value) == Some(true) => VisualizationMode::Stereo,
@@ -413,7 +417,7 @@ mod tests {
         let mut place = bare(80.0, 60.0);
         assert!(save_at(&path, place).unwrap());
         assert!(!save_at(&path, place).unwrap());
-        for change in 0..17 {
+        for change in 0..19 {
             match change {
                 0 => place.x = 100.0,
                 1 => place.mode = Some(0),
@@ -431,6 +435,8 @@ mod tests {
                 13 => place.visualizer_mode = VisualizationMode::Spectrum,
                 14 => place.visualizer_mode = VisualizationMode::Scope,
                 15 => place.visualizer_mode = VisualizationMode::Waterfall,
+                16 => place.visualizer_mode = VisualizationMode::Vectorscope,
+                17 => place.visualizer_mode = VisualizationMode::Chroma,
                 _ => place.visualizer_mode = VisualizationMode::Cover,
             }
             assert!(save_at(&path, place).unwrap(), "change {change}");
