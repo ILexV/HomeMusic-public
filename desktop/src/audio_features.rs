@@ -15,6 +15,7 @@ pub(crate) struct State {
     ctx: Context,
     tools: slint::Weak<crate::ToolsWindow>,
     timer: slint::Timer,
+    frame_timer: slint::Timer,
     tick: Cell<u32>,
     meter: RefCell<crate::visualizer::Meter>,
     token: Cell<Option<u64>>,
@@ -74,7 +75,7 @@ pub(crate) fn bind(ctx: &Context, tools: &crate::ToolsWindow) -> Rc<State> {
     let state = Rc::new(State {
         ctx: ctx.clone(), tools: tools.as_weak(), timer: slint::Timer::default(),
         tick: Cell::new(0), token: Cell::new(None), album_requested: Cell::new(false),
-        meter: RefCell::default(),
+        meter: RefCell::default(), frame_timer: slint::Timer::default(),
         jobs, results: RefCell::new(results), crossfade: Cell::new(crossfade), overlap: Cell::new(overlap),
         settings: settings_pending, save_signal,
     });
@@ -104,6 +105,14 @@ pub(crate) fn bind(ctx: &Context, tools: &crate::ToolsWindow) -> Rc<State> {
         state.save();
     });
     let weak = Rc::downgrade(&state);
+    state.frame_timer.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+        let Some(state) = weak.upgrade() else { return };
+        if let Some(ui) = state.ctx.ui.upgrade() {
+            state.meter.borrow_mut().update(&ui, &state.ctx.player.borrow());
+        }
+    });
+    state.frame_timer.stop();
+    let weak = Rc::downgrade(&state);
     state.timer.start(slint::TimerMode::Repeated, Duration::from_millis(20), move || {
         if let Some(state) = weak.upgrade() { state.poll(); }
     });
@@ -125,9 +134,10 @@ impl State {
         self.ctx.player.borrow_mut().audio_tick();
         let tick = self.tick.get().wrapping_add(1);
         self.tick.set(tick);
-        if tick % 2 == 0 {
-            if let Some(ui) = self.ctx.ui.upgrade() {
-                self.meter.borrow_mut().update(&ui, &mut self.ctx.player.borrow_mut());
+        if let Some(ui) = self.ctx.ui.upgrade() {
+            let active = self.meter.borrow_mut().sync_mode(&ui, &mut self.ctx.player.borrow_mut());
+            if active != self.frame_timer.running() {
+                if active { self.frame_timer.restart(); } else { self.frame_timer.stop(); }
             }
         }
         if tick % 10 != 0 { return; }

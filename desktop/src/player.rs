@@ -368,7 +368,9 @@ impl Player {
             fade.outgoing.volume = self.volume;
             self.apply_volume();
             if progress >= 1.0 || self.is_idle() { self.finish_fade(); }
-        } else {
+        } else if self.crossfade_s > 0.0 && self.prepared.as_ref().is_some_and(|p| p.deck.is_some()) {
+            // snapshot() makes synchronous mpv calls. No overlap can start
+            // without an incoming deck; don't stall animation frames polling it.
             let state = self.snapshot();
             let remaining = f64::from(state.duration_s - state.position_s);
             if state.phase == PlaybackPhase::Playing && state.duration_s > 0.0
