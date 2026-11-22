@@ -1716,8 +1716,9 @@ fn push_playback(ui: &AppWindow, state: &player::PlaybackState) {
     let message = match state.phase {
         PlaybackPhase::Idle if ui.get_queue_busy() => "Загрузка очереди…",
         PlaybackPhase::Idle => "Выберите трек",
+        PlaybackPhase::Loading if state.resolving_source => "Ищу файл…",
         PlaybackPhase::Loading => "Загрузка аудио…",
-        PlaybackPhase::Buffering => "Буферизация…",
+        PlaybackPhase::Buffering => "Загружаю аудио в буфер…",
         PlaybackPhase::Playing => "",
         PlaybackPhase::Paused => "Пауза",
         PlaybackPhase::Stopped => "Остановлено",
@@ -2900,47 +2901,42 @@ fn play_current_at(
     start: Start,
 ) -> Result<(), String> {
     let (target, cookie, cover_id) = {
-        let queue = queue.borrow();
+        let mut queue = queue.borrow_mut();
+        if let Some(index) = queue.index() {
+            queue.set_playback_error(index, None);
+        }
         hub.offline.protect_current(queue.current());
         let cover_id = queue
             .current()
             .map(|item| item.id.clone())
             .unwrap_or_default();
-        let play = current_target(&queue, config, hub);
-        (
-            play.as_ref().map(|(url, _)| url.clone()),
-            play.map(|(_, cookie)| cookie).unwrap_or_default(),
-            cover_id,
-        )
+        let (target, cookie) = current_target(&queue, config, hub).unzip();
+        (target, cookie.unwrap_or_default(), cover_id)
     };
-    {
-        let queue = queue.borrow();
-        show_queue(ui, &queue, hub);
-    }
     ui.set_wave(empty_wave());
-    waves.load(target.clone(), &cookie);
     hub.listening.borrow_mut().begin(&queue.borrow(), hub, start);
-    let loaded = match target {
-        Some(target) => player.borrow_mut().load_cookie_at(&target, &cookie, position_s, paused),
+    let loaded = match target.as_deref() {
+        Some(target) => player.borrow_mut().load_cookie_at(target, &cookie, position_s, paused),
         None => {
-            player.borrow_mut().stop();
-            Err("Нет доступного адреса трека или сессии Хаба".into())
+            let message = "Нет доступного адреса трека или сессии Хаба";
+            player.borrow_mut().fail_to_open(message);
+            Err(message.into())
         },
     };
+    waves.load(target, &cookie);
     maybe_extend_wave(hub, &queue.borrow());
     // The previous cover must not stay on the next track when this one has none.
     show_cover(ui, hub, &cover_id);
-    match loaded {
-        Ok(()) => {
-            ui.set_error(String::new().into());
-            Ok(())
-        }
-        Err(err) => {
-            hub.listening.borrow_mut().failed(hub);
-            ui.set_error(err.clone().into());
-            Err(err)
+    if let Err(err) = &loaded {
+        hub.listening.borrow_mut().failed(hub);
+        let mut queue = queue.borrow_mut();
+        if let Some(index) = queue.index() {
+            queue.set_playback_error(index, Some(err));
         }
     }
+    ui.set_error(loaded.as_ref().err().map_or("", String::as_str).into());
+    show_queue(ui, &queue.borrow(), hub);
+    loaded
 }
 
 /// URL plus a Hub session cookie. The cookie is empty for a library song or a local file.
@@ -3040,6 +3036,7 @@ fn show_queue(ui: &AppWindow, queue: &queue::Queue, hub: &HubState) {
                 number: format!("{}", index + 1).into(),
                 title: item.title.clone().into(),
                 meta: item.artist.clone().into(),
+                playback_error: queue.playback_error(index).unwrap_or_default().into(),
                 duration: row_duration(item).into(),
                 current: is_current,
                 liked: track_liked(&marks, item),

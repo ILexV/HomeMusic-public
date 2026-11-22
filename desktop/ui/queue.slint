@@ -12,6 +12,7 @@ export component QueueView inherits Rectangle {
     // Index in the displayed (possibly filtered) model; -1 disables following.
     in property <int> current-row: -1;
     in property <bool> playing;
+    in property <string> current-status;
     in property <bool> quiet-actions;
     private property <length> current-top: root.current-row * root.row-height + flick.content-y;
     private property <bool> has-current: root.current-row >= 0 && root.current-row < root.queue.length && flick.height > 0px;
@@ -109,8 +110,9 @@ export component QueueView inherits Rectangle {
                 content-width: self.width;
                 content-height: root.queue.length * root.row-height;
                 changed height => { root.reveal-current(); }
-                for item[index] in root.queue : Rectangle {
+                for item[index] in root.queue : row := Rectangle {
                     y: index * root.row-height;
+                    property <string> track-status: item.current && root.current-status != "" ? root.current-status : item.playback-error;
                     height: root.row-height;
                     width: flick.width;
                     background: item.current ? #e8872a30 : ((root.quiet-actions
@@ -127,7 +129,12 @@ export component QueueView inherits Rectangle {
                             alignment: center;
                             spacing: 2px;
                             Text { text: item.title; color: item.current ? Theme.orange : Theme.text; font-size: 12px; overflow: elide; }
-                            if item.meta != "" : Text { text: item.meta; color: Theme.dim; font-size: 10px; overflow: elide; }
+                            if row.track-status != "" || item.meta != "" : Text {
+                                text: row.track-status != "" ? row.track-status : item.meta;
+                                color: row.track-status != "" ? Theme.orange : Theme.dim;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
                         }
                         if item.liked : Glyph { kind: "heart"; tint: Theme.orange; width: 13px; height: 13px; accessible-role: image; accessible-label: "В понравившихся"; }
                         Text { text: item.duration; color: Theme.muted; font-size: 10px; }
@@ -142,6 +149,7 @@ export component QueueView inherits Rectangle {
                                 root.play-row(item.source);
                             }
                         }
+                        Tooltip { text: @markdown("\{row.track-status}"); }
                     }
                     TitleButton {
                         x: parent.width - 76px; y: 9px; width: 24px;

@@ -620,6 +620,7 @@ export component Large inherits Rectangle {
                     quiet-actions: true;
                     current-row: root.current-queue-row;
                     playing: root.playing;
+                    current-status: root.playback-busy || root.playback-error ? root.playback-message : "";
                     queue: root.queue;
                     busy: root.queue-busy;
                     error: root.queue-error;

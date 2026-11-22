@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(event["launch_origin"], "home_card");
     }
     fn snapshot(phase: PlaybackPhase, position_s: f32) -> PlaybackState {
-        PlaybackState { phase, position_s, duration_s: 100.0, seekable: true, playing: phase == PlaybackPhase::Playing, volume: 1.0 }
+        PlaybackState { phase, resolving_source: false, position_s, duration_s: 100.0, seekable: true, playing: phase == PlaybackPhase::Playing, volume: 1.0 }
     }
     #[test]
     fn departures_use_heard_time_not_seek_position() {

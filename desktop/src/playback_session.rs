@@ -351,6 +351,7 @@ mod tests {
     fn state(phase: PlaybackPhase, position_s: f32) -> PlaybackState {
         PlaybackState {
             phase, position_s, duration_s: 120.0, volume: 0.8,
+            resolving_source: false,
             seekable: true, playing: phase == PlaybackPhase::Playing,
         }
     }
