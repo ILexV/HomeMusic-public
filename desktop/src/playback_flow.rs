@@ -1,6 +1,7 @@
 //! Bridges the queue's occurrence identity and mpv's prepared media without replaying promotions.
-use crate::{feature_context::Context, player::PlaybackState};
+use crate::{feature_context::Context, player::{PlaybackPhase, PlaybackState}};
 use crate::queue::{Queue, Repeat, Start};
+use slint::ComponentHandle;
 use std::collections::HashSet;
 
 /// A failed run follows row IDs (not track IDs or positions) across edits.
@@ -53,6 +54,7 @@ pub(crate) struct State {
     prepared: Option<Prepared>,
     failures: FailedRun,
     observation: Option<(Option<u64>, PlaybackState)>,
+    loaded_occurrence: Option<u64>,
 }
 
 impl State {
@@ -119,7 +121,30 @@ impl State {
             }
         }
         self.prepare(ctx);
-        self.observation = Some((ctx.queue.borrow().current_token(), ctx.player.borrow().snapshot()));
+        let queue = ctx.queue.borrow();
+        let token = queue.current_token();
+        let snapshot = ctx.player.borrow().snapshot();
+        if self.starts_playing(token, ctx.hub.listening.borrow().attempt_token(), snapshot.phase) {
+            if let Some(ui) = ctx.ui.upgrade().filter(|ui| {
+                ui.get_visualizer_expanded() && ui.window().is_visible() && !ui.window().is_minimized()
+            }) {
+                if let Some(item) = queue.current() {
+                    ui.invoke_show_track_splash(item.title.trim().into(), item.artist.trim().into());
+                }
+            }
+        }
+        self.observation = Some((token, snapshot));
+    }
+
+    // Observe loaded occurrences even while collapsed. A paused restore is a
+    // baseline, not a new track the next time the listener presses Play.
+    fn starts_playing(&mut self, current: Option<u64>, attempt: Option<u64>, phase: PlaybackPhase) -> bool {
+        if current.is_none() || current == self.loaded_occurrence || current != attempt
+            || !matches!(phase, PlaybackPhase::Playing | PlaybackPhase::Paused) {
+            return false;
+        }
+        self.loaded_occurrence = current;
+        phase == PlaybackPhase::Playing
     }
 
     fn refresh_promoted(&self, ctx: &Context) {
@@ -180,6 +205,25 @@ mod tests {
         queue.select(current);
         queue.set_repeat(repeat);
         queue
+    }
+
+    #[test]
+    fn splash_follows_loaded_occurrences_not_labels_or_refreshes() {
+        let mut flow = State::default();
+        let mut q = queue(Repeat::Off, 0); // all three rows have identical metadata
+        let a = q.current_token();
+        assert!(!flow.starts_playing(a, a, PlaybackPhase::Paused));
+        assert!(!flow.starts_playing(a, a, PlaybackPhase::Playing));
+        assert_eq!(q.advance(), Some(Start::Auto));
+        let b = q.current_token();
+        assert!(!flow.starts_playing(b, a, PlaybackPhase::Playing));
+        assert!(!flow.starts_playing(b, b, PlaybackPhase::Loading));
+        assert!(flow.starts_playing(b, b, PlaybackPhase::Playing));
+        assert!(!flow.starts_playing(b, b, PlaybackPhase::Playing));
+        assert!(q.next());
+        let c = q.current_token();
+        assert!(!flow.starts_playing(c, c, PlaybackPhase::Error));
+        assert!(flow.starts_playing(c, c, PlaybackPhase::Playing));
     }
 
     fn fail(run: &mut FailedRun, queue: &mut Queue) -> bool {

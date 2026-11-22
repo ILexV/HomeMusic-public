@@ -136,6 +136,16 @@ export component Glyph inherits Rectangle {
         stroke-width: 1.5px;
         stroke-line-cap: round;
     }
+    if root.kind == "cover" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M1.5 2H14.5V14H1.5Z M2 12L6 8L9 11L11 9L14 12 M10 5H12";
+        fill: transparent;
+        stroke: root.tint;
+        stroke-width: 1.5px;
+    }
     if root.kind == "visualizer" : Path {
         width: 100%;
         height: 100%;
@@ -209,6 +219,8 @@ component ActionButton inherits Rectangle {
     in property <string> tip;
     in property <bool> active;
     in property <color> surface;
+    in property <bool> has-menu;
+    callback open-menu();
     callback clicked();
     width: 32px;
     height: 30px;
@@ -224,6 +236,10 @@ component ActionButton inherits Rectangle {
     keys := FocusScope {
         focus-on-click: false;
         key-pressed(event) => {
+            if root.has-menu && (event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift)) {
+                if !event.repeat { root.open-menu(); }
+                return accept;
+            }
             if !event.modifiers.control && !event.modifiers.meta && !event.modifiers.shift &&
                 !event.modifiers.alt && (event.text == Key.Return || event.text == " ") {
                 if !event.repeat { root.clicked(); }
@@ -240,9 +256,141 @@ component ActionButton inherits Rectangle {
     }
     touch := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(event) => {
+            if root.has-menu && event.button == PointerEventButton.right && event.kind == PointerEventKind.up &&
+                self.mouse-x >= 0 && self.mouse-x < self.width && self.mouse-y >= 0 && self.mouse-y < self.height {
+                root.open-menu();
+            }
+        }
         clicked => { root.clicked(); }
     }
     Tooltip { text: @markdown("\{root.tip}"); }
+}
+
+component VisualizerButton inherits ActionButton {
+    in-out property <VisualizationMode> mode;
+    private property <[VisualizationMode]> modes: [
+        VisualizationMode.cover, VisualizationMode.stereo, VisualizationMode.spectrum, VisualizationMode.scope,
+        VisualizationMode.waterfall, VisualizationMode.vectorscope, VisualizationMode.chroma,
+    ];
+    private property <int> selected: root.mode == root.modes[0] ? 0
+        : root.mode == root.modes[1] ? 1 : root.mode == root.modes[2] ? 2
+        : root.mode == root.modes[3] ? 3 : root.mode == root.modes[4] ? 4
+        : root.mode == root.modes[5] ? 5 : 6;
+    private property <int> next: mod(root.selected + 1, root.modes.length);
+    private property <int> highlighted;
+
+    pure function label-for(mode: VisualizationMode) -> string {
+        if mode == VisualizationMode.cover { "Обложка" }
+        else if mode == VisualizationMode.stereo { "Уровни L/R" }
+        else if mode == VisualizationMode.spectrum { "Спектр" }
+        else if mode == VisualizationMode.scope { "Осциллограмма" }
+        else if mode == VisualizationMode.waterfall { "Водопад" }
+        else if mode == VisualizationMode.vectorscope { "Стереоскоп" }
+        else { "Нотный водопад" }
+    }
+
+    pure function icon-for(mode: VisualizationMode) -> string {
+        if mode == VisualizationMode.cover { "cover" }
+        else if mode == VisualizationMode.stereo { "visualizer" }
+        else if mode == VisualizationMode.spectrum { "spectrum" }
+        else if mode == VisualizationMode.scope { "scope" }
+        else if mode == VisualizationMode.waterfall { "waterfall" }
+        else if mode == VisualizationMode.vectorscope { "vectorscope" }
+        else { "chroma" }
+    }
+
+    icon: root.mode == VisualizationMode.cover ? "visualizer" : root.icon-for(root.mode);
+    tip: "Визуализация: \{root.label-for(root.mode)}. Далее: \{root.label-for(root.modes[root.next])}. Правый щелчок — выбрать режим.";
+    active: root.mode != VisualizationMode.cover;
+    has-menu: true;
+    clicked => { root.mode = root.modes[root.next]; }
+    open-menu => {
+        root.highlighted = root.selected;
+        picker.show();
+    }
+
+    // Winit can embed popups inside the player; four rows fit even the 150px mini window.
+    picker := PopupWindow {
+        width: 344px;
+        height: 128px;
+        x: root.width - self.width;
+        y: -self.height;
+        close-policy: close-on-click-outside;
+        forward-focus: menu-keys;
+
+        menu-keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    picker.close();
+                } else if event.text == Key.Return || event.text == " " {
+                    root.mode = root.modes[root.highlighted];
+                    picker.close();
+                } else if event.text == Key.RightArrow {
+                    root.highlighted = min(root.highlighted + 1, root.modes.length - 1);
+                } else if event.text == Key.LeftArrow {
+                    root.highlighted = max(root.highlighted - 1, 0);
+                } else if event.text == Key.DownArrow {
+                    root.highlighted = min(root.highlighted + 2, root.modes.length - 1);
+                } else if event.text == Key.UpArrow {
+                    root.highlighted = max(root.highlighted - 2, 0);
+                } else {
+                    return reject;
+                }
+                return accept;
+            }
+            Rectangle {
+                background: Theme.panel;
+                border-color: Theme.dim;
+                border-width: 1px;
+                border-radius: 6px;
+                for mode[index] in root.modes : row := Rectangle {
+                    width: (parent.width - 8px) / 2;
+                    height: (parent.height - 8px) / 4;
+                    x: 4px + mod(index, 2) * self.width;
+                    y: 4px + floor(index / 2) * self.height;
+                    border-radius: 4px;
+                    background: index == root.highlighted ? Theme.raised : transparent;
+                    accessible-role: radio-button;
+                    accessible-label: root.label-for(mode);
+                    accessible-checked: mode == root.mode;
+                    accessible-action-default => { row.choose(); }
+                    function choose() {
+                        root.mode = mode;
+                        picker.close();
+                    }
+                    Glyph {
+                        x: 8px;
+                        y: (parent.height - self.height) / 2;
+                        kind: root.icon-for(mode);
+                        tint: Theme.orange;
+                    }
+                    Text {
+                        x: 32px;
+                        width: parent.width - 54px;
+                        text: root.label-for(mode);
+                        color: Theme.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    if mode == root.mode : Text {
+                        x: parent.width - 20px;
+                        width: 16px;
+                        text: "✓";
+                        color: Theme.orange;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.move { root.highlighted = index; }
+                        }
+                        clicked => { row.choose(); }
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component PlaybackActions inherits HorizontalLayout {
@@ -261,29 +409,9 @@ export component PlaybackActions inherits HorizontalLayout {
     ActionButton { icon: "dislike"; tip: "Дизлайк"; surface: root.surface; active: root.disliked; clicked => { root.toggle-dislike(); } }
     Rectangle { width: 4px; }
     ActionButton { icon: "equalizer"; tip: "Эквалайзер"; surface: root.surface; active: root.eq-on; clicked => { root.toggle-eq(); } }
-    ActionButton {
-        icon: root.visualizer-mode == VisualizationMode.waterfall ? "waterfall"
-            : root.visualizer-mode == VisualizationMode.vectorscope ? "vectorscope"
-            : root.visualizer-mode == VisualizationMode.chroma ? "chroma"
-            : root.visualizer-mode == VisualizationMode.scope ? "scope"
-            : root.visualizer-mode == VisualizationMode.spectrum ? "spectrum" : "visualizer";
-        tip: root.visualizer-mode == VisualizationMode.cover ? "Визуализация: обложка. Показать уровни L/R"
-            : root.visualizer-mode == VisualizationMode.stereo ? "Визуализация: уровни L/R. Показать спектр"
-            : root.visualizer-mode == VisualizationMode.spectrum ? "Визуализация: спектр. Показать осциллограмму"
-            : root.visualizer-mode == VisualizationMode.scope ? "Визуализация: осциллограмма. Показать водопад"
-            : root.visualizer-mode == VisualizationMode.waterfall ? "Визуализация: водопад. Показать стереоскоп"
-            : root.visualizer-mode == VisualizationMode.vectorscope ? "Визуализация: стереоскоп. Показать нотный водопад"
-            : "Визуализация: нотный водопад. Показать обложку";
+    VisualizerButton {
+        mode <=> root.visualizer-mode;
         surface: root.surface;
-        active: root.visualizer-mode != VisualizationMode.cover;
-        clicked => {
-            root.visualizer-mode = root.visualizer-mode == VisualizationMode.cover ? VisualizationMode.stereo
-                : root.visualizer-mode == VisualizationMode.stereo ? VisualizationMode.spectrum
-                : root.visualizer-mode == VisualizationMode.spectrum ? VisualizationMode.scope
-                : root.visualizer-mode == VisualizationMode.scope ? VisualizationMode.waterfall
-                : root.visualizer-mode == VisualizationMode.waterfall ? VisualizationMode.vectorscope
-                : root.visualizer-mode == VisualizationMode.vectorscope ? VisualizationMode.chroma : VisualizationMode.cover;
-        }
     }
 }
 

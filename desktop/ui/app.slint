@@ -59,6 +59,8 @@ export component AppWindow inherits Window {
     in-out property <[float]> scope-samples;
     in-out property <image> visualizer-image;
     out property <bool> visualizer-expanded: expanded-view.is-open;
+    private property <string> splash-title;
+    private property <string> splash-artist;
     in-out property <float> meter-left;
     in-out property <float> meter-right;
     in-out property <float> peak-left;
@@ -181,6 +183,32 @@ export component AppWindow inherits Window {
             ? EventResult.accept : EventResult.reject;
     }
 
+    public function show-track-splash(title: string, artist: string) {
+        root.splash-title = title == "" ? artist : title;
+        root.splash-artist = title == "" ? "" : artist;
+        if root.splash-title == "" {
+            splash-hold.stop();
+        } else if splash-hold.running {
+            splash-hold.restart();
+        } else {
+            splash-hold.start();
+        }
+    }
+
+    splash-hold := Timer {
+        interval: 2400ms;
+        running: false;
+        triggered => { self.stop(); }
+    }
+
+    changed visualizer-expanded => {
+        if !root.visualizer-expanded {
+            splash-hold.stop();
+            root.splash-title = "";
+            root.splash-artist = "";
+        }
+    }
+
     // Winit embeds this popup in the player and restores the previous focus
     // item on close. Leave the player layouts mounted to preserve their state.
     expanded-view := PopupWindow {
@@ -206,6 +234,42 @@ export component AppWindow inherits Window {
                 visualizer-image: root.visualizer-image;
                 levels: root.levels;
                 toggle-expanded => { expanded-view.close(); }
+            }
+            Rectangle {
+                x: 12px;
+                y: parent.height - self.height - 12px;
+                width: min(parent.width - 24px, max(title-line.preferred-width, artist-line.preferred-width) + 24px);
+                height: root.splash-artist == "" ? 36px : 54px;
+                background: #151515e6;
+                border-width: 1px;
+                border-color: #ffffff35;
+                border-radius: 8px;
+                visible: root.splash-title != "" && self.opacity > 0;
+                opacity: splash-hold.running ? 1 : 0;
+                animate opacity {
+                    duration: splash-hold.running ? 0ms : 600ms;
+                    easing: ease-out;
+                }
+                title-line := Text {
+                    x: 12px; y: 6px;
+                    width: parent.width - 24px; height: 24px;
+                    text: root.splash-title;
+                    color: Theme.text;
+                    font-size: 18px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                artist-line := Text {
+                    x: 12px; y: 29px;
+                    width: parent.width - 24px; height: 18px;
+                    text: root.splash-artist;
+                    visible: self.text != "";
+                    color: #dddddd;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
             TitleButton {
                 x: parent.width - self.width - 4px;
