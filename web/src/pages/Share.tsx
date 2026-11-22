@@ -39,11 +39,13 @@ export function SharePage() {
 
       if (audio.length) {
         queueFilesForUpload(audio);
-        if (images.length) toast('Скриншоты — в чате ассистента', 'info', { label: 'Открыть', to: '/assistant' });
       }
       if (images.length || (text && !audio.length)) {
-        startChatWith(images.length ? text || 'Найди и скачай треки с этих скриншотов' : text, images);
-        if (audio.length) navigate('/upload', { replace: true });
+        const attached = startChatWith(text, images);
+        if (audio.length) {
+          if (attached) toast('Скриншоты — в чате ассистента', 'info', { label: 'Открыть', to: '/assistant' });
+          navigate('/upload', { replace: true });
+        }
         return;
       }
       if (audio.length) {

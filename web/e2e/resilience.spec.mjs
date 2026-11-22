@@ -46,6 +46,26 @@ test('an automatic update waits for an unsent screenshot even without message te
   await expect(page.getByRole('textbox', { name: 'Сообщение ассистенту' })).toBeVisible();
 });
 
+test('an oversized screenshot does not displace a valid attachment or erase the draft', async ({ page }) => {
+  await login(page, 'alice', '/assistant');
+  const input = page.getByRole('textbox', { name: 'Сообщение ассистенту' });
+  await input.fill('Сравни скриншоты');
+  await input.evaluate(el => {
+    const clipboardData = new DataTransfer();
+    const limit = 15 * 1024 * 1024;
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/L1sAAAAASUVORK5CYII='), c => c.charCodeAt(0));
+    for (const [name, size] of [['too-big.png', limit + 1], ['at-limit.png', limit]]) {
+      clipboardData.items.add(new File([png, new Uint8Array(size - png.length)], name, { type: 'image/png' }));
+    }
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+  });
+  await expect(page.getByRole('img', { name: 'at-limit.png' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'too-big.png' })).toHaveCount(0, { timeout: 2000 });
+  await expect(page.getByText(/15 МиБ/)).toBeVisible();
+  await expect(input).toHaveValue('Сравни скриншоты');
+  await expect(page.getByRole('button', { name: 'Отправить' })).toBeEnabled();
+});
+
 test('a new chat clears the composer but the first reply in the same chat does not', async ({ page }) => {
   await login(page, 'alice', '/assistant');
   const input = page.getByRole('textbox', { name: 'Сообщение ассистенту' });

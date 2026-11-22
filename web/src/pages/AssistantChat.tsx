@@ -13,9 +13,17 @@ import { attempt, toast } from '../lib/ui';
 import { holdAutoUpdate } from '../lib/update';
 
 const MAX_IMAGES = 15;
+const MAX_IMAGE_MIB = 15;
 const MAX_MESSAGE_CHARS = 5000;
 
-const imageLimitWarning = () => toast(`В одном сообщении не больше ${MAX_IMAGES} фотографий. Лишние файлы не добавлены.`, 'error');
+function acceptedImages(files: File[], slots: number): File[] {
+  const images = files.filter(f => f.type.startsWith('image/'));
+  const valid = images.filter(f => f.size <= MAX_IMAGE_MIB * 1024 * 1024);
+  if (valid.length !== images.length) toast(`Фото больше ${MAX_IMAGE_MIB} МиБ не добавлены.`, 'error');
+  if (valid.length <= slots) return valid;
+  toast(`В одном сообщении не больше ${MAX_IMAGES} фотографий. Лишние файлы не добавлены.`, 'error');
+  return valid.slice(0, slots);
+}
 
 interface Proposal {
   taskId: number;
@@ -139,9 +147,10 @@ export function setChatAccount(account: number | null) {
 /** Opens a new chat with a message ready to send (Android "Share" → HomeMusic). */
 export function startChatWith(text: string, images: File[] = []) {
   newChat();
-  draft = { text, images: images.slice(0, MAX_IMAGES) };
-  if (images.length > MAX_IMAGES) imageLimitWarning();
+  const accepted = acceptedImages(images, MAX_IMAGES);
+  draft = { text: text || (accepted.length ? 'Найди и скачай треки с этих скриншотов' : ''), images: accepted };
   navigate('/assistant', { replace: true });
+  return accepted.length > 0;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -232,9 +241,8 @@ function Conversation({ id, entries, loading, error, sending }: ChatState) {
   }, []);
 
   const addImages = (files: File[]) => {
-    const valid = files.filter((f) => f.type.startsWith('image/'));
-    if (images.length + valid.length > MAX_IMAGES) imageLimitWarning();
-    setImages((prev) => [...prev, ...valid].slice(0, MAX_IMAGES));
+    const valid = acceptedImages(files, MAX_IMAGES - images.length);
+    if (valid.length) setImages((prev) => [...prev, ...valid].slice(0, MAX_IMAGES));
   };
 
   useEffect(() => {
