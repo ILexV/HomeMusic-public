@@ -1119,26 +1119,47 @@ component MeterChannel inherits Rectangle {
     in property <string> label;
     in property <float> level;
     in property <float> peak;
-    private property <int> count: 12;
-    private property <length> step: root.height * 0.72 / root.count;
+    private property <length> rail-top: root.height * 0.60;
+    private property <length> rail-height: root.height * 0.32;
 
-    for segment[i] in root.count : Rectangle {
-        width: 100%;
-        height: root.step - max(1px, root.step * 0.2);
-        y: (root.count - 1 - i) * root.step;
-        background: root.peak > 0 && i == ceil(root.peak * root.count) - 1 ? Theme.text
-            : i < root.level * root.count ? (i >= 10 ? #e86a52 : i >= 8 ? Theme.orange : #69bc88)
-            : Theme.line;
-    }
     Text {
-        y: root.count * root.step;
-        width: 100%;
-        height: parent.height - self.y;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+        x: 0px;
+        y: 0px;
+        height: root.rail-top - 2px;
+        vertical-alignment: bottom;
         text: root.label;
-        font-size: min(14px, self.height);
-        color: Theme.muted;
+        font-size: clamp(root.height * 0.4, 9px, 14px);
+        font-weight: 600;
+        color: Theme.text;
+    }
+    for tick[i] in 4 : Rectangle {
+        width: 1px;
+        height: clamp(root.height * 0.10, 2px, 4px);
+        x: (root.width - self.width) * (i + 1) / 4;
+        y: root.rail-top - self.height - 2px;
+        background: Theme.dim;
+    }
+    Rectangle {
+        y: root.rail-top;
+        width: 100%;
+        height: root.rail-height;
+        border-radius: 2px;
+        background: Theme.line;
+        Rectangle {
+            x: 0px;
+            width: parent.width * clamp(root.level, 0, 1);
+            height: 100%;
+            border-radius: min(2px, self.width / 2);
+            background: Theme.orange;
+        }
+        Rectangle {
+            visible: root.peak > 0;
+            width: clamp(root.width * 0.018, 2px, 3px);
+            height: parent.height + 2px;
+            x: (parent.width - self.width) * clamp(root.peak, 0, 1);
+            y: -1px;
+            background: Theme.text;
+        }
     }
 }
 
@@ -1161,29 +1182,59 @@ export component NowPlayingArt inherits Rectangle {
         border-radius: 6px;
         border-width: 1px;
         border-color: Theme.line;
-        if root.visualizer-mode == VisualizationMode.stereo : HorizontalLayout {
-            padding-left: root.width * 0.17;
-            padding-right: root.width * 0.17;
-            padding-top: root.height * 0.10;
-            padding-bottom: root.height * 0.04;
-            spacing: root.width * 0.08;
-            MeterChannel { label: "L"; level: root.levels.left; peak: root.levels.peak-left; }
-            MeterChannel { label: "R"; level: root.levels.right; peak: root.levels.peak-right; }
-        }
-        if root.visualizer-mode == VisualizationMode.spectrum : HorizontalLayout {
-            padding-left: root.width * 0.06;
-            padding-right: root.width * 0.06;
+        if root.visualizer-mode == VisualizationMode.stereo : VerticalLayout {
+            padding-left: root.width * 0.10;
+            padding-right: root.width * 0.10;
             padding-top: root.height * 0.10;
             padding-bottom: root.height * 0.10;
-            spacing: max(1px, root.width * 0.015);
-            for level in root.spectrum-levels : Rectangle {
-                horizontal-stretch: 1;
-                background: Theme.line;
-                Rectangle {
+            spacing: root.height * 0.08;
+            MeterChannel { vertical-stretch: 1; label: "L"; level: root.levels.left; peak: root.levels.peak-left; }
+            MeterChannel { vertical-stretch: 1; label: "R"; level: root.levels.right; peak: root.levels.peak-right; }
+        }
+        if root.visualizer-mode == VisualizationMode.spectrum : Rectangle {
+            x: root.width * 0.08;
+            y: root.height * 0.10;
+            width: root.width - 2 * self.x;
+            height: root.height - 2 * self.y;
+            plot := Rectangle {
+                y: 0px;
+                width: 100%;
+                height: parent.height - legend.height - 3px;
+                property <length> gap: max(1px, plot.width * 0.019);
+                property <int> band-count: 10;
+                for line[i] in 4 : Rectangle {
                     width: 100%;
-                    height: parent.height * clamp(level, 0, 1);
-                    y: parent.height - self.height;
+                    height: 1px;
+                    y: (plot.height - self.height) * (i + 1) / 4;
+                    background: Theme.line;
+                }
+                // Keep the bars in place even when a new sample model arrives.
+                for band[i] in plot.band-count : Rectangle {
+                    width: (plot.width - plot.gap * (plot.band-count - 1)) / plot.band-count;
+                    x: (self.width + plot.gap) * i;
+                    height: i < root.spectrum-levels.length ? plot.height * clamp(root.spectrum-levels[i], 0, 1) : 0px;
+                    y: plot.height - self.height;
+                    border-radius: min(2px, self.height / 2);
                     background: Theme.orange;
+                }
+            }
+            legend := Rectangle {
+                width: 100%;
+                height: clamp(root.height * 0.14, 10px, 16px);
+                y: parent.height - self.height;
+                Text {
+                    width: 100%;
+                    horizontal-alignment: left;
+                    text: "НЧ";
+                    font-size: parent.height - 1px;
+                    color: Theme.muted;
+                }
+                Text {
+                    width: 100%;
+                    horizontal-alignment: right;
+                    text: "ВЧ";
+                    font-size: parent.height - 1px;
+                    color: Theme.muted;
                 }
             }
         }
