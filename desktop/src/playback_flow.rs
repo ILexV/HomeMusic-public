@@ -18,9 +18,10 @@ impl FailedRun {
     }
 
     // None: stale event; Some(false): this attempt failed with no successor.
-    fn advance(&mut self, queue: &mut Queue, attempt: Option<u64>) -> Option<bool> {
+    fn advance(&mut self, queue: &mut Queue, attempt: Option<u64>, notice: &str) -> Option<bool> {
         let index = queue.index()?;
         if attempt.is_none() || attempt != queue.current_token() { return None; }
+        queue.set_playback_error(index, Some(notice));
         if self.expected != attempt { self.clear(); }
         self.rows.insert(queue.row_token(index).unwrap());
         let end = if queue.repeat() == Repeat::All { index } else { 0 };
@@ -84,6 +85,10 @@ impl State {
             self.prepared = None;
             if let Some(start) = start {
                 if adopted {
+                    {
+                        let mut queue = ctx.queue.borrow_mut();
+                        if let Some(index) = queue.index() { queue.set_playback_error(index, None); }
+                    }
                     ctx.hub.listening.borrow_mut().begin(&ctx.queue.borrow(), &ctx.hub, start);
                     self.refresh_promoted(ctx);
                 } else {
@@ -98,12 +103,18 @@ impl State {
         // the previous entry's EOF. Reloading a stale prediction clears its failure.
         if ctx.player.borrow_mut().take_failed_media() {
             let attempt = ctx.hub.listening.borrow().attempt_token();
-            let advanced = self.failures.advance(&mut ctx.queue.borrow_mut(), attempt);
+            let advanced = {
+                let player = ctx.player.borrow();
+                let notice = player.notice().unwrap_or("Не удалось воспроизвести трек");
+                self.failures.advance(&mut ctx.queue.borrow_mut(), attempt, notice)
+            };
             if let Some(advanced) = advanced {
                 ctx.hub.listening.borrow_mut().failed(&ctx.hub);
                 if advanced {
                     self.prepared = None;
                     ctx.play_current(Start::Auto);
+                } else {
+                    ctx.refresh_queue();
                 }
             }
         }
@@ -173,7 +184,7 @@ mod tests {
 
     fn fail(run: &mut FailedRun, queue: &mut Queue) -> bool {
         let current = queue.current_token();
-        run.advance(queue, current).unwrap()
+        run.advance(queue, current, "Файл недоступен").unwrap()
     }
 
     #[test]
@@ -196,9 +207,13 @@ mod tests {
         let stale = q.current_token();
         assert!(fail(&mut failures, &mut q));
         assert_eq!(q.index(), Some(0));
-        assert_eq!(failures.advance(&mut q, stale), None);
+        assert_eq!(failures.advance(&mut q, stale, "Устаревшая ошибка"), None);
+        assert_eq!(q.playback_error(0), None);
+        assert_eq!(q.playback_error(2), Some("Файл недоступен"));
         let last_untried = q.row_token(1);
         q.move_item(2, 1);
+        assert_eq!(q.playback_error(1), Some("Файл недоступен"));
+        assert_eq!(q.playback_error(2), None);
         assert!(fail(&mut failures, &mut q));
         assert_eq!(q.row_token(q.index().unwrap()), last_untried);
         assert!(!fail(&mut failures, &mut q));

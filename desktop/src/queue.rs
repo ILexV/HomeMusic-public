@@ -73,6 +73,7 @@ struct RemovedRow {
     original_index: Option<usize>,
     recommendation: Option<Recommendation>,
     source: Option<std::sync::Arc<str>>,
+    playback_error: Option<String>,
     was_current: bool,
 }
 
@@ -89,6 +90,7 @@ pub struct Queue {
     recommendations: HashMap<u64, Recommendation>,
     // A song inserted from a different surface does not belong to the list around it.
     sources: HashMap<u64, std::sync::Arc<str>>,
+    playback_errors: HashMap<u64, String>,
     removed: Option<RemovedRow>,
     repeat: Repeat,
     shuffle: Shuffle,
@@ -104,6 +106,7 @@ impl Queue {
             original: None,
             recommendations: HashMap::new(),
             sources: HashMap::new(),
+            playback_errors: HashMap::new(),
             removed: None,
             repeat: Repeat::Off,
             shuffle: Shuffle::Off,
@@ -232,13 +235,14 @@ impl Queue {
         let row = self.rows.remove(index);
         let recommendation = self.recommendations.remove(&row);
         let source = self.sources.remove(&row);
+        let playback_error = self.playback_errors.remove(&row);
         let original_index = self.original.as_mut().and_then(|order| {
             let at = order.iter().position(|id| *id == row)?;
             order.remove(at);
             Some(at)
         });
         self.removed = undoable.then_some(RemovedRow {
-            item, row, index, original_index, recommendation, source, was_current: removed_current,
+            item, row, index, original_index, recommendation, source, playback_error, was_current: removed_current,
         });
         self.index = self.index.and_then(|current| {
             if current > index {
@@ -280,6 +284,7 @@ impl Queue {
             self.recommendations.insert(removed.row, rec);
         }
         if let Some(source) = removed.source { self.sources.insert(removed.row, source); }
+        if let Some(error) = removed.playback_error { self.playback_errors.insert(removed.row, error); }
         self.revision = next_revision();
         if let Some(current) = self.index {
             // The player keeps its current occurrence, including a successor
@@ -373,6 +378,20 @@ impl Queue {
     pub fn context(&self) -> &str { &self.context }
     pub fn row_token(&self, index: usize) -> Option<u64> { self.rows.get(index).copied() }
     pub fn row_index(&self, token: u64) -> Option<usize> { self.rows.iter().position(|id| *id == token) }
+
+    pub fn playback_error(&self, index: usize) -> Option<&str> {
+        self.playback_errors.get(self.rows.get(index)?).map(String::as_str)
+    }
+
+    pub fn set_playback_error(&mut self, index: usize, message: Option<&str>) {
+        let Some(row) = self.row_token(index) else { return };
+        if let Some(message) = message {
+            self.playback_errors.insert(row, message.to_owned());
+        } else {
+            self.playback_errors.remove(&row);
+        }
+    }
+
     pub fn recommendation(&self, index: usize) -> Option<&Recommendation> {
         self.rows.get(index).and_then(|id| self.recommendations.get(id))
     }
