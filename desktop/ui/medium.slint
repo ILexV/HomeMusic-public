@@ -16,6 +16,7 @@ export component Medium inherits Rectangle {
     in property <image> visualizer-image;
     in property <bool> draw-visualizer: true;
     callback expand-visualizer();
+    callback report-vectorscope-edge(length);
     in property <StereoLevels> levels;
     in property <string> time-label;
     in property <string> duration-label;
@@ -111,6 +112,7 @@ export component Medium inherits Rectangle {
                         visualizer-image: root.visualizer-image;
                         draw-visualizer: root.draw-visualizer;
                         toggle-expanded => { root.expand-visualizer(); }
+                        report-vectorscope-edge(edge) => { root.report-vectorscope-edge(edge); }
                         levels: root.levels;
                         width: 112px;
                         height: 112px;

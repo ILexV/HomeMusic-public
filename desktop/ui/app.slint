@@ -59,6 +59,8 @@ export component AppWindow inherits Window {
     in-out property <[float]> scope-samples;
     in-out property <image> visualizer-image;
     out property <bool> visualizer-expanded: expanded-view.is-open;
+    private property <length> reported-plot-edge;
+    out property <length> vectorscope-edge: root.visualizer-mode == VisualizationMode.vectorscope ? root.reported-plot-edge : 0px;
     private property <string> splash-title;
     private property <string> splash-artist;
     in-out property <float> meter-left;
@@ -234,6 +236,7 @@ export component AppWindow inherits Window {
                 visualizer-image: root.visualizer-image;
                 levels: root.levels;
                 toggle-expanded => { expanded-view.close(); }
+                report-vectorscope-edge(edge) => { root.reported-plot-edge = edge; }
             }
             Rectangle {
                 x: 12px;
@@ -365,6 +368,7 @@ export component AppWindow inherits Window {
                         visualizer-image: root.visualizer-image;
                         draw-visualizer: !root.visualizer-expanded;
                         expand-visualizer => { expanded-view.show(); }
+                        report-vectorscope-edge(edge) => { root.reported-plot-edge = edge; }
                         levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
@@ -406,6 +410,7 @@ export component AppWindow inherits Window {
                         visualizer-image: root.visualizer-image;
                         draw-visualizer: !root.visualizer-expanded;
                         expand-visualizer => { expanded-view.show(); }
+                        report-vectorscope-edge(edge) => { root.reported-plot-edge = edge; }
                         levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
@@ -534,6 +539,7 @@ export component AppWindow inherits Window {
                         visualizer-image: root.visualizer-image;
                         draw-visualizer: !root.visualizer-expanded;
                         expand-visualizer => { expanded-view.show(); }
+                        report-vectorscope-edge(edge) => { root.reported-plot-edge = edge; }
                         levels: root.levels;
                         play-pause => { root.play-pause(); }
                         stop => { root.stop(); }

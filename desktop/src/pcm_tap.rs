@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 const PACKET: usize = 1400;
 const MAX_PACKETS: usize = 96;
 const GROUP: usize = 4;
+pub(crate) const VECTOR_RATE: usize = 6000;
 const BITS: u32 = 13;
 const MASK: u64 = (1 << BITS) - 1;
 
@@ -21,7 +22,7 @@ struct Frames<const N: usize, const C: usize> {
     next: usize,
     count: usize,
     last: Option<Instant>,
-    fresh: bool,
+    unread: usize,
     discarding: bool,
     line: [u8; 128],
     len: usize,
@@ -36,7 +37,7 @@ impl<const N: usize, const C: usize> PcmTap<N, C> {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         socket.set_nonblocking(true)?;
         let port = socket.local_addr()?.port();
-        let (rate, layout) = if C == 1 { (12000, "mono") } else { (6000, "stereo") };
+        let (rate, layout) = if C == 1 { (12000, "mono") } else { (VECTOR_RATE, "stereo") };
         // lavfi has no raw PCM file/socket sink. Four 13-bit samples fit exactly
         // in a double, so one min/max-only record transports four instants. Each
         // channel has its own accumulator; its last value is the group's maximum.
@@ -73,13 +74,26 @@ impl<const N: usize, const C: usize> PcmTap<N, C> {
         }
         let (head, tail) = f.samples.split_at(f.next);
         for (i, &s) in tail.iter().chain(head).enumerate() { visit(i, s); }
-        std::mem::take(&mut f.fresh)
+        std::mem::take(&mut f.unread) > 0
+    }
+
+    /// Phosphor integrates each captured sample once, not once per UI poll.
+    /// Right-align the unread suffix so two decks can mix their newest samples.
+    pub(super) fn read_new(&self, mut visit: impl FnMut(usize, [f32; C])) -> usize {
+        let mut f = self.frames.borrow_mut();
+        f.receive(&self.socket);
+        let n = std::mem::take(&mut f.unread);
+        if n == 0 || !f.last.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) { return 0; }
+        let start = (f.next + N - n) % N;
+        let (head, tail) = f.samples.split_at(start);
+        for (i, &s) in (N-n..N).zip(tail.iter().chain(head)) { visit(i, s); }
+        n
     }
 }
 
 impl<const N: usize, const C: usize> Frames<N, C> {
     fn new() -> Self {
-        Self { samples: [[0.0; C]; N], next: 0, count: 0, last: None, fresh: false,
+        Self { samples: [[0.0; C]; N], next: 0, count: 0, last: None, unread: 0,
             discarding: false, line: [0; 128], len: 0, number: None, previous: None,
             words: [0; C], channels: 0 }
     }
@@ -87,7 +101,7 @@ impl<const N: usize, const C: usize> Frames<N, C> {
     fn forget(&mut self) {
         self.count = 0;
         self.last = None;
-        self.fresh = false;
+        self.unread = 0;
         self.len = 0;
         self.number = None;
         self.previous = None;
@@ -134,7 +148,10 @@ impl<const N: usize, const C: usize> Frames<N, C> {
         self.channels += 1;
         if self.channels != C { return; }
         self.number = None;
-        if self.previous.and_then(|p| p.checked_add(1)) != Some(number) { self.count = 0; }
+        if self.previous.and_then(|p| p.checked_add(1)) != Some(number) {
+            self.count = 0;
+            self.unread = 0;
+        }
         self.previous = Some(number);
         for k in (0..GROUP as u32).rev() {
             self.samples[self.next] = self.words.map(|w| (((w >> (k * BITS)) & MASK) as f32 - 4096.0) / 2048.0);
@@ -142,7 +159,7 @@ impl<const N: usize, const C: usize> Frames<N, C> {
         }
         self.count = (self.count + GROUP).min(N);
         self.last = Some(now);
-        self.fresh = true;
+        self.unread = (self.unread + GROUP).min(N);
     }
 }
 
@@ -153,6 +170,29 @@ mod tests {
     fn record(n: u64, samples: [i16; 4]) -> String {
         let word = samples.iter().fold(0u64, |word, &s| (word << BITS) | (4096 + i32::from(s)) as u64);
         format!("frame:{n} pts:0 pts_time:0\nlavfi.astats.1.Max_level={word}.000000\n")
+    }
+
+    #[test]
+    fn vectorscope_never_reexposes_pcm_on_overlapping_or_stale_reads() {
+        let (tap, _) = PcmTap::<8, 1>::open().unwrap();
+        let push = |n, samples, now| tap.frames.borrow_mut().ingest(record(n, samples).as_bytes(), now);
+        let read = || {
+            let mut values = Vec::new();
+            tap.read_new(|i, [v]| values.push((i, (v * 2048.0) as i16)));
+            values
+        };
+        let now = Instant::now();
+        push(0, [1, 2, 3, 4], now);
+        assert_eq!(read(), [(4, 1), (5, 2), (6, 3), (7, 4)]);
+        assert!(read().is_empty());
+        push(1, [5; 4], now);
+        push(2, [6; 4], now);
+        assert_eq!(read(), [(0, 5), (1, 5), (2, 5), (3, 5), (4, 6), (5, 6), (6, 6), (7, 6)]);
+        push(3, [7; 4], now);
+        push(5, [8; 4], now); // packet 4 missing: no stroke across the gap
+        assert_eq!(read(), [(4, 8), (5, 8), (6, 8), (7, 8)]);
+        push(6, [9; 4], now - Duration::from_secs(1));
+        assert!(read().is_empty());
     }
 
     #[test]

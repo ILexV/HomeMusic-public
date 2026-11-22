@@ -1410,6 +1410,7 @@ export component NowPlayingArt inherits Rectangle {
     in property <bool> draw-visualizer: true;
     in property <bool> expanded;
     callback toggle-expanded();
+    callback report-vectorscope-edge(length);
     in property <StereoLevels> levels;
     in property <image> cover;
     in property <bool> has-cover;
@@ -1467,6 +1468,10 @@ export component NowPlayingArt inherits Rectangle {
         if root.visualizer-mode == VisualizationMode.vectorscope : Image {
             width: min(root.width * 0.84, root.height * 0.80);
             height: self.width;
+            // Only the displayed plot exists, so closing the popup publishes
+            // the inline size again even if playback is paused.
+            init => { root.report-vectorscope-edge(self.width); }
+            changed width => { root.report-vectorscope-edge(self.width); }
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
             source: root.visualizer-image;

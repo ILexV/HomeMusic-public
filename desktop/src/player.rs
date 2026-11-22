@@ -20,11 +20,15 @@ pub(crate) use scope::SCOPE_POINTS;
 
 #[path = "pcm_tap.rs"]
 mod pcm_tap;
+pub(crate) use pcm_tap::VECTOR_RATE;
+
+// 170 ms of stereo PCM at 6 kHz: tolerate decoder bursts without replaying them.
+pub(crate) const VECTOR_SAMPLES: usize = 1024;
 
 enum SideTap {
     Spectrum(Box<SpectrumTap>),
     Scope(Box<scope::ScopeTap>),
-    Vectorscope(Box<pcm_tap::PcmTap<192, 2>>),
+    Vectorscope(Box<pcm_tap::PcmTap<VECTOR_SAMPLES, 2>>),
     Chroma(Box<pcm_tap::PcmTap<4096, 1>>),
 }
 
@@ -816,18 +820,22 @@ impl Player {
         }
     }
 
-    pub(crate) fn vectorscope_samples(&self) -> [[f32; 2]; 192] {
-        let mut out = [[0.0; 2]; 192];
+    pub(crate) fn vectorscope_samples<'a>(&self, out: &'a mut [[f32; 2]; VECTOR_SAMPLES]) -> &'a [[f32; 2]] {
+        let mut first = VECTOR_SAMPLES;
         if self.meter_mode == MeterMode::Vectorscope {
             for deck in std::iter::once(self).chain(self.fade.as_ref().map(|f| f.outgoing.as_ref())) {
                 if let Some(SideTap::Vectorscope(tap)) = &deck.side_tap {
                     if let Some(gain) = deck.pcm_gain() {
-                        tap.read(|i, [l, r]| { out[i][0] += l * gain; out[i][1] += r * gain; });
+                        let n = tap.read_new(|i, [l, r]| {
+                            if i < first { out[i] = [l * gain, r * gain]; }
+                            else { out[i][0] += l * gain; out[i][1] += r * gain; }
+                        });
+                        first = first.min(VECTOR_SAMPLES - n);
                     }
                 }
             }
         }
-        out
+        &out[first..]
     }
 
     /// Latest contiguous 12 kHz mono window. Repeated polls without new audio
@@ -1395,6 +1403,7 @@ mod tests {
         player.set_volume(1.0);
         player.set_meter_mode(MeterMode::Vectorscope);
         player.load(&source).unwrap();
+        let mut pcm = [[0.0; 2]; VECTOR_SAMPLES];
         for amplitude in [0.5, 0.25] {
             if amplitude < 0.5 {
                 player.set_eq_enabled(true);
@@ -1403,7 +1412,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(4);
             loop {
                 assert!(!player.take_natural_end());
-                let frame = player.vectorscope_samples();
+                let frame = player.vectorscope_samples(&mut pcm);
                 let high = frame.iter().map(|p| p[0]).fold(0.0, f32::max);
                 let low = frame.iter().map(|p| p[0]).fold(0.0, f32::min);
                 if (high - amplitude).abs() < 0.025 && (low + amplitude).abs() < 0.025
@@ -1413,7 +1422,7 @@ mod tests {
             }
         }
         player.set_paused(true);
-        assert_eq!(player.vectorscope_samples(), [[0.0; 2]; 192]);
+        assert!(player.vectorscope_samples(&mut pcm).is_empty());
         player.set_meter_mode(MeterMode::Off);
         assert!(player.side_tap.is_none());
         assert!(!player.audio_filter().contains("asplit"));
@@ -1455,7 +1464,7 @@ mod tests {
         let output = dir.path().join("output.raw");
         let wav = frequency_wav(0.217, 44_100, 331.0, &[16000.0, -8153.0]);
         std::fs::write(&source, &wav).unwrap();
-        let (_v, vectorscope) = pcm_tap::PcmTap::<192, 2>::open().unwrap();
+        let (_v, vectorscope) = pcm_tap::PcmTap::<VECTOR_SAMPLES, 2>::open().unwrap();
         let (_c, chroma) = pcm_tap::PcmTap::<4096, 1>::open().unwrap();
         for filter in [vectorscope, chroma] {
             let mpv = Mpv::with_initializer(|init| {
@@ -1496,10 +1505,11 @@ mod tests {
         player.load(&left).unwrap();
         wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
         player.prepare_next(&right, "", "right", false).unwrap();
+        let mut pcm = [[0.0; 2]; VECTOR_SAMPLES];
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             assert!(!player.take_natural_end());
-            let frame = player.vectorscope_samples();
+            let frame = player.vectorscope_samples(&mut pcm);
             let peaks = frame.iter().fold([0f32; 2], |[l, r], p| [l.max(p[0].abs()), r.max(p[1].abs())]);
             if peaks.into_iter().all(|v| v > 0.08 && v < 0.42) {
                 assert!(player.fade.is_some());

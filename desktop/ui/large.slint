@@ -239,6 +239,7 @@ export component Large inherits Rectangle {
     in property <image> visualizer-image;
     in property <bool> draw-visualizer: true;
     callback expand-visualizer();
+    callback report-vectorscope-edge(length);
     in property <StereoLevels> levels;
     in property <bool> liked;
     in property <bool> disliked;
@@ -375,6 +376,7 @@ export component Large inherits Rectangle {
                         visualizer-image: root.visualizer-image;
                         draw-visualizer: root.draw-visualizer;
                         toggle-expanded => { root.expand-visualizer(); }
+                        report-vectorscope-edge(edge) => { root.report-vectorscope-edge(edge); }
                         levels: root.levels;
                     }
                     Text { height: 24px; text: root.track-title; color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; vertical-alignment: center; }

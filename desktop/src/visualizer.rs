@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Image, Model, ModelNotify, ModelTracker, Rgb8Pixel, SharedPixelBuffer, VecModel};
 
-use crate::{chroma::Chroma, player::{MeterMode, SCOPE_POINTS}, vectorscope::Vectorscope, AppWindow, Player, VisualizationMode};
+use crate::{chroma::Chroma, player::{MeterMode, SCOPE_POINTS, VECTOR_RATE, VECTOR_SAMPLES}, vectorscope::Vectorscope, AppWindow, Player, VisualizationMode};
 
 // mpv delivers measurements in decoder bursts. Ease toward the last real
 // measurement on every display tick instead of stepping, then holding it.
@@ -157,6 +157,37 @@ impl NoteWaterfall {
     }
 }
 
+// Both axes share a reference: a loud attack must fit immediately, but a quiet
+// frame must not suddenly expand. Advance on audio time, not on repaint count.
+struct StereoRange { reference: f32, hold: f32 }
+
+impl StereoRange {
+    const FLOOR: f32 = 0.32;
+
+    fn new() -> Self { Self { reference: Self::FLOOR, hold: 0.0 } }
+
+    fn follow(&mut self, peak: f32, seconds: f32) -> f32 {
+        let target = peak.max(Self::FLOOR);
+        if target >= self.reference {
+            self.reference = target;
+            self.hold = 0.16;
+        } else {
+            let release = (seconds - self.hold).max(0.0);
+            self.hold = (self.hold - seconds).max(0.0);
+            if release > 0.0 {
+                self.reference = target + (self.reference - target) * (-release / 0.80).exp();
+            }
+        }
+        self.reference
+    }
+}
+
+struct StereoDisplay {
+    plot: Vectorscope,
+    range: StereoRange,
+    pcm: [[f32; 2]; VECTOR_SAMPLES],
+}
+
 #[derive(Default)]
 pub(crate) struct Meter {
     active: VisualizationMode,
@@ -166,7 +197,7 @@ pub(crate) struct Meter {
     scope: Option<Rc<ScopeFrame>>,
     waterfall: Option<Waterfall<BANDS>>,
     notes: Option<Box<NoteWaterfall>>,
-    vectorscope: Option<Vectorscope>,
+    vectorscope: Option<Box<StereoDisplay>>,
 }
 
 impl Meter {
@@ -232,12 +263,21 @@ impl Meter {
                 } else if let Some(notes) = &mut self.notes { notes.plot.freeze(); }
             }
             VisualizationMode::Vectorscope => {
-                if ui.get_playing() || self.vectorscope.is_none() {
-                    let elapsed = self.elapsed();
-                    let plot = self.vectorscope.get_or_insert_with(Vectorscope::new);
-                    ui.set_visualizer_image(plot.draw(&player.vectorscope_samples(), elapsed));
-                } else {
-                    self.last_sample = None;
+                let logical = ui.get_vectorscope_edge();
+                if logical <= 0.0 { return; }
+                let edge = (logical * ui.window().scale_factor()).round().clamp(32.0, 1024.0) as u32;
+                let playing = ui.get_playing();
+                let elapsed = if playing { self.elapsed() } else { self.last_sample = None; 0.0 };
+                let initial = self.vectorscope.is_none();
+                let display = self.vectorscope.get_or_insert_with(|| Box::new(StereoDisplay {
+                    plot: Vectorscope::new(edge), range: StereoRange::new(), pcm: [[0.0; 2]; VECTOR_SAMPLES],
+                }));
+                let resized = display.plot.resize(edge);
+                if playing || resized || initial {
+                    let samples = if playing { player.vectorscope_samples(&mut display.pcm) } else { &[] };
+                    let peak = samples.iter().fold(0.0_f32, |p, &[l, r]| p.max(l.abs()).max(r.abs()));
+                    let reference = display.range.follow(peak, samples.len() as f32 / VECTOR_RATE as f32);
+                    ui.set_visualizer_image(display.plot.draw(samples, reference, elapsed));
                 }
             }
             VisualizationMode::Scope => self.update_scope(ui, player.scope_samples()),
@@ -298,6 +338,21 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vectorscope_range_holds_a_peak_then_recovers_on_audio_time() {
+        let mut a = StereoRange::new();
+        assert_eq!(a.follow(1.25, 0.01), 1.25);
+        assert_eq!(a.follow(0.01, 0.13), 1.25);
+        assert_eq!(a.follow(0.01, 0.0), 1.25);
+        let after = a.follow(0.10, 0.8);
+        assert!((0.63..0.71).contains(&after));
+        let mut b = StereoRange::new();
+        b.follow(1.25, 0.01);
+        for _ in 0..93 { b.follow(0.10, 0.01); }
+        assert!((b.reference - after).abs() < 1e-5);
+        assert_eq!(b.follow(1.6, 0.01), 1.6);
+    }
 
     #[test]
     fn waterfall_scrolls_old_energy_up_and_preserves_attacks_between_rows() {
