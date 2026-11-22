@@ -122,6 +122,11 @@ unsafe impl libmpv2::GetData for Metadata {
 
 impl Metadata {
     pub(crate) fn number(&self, name: &str) -> Option<f64> {
+        self.raw_number(name).filter(|value| value.is_finite())
+    }
+
+    // A peak of -inf is a real, silent channel, distinct from an absent channel.
+    pub(super) fn raw_number(&self, name: &str) -> Option<f64> {
         use libmpv2::mpv_format;
         use std::ffi::CStr;
         if self.0.format != mpv_format::Map { return None; }
@@ -142,7 +147,7 @@ impl Metadata {
                     mpv_format::Double => value.u.double_,
                     _ => return None,
                 };
-                return number.is_finite().then_some(number);
+                return Some(number);
             }
         }
         None

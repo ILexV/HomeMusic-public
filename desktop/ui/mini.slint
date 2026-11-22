@@ -1,10 +1,12 @@
-import { CoverArt, Glyph, PlaybackActions, PlaybackStatus, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { NowPlayingArt, StereoLevels, Glyph, PlaybackActions, PlaybackStatus, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 
 export component Mini inherits Rectangle {
     in property <string> track-title;
     in property <string> track-artist;
     in property <image> cover;
     in property <bool> has-cover;
+    in-out property <bool> visualizer-on;
+    in property <StereoLevels> levels;
     in property <string> time-label;
     in property <string> duration-label;
     in property <float> position;
@@ -43,7 +45,9 @@ export component Mini inherits Rectangle {
             vertical-stretch: 1;
             spacing: 10px;
 
-            CoverArt {
+            NowPlayingArt {
+                visualizer-on: root.visualizer-on;
+                levels: root.levels;
                 width: 64px;
                 height: self.width;
                 mark: 24px;
@@ -128,6 +132,7 @@ export component Mini inherits Rectangle {
                 liked: root.liked;
                 disliked: root.disliked;
                 eq-on: root.eq-on;
+                visualizer-on <=> root.visualizer-on;
                 toggle-like => { root.toggle-like(); }
                 toggle-dislike => { root.toggle-dislike(); }
                 toggle-eq => { root.toggle-eq(); }

@@ -19,6 +19,7 @@ mod player;
 mod queue;
 mod queue_actions;
 mod wave;
+mod visualizer;
 mod window_place;
 mod audio_features;
 mod feature_context;
@@ -1462,6 +1463,7 @@ fn current_place(ui: &AppWindow, hub: &HubState) -> Option<window_place::Place> 
         volume: Some(ui.get_volume()),
         eq_on: Some(ui.get_eq_on()),
         eq_open: Some(ui.get_eq_open()),
+        visualizer_on: ui.get_visualizer_on(),
         preamp: Some(ui.get_preamp()),
         bands: Some(bands_from_ui(ui)),
         mini_position: hub.mini_position.get(),
@@ -1478,6 +1480,7 @@ fn apply_session(ui: &AppWindow, session: Option<window_place::Place>) {
     ui.set_mode(mode_from_index(mode));
     if let Some(place) = session {
         ui.set_eq_open(place.eq_open.unwrap_or(false));
+        ui.set_visualizer_on(place.visualizer_on);
         if let Some(width) = place.large_queue_width {
             ui.set_large_queue_width(width);
         }

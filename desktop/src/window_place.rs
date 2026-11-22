@@ -14,6 +14,7 @@ pub struct Place {
     pub volume: Option<f32>,
     pub eq_on: Option<bool>,
     pub eq_open: Option<bool>,
+    pub visualizer_on: bool,
     pub preamp: Option<f32>,
     pub bands: Option<[f32; 10]>,
     pub mini_position: Option<(f32, f32)>,
@@ -47,6 +48,7 @@ pub fn same(left: Place, right: Place) -> bool {
         && near(left.volume, right.volume, 0.005)
         && left.eq_on == right.eq_on
         && left.eq_open == right.eq_open
+        && left.visualizer_on == right.visualizer_on
         && near(left.preamp, right.preamp, 0.05)
         && match (left.bands, right.bands) {
             (Some(left), Some(right)) => left.iter().zip(right).all(|(a, b)| (a - b).abs() < 0.05),
@@ -107,6 +109,9 @@ fn save_at(path: &Path, place: Place) -> std::io::Result<bool> {
             if eq_open { "true" } else { "false" }
         ));
     }
+    if place.visualizer_on {
+        body.push_str("visualizer = true\n");
+    }
     if let Some(preamp) = place.preamp {
         body.push_str(&format!("preamp = {preamp}\n"));
     }
@@ -132,6 +137,7 @@ pub fn parse(text: &str) -> Option<Place> {
     let mut volume = None;
     let mut eq_on = None;
     let mut eq_open = None;
+    let mut visualizer_on = false;
     let mut preamp = None;
     let mut bands = None;
     let mut mini_x = None;
@@ -173,6 +179,7 @@ pub fn parse(text: &str) -> Option<Place> {
             }
             "eq" => eq_on = parse_bool(value),
             "eq-open" => eq_open = parse_bool(value),
+            "visualizer" => visualizer_on = parse_bool(value).unwrap_or(false),
             "preamp" => preamp = parse_f32(value).map(crate::eq::clamp_db),
             "bands" => bands = parse_bands(value),
             _ => {}
@@ -188,6 +195,7 @@ pub fn parse(text: &str) -> Option<Place> {
         volume,
         eq_on,
         eq_open,
+        visualizer_on,
         preamp,
         bands,
         mini_position: mini_x.zip(mini_y),
@@ -256,6 +264,7 @@ mod tests {
             volume: None,
             eq_on: None,
             eq_open: None,
+            visualizer_on: false,
             preamp: None,
             bands: None,
             mini_position: None,
@@ -385,7 +394,7 @@ mod tests {
         let mut place = bare(80.0, 60.0);
         assert!(save_at(&path, place).unwrap());
         assert!(!save_at(&path, place).unwrap());
-        for change in 0..12 {
+        for change in 0..14 {
             match change {
                 0 => place.x = 100.0,
                 1 => place.mode = Some(0),
@@ -398,7 +407,9 @@ mod tests {
                 8 => place.bands = Some([1.0; 10]),
                 9 => place.mini_position = Some((100.0, 60.0)),
                 10 => place.normal_position = Some((-1200.0, 80.0)),
-                _ => place.large_queue_width = Some(375.5),
+                11 => place.large_queue_width = Some(375.5),
+                12 => place.visualizer_on = true,
+                _ => place.visualizer_on = false,
             }
             assert!(save_at(&path, place).unwrap(), "change {change}");
             assert!(!save_at(&path, place).unwrap(), "unchanged {change}");

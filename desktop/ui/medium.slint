@@ -1,4 +1,4 @@
-import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, Heading, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { CatalogRow, NowPlayingArt, StereoLevels, EmptyNote, EqButton, Glyph, Heading, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
 import { AlbumSections, CatalogHit, QueueItem } from "types.slint";
@@ -10,6 +10,8 @@ export component Medium inherits Rectangle {
     in property <string> track-meta;
     in property <image> cover;
     in property <bool> has-cover;
+    in-out property <bool> visualizer-on;
+    in property <StereoLevels> levels;
     in property <string> time-label;
     in property <string> duration-label;
     in property <float> position;
@@ -97,7 +99,9 @@ export component Medium inherits Rectangle {
                     spacing: 14px;
                     cross-axis-alignment: center;
 
-                    CoverArt {
+                    NowPlayingArt {
+                        visualizer-on: root.visualizer-on;
+                        levels: root.levels;
                         width: 112px;
                         height: 112px;
                         horizontal-stretch: 0;
@@ -151,6 +155,7 @@ export component Medium inherits Rectangle {
                         liked: root.liked;
                         disliked: root.disliked;
                         eq-on: root.eq-on;
+                        visualizer-on <=> root.visualizer-on;
                         toggle-like => { root.toggle-like(); }
                         toggle-dislike => { root.toggle-dislike(); }
                         toggle-eq => { root.toggle-eq(); }

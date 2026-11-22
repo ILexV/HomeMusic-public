@@ -1,7 +1,7 @@
 import { Large } from "large.slint";
 import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
-import { Equalizer, ModeSwitch, Theme, TitleButton } from "theme.slint";
+import { Equalizer, ModeSwitch, StereoLevels, Theme, TitleButton } from "theme.slint";
 
 export { ItemActions, TrackList, TrackPlacement } from "item-menus.slint";
 import { AlbumItem, AlbumSections, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
@@ -53,6 +53,15 @@ export component AppWindow inherits Window {
     in-out property <string> error;
     in-out property <image> cover;
     in-out property <bool> has-cover: false;
+    in-out property <bool> visualizer-on;
+    in-out property <float> meter-left;
+    in-out property <float> meter-right;
+    in-out property <float> peak-left;
+    in-out property <float> peak-right;
+    private property <StereoLevels> levels: {
+        left: root.meter-left, right: root.meter-right,
+        peak-left: root.peak-left, peak-right: root.peak-right,
+    };
     in-out property <float> position;
     in-out property <float> duration;
     in-out property <float> track-duration;
@@ -237,6 +246,8 @@ export component AppWindow inherits Window {
                         track-artist: root.track-artist;
                         cover: root.cover;
                         has-cover: root.has-cover;
+                        visualizer-on <=> root.visualizer-on;
+                        levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
                         position: root.position;
@@ -271,6 +282,8 @@ export component AppWindow inherits Window {
                         track-meta: root.track-meta;
                         cover: root.cover;
                         has-cover: root.has-cover;
+                        visualizer-on <=> root.visualizer-on;
+                        levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
                         position: root.position;
@@ -392,6 +405,8 @@ export component AppWindow inherits Window {
                         search <=> root.search;
                         cover: root.cover;
                         has-cover: root.has-cover;
+                        visualizer-on <=> root.visualizer-on;
+                        levels: root.levels;
                         play-pause => { root.play-pause(); }
                         stop => { root.stop(); }
                         prev => { root.prev(); }

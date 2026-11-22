@@ -134,6 +134,15 @@ export component Glyph inherits Rectangle {
         stroke-width: 1.5px;
         stroke-line-cap: round;
     }
+    if root.kind == "visualizer" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M2 13H7 M2 10H7 M2 7H7 M2 4H7 M9 13H14 M9 10H14 M9 7H14";
+        stroke: root.tint;
+        stroke-width: 2px;
+    }
     if root.kind == "settings" : Path {
         width: 100%;
         height: 100%;
@@ -158,6 +167,20 @@ component ActionButton inherits Rectangle {
     accessible-role: button;
     accessible-label: root.tip;
     accessible-action-default => { root.clicked(); }
+    forward-focus: keys;
+    border-width: keys.has-focus ? 1px : 0px;
+    border-color: Theme.orange;
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if !event.modifiers.control && !event.modifiers.meta && !event.modifiers.shift &&
+                !event.modifiers.alt && (event.text == Key.Return || event.text == " ") {
+                if !event.repeat { root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
     Glyph {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -175,6 +198,7 @@ export component PlaybackActions inherits HorizontalLayout {
     in property <bool> liked;
     in property <bool> disliked;
     in property <bool> eq-on;
+    in-out property <bool> visualizer-on;
     in property <color> surface: Theme.panel;
     callback toggle-like();
     callback toggle-dislike();
@@ -186,6 +210,16 @@ export component PlaybackActions inherits HorizontalLayout {
     ActionButton { icon: "dislike"; tip: "Дизлайк"; surface: root.surface; active: root.disliked; clicked => { root.toggle-dislike(); } }
     Rectangle { width: 4px; }
     ActionButton { icon: "equalizer"; tip: "Эквалайзер"; surface: root.surface; active: root.eq-on; clicked => { root.toggle-eq(); } }
+    ActionButton {
+        icon: "visualizer";
+        tip: root.visualizer-on ? "Визуализация: вернуть обложку" : "Визуализация: показать уровни L/R";
+        accessible-label: "Визуализация";
+        accessible-checkable: true;
+        accessible-checked: root.visualizer-on;
+        surface: root.surface;
+        active: root.visualizer-on;
+        clicked => { root.visualizer-on = !root.visualizer-on; }
+    }
 }
 
 export component TransportButton inherits Rectangle {
@@ -1058,6 +1092,70 @@ export component CoverArt inherits Rectangle {
         width: 100%;
         height: 100%;
         image-fit: ImageFit.cover;
+    }
+}
+
+export struct StereoLevels {
+    left: float,
+    right: float,
+    peak-left: float,
+    peak-right: float,
+}
+
+component MeterChannel inherits Rectangle {
+    in property <string> label;
+    in property <float> level;
+    in property <float> peak;
+    private property <int> count: 12;
+    private property <length> step: root.height * 0.72 / root.count;
+
+    for segment[i] in root.count : Rectangle {
+        width: 100%;
+        height: root.step - max(1px, root.step * 0.2);
+        y: (root.count - 1 - i) * root.step;
+        background: root.peak > 0 && i == ceil(root.peak * root.count) - 1 ? Theme.text
+            : i < root.level * root.count ? (i >= 10 ? #e86a52 : i >= 8 ? Theme.orange : #69bc88)
+            : Theme.line;
+    }
+    Text {
+        y: root.count * root.step;
+        width: 100%;
+        height: parent.height - self.y;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: root.label;
+        font-size: min(14px, self.height);
+        color: Theme.muted;
+    }
+}
+
+// Only the now-playing artwork switches; library and album covers keep using CoverArt.
+export component NowPlayingArt inherits Rectangle {
+    in property <bool> visualizer-on;
+    in property <StereoLevels> levels;
+    in property <image> cover;
+    in property <bool> has-cover;
+    in property <length> mark: 56px;
+
+    if !root.visualizer-on : CoverArt {
+        cover: root.cover;
+        has-cover: root.has-cover;
+        mark: root.mark;
+    }
+    if root.visualizer-on : Rectangle {
+        background: Theme.bg;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.line;
+        HorizontalLayout {
+            padding-left: root.width * 0.17;
+            padding-right: root.width * 0.17;
+            padding-top: root.height * 0.10;
+            padding-bottom: root.height * 0.04;
+            spacing: root.width * 0.08;
+            MeterChannel { label: "L"; level: root.levels.left; peak: root.levels.peak-left; }
+            MeterChannel { label: "R"; level: root.levels.right; peak: root.levels.peak-right; }
+        }
     }
 }
 

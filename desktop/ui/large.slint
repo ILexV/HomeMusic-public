@@ -1,6 +1,6 @@
 import { Button } from "std-widgets.slint";
 import { AlbumMenu, TrackList } from "item-menus.slint";
-import { CatalogRow, CoverArt, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TrackActions, TransportButton, VolumeBar } from "theme.slint";
+import { CatalogRow, CoverArt, NowPlayingArt, StereoLevels, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TrackActions, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
 import { AlbumItem, AlbumSections, ArtistItem, CatalogHit, HomeRow, HomeSection, QueueItem } from "types.slint";
@@ -232,6 +232,8 @@ export component Large inherits Rectangle {
     in property <string> wave-message;
     in property <bool> playing;
     in property <bool> eq-on;
+    in-out property <bool> visualizer-on;
+    in property <StereoLevels> levels;
     in property <bool> liked;
     in property <bool> disliked;
     in property <bool> album-known;
@@ -353,7 +355,14 @@ export component Large inherits Rectangle {
                     }
                     Rectangle { vertical-stretch: 1; min-height: 4px; }
                     Text { height: 24px; text: "СЕЙЧАС ИГРАЕТ"; color: Theme.dim; font-size: 10px; font-weight: 600; }
-                    CoverArt { width: 176px; height: 176px; cover: root.cover; has-cover: root.has-cover; mark: 56px; }
+                    NowPlayingArt {
+                        width: 176px;
+                        height: 176px;
+                        cover: root.cover;
+                        has-cover: root.has-cover;
+                        visualizer-on: root.visualizer-on;
+                        levels: root.levels;
+                    }
                     Text { height: 24px; text: root.track-title; color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; vertical-alignment: center; }
                     Text { height: 18px; text: root.track-artist; color: Theme.muted; font-size: 12px; overflow: elide; }
                     Text { height: 18px; text: root.track-album; color: Theme.muted; font-size: 12px; overflow: elide; }
@@ -667,6 +676,7 @@ export component Large inherits Rectangle {
                     liked: root.liked;
                     disliked: root.disliked;
                     eq-on: root.eq-on;
+                    visualizer-on <=> root.visualizer-on;
                     toggle-like => { root.toggle-like(); }
                     toggle-dislike => { root.toggle-dislike(); }
                     toggle-eq => { root.toggle-eq(); }

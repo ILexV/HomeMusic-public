@@ -16,6 +16,7 @@ pub(crate) struct State {
     tools: slint::Weak<crate::ToolsWindow>,
     timer: slint::Timer,
     tick: Cell<u32>,
+    meter: RefCell<crate::visualizer::Meter>,
     token: Cell<Option<u64>>,
     album_requested: Cell<bool>,
     jobs: mpsc::SyncSender<AlbumJob>,
@@ -73,6 +74,7 @@ pub(crate) fn bind(ctx: &Context, tools: &crate::ToolsWindow) -> Rc<State> {
     let state = Rc::new(State {
         ctx: ctx.clone(), tools: tools.as_weak(), timer: slint::Timer::default(),
         tick: Cell::new(0), token: Cell::new(None), album_requested: Cell::new(false),
+        meter: RefCell::default(),
         jobs, results: RefCell::new(results), crossfade: Cell::new(crossfade), overlap: Cell::new(overlap),
         settings: settings_pending, save_signal,
     });
@@ -123,6 +125,11 @@ impl State {
         self.ctx.player.borrow_mut().audio_tick();
         let tick = self.tick.get().wrapping_add(1);
         self.tick.set(tick);
+        if tick % 2 == 0 {
+            if let Some(ui) = self.ctx.ui.upgrade() {
+                self.meter.borrow_mut().update(&ui, &mut self.ctx.player.borrow_mut());
+            }
+        }
         if tick % 10 != 0 { return; }
         let token = self.ctx.queue.borrow().current_token();
         if self.token.get() != token || self.ctx.player.borrow().needs_audio_context() {

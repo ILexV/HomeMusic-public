@@ -10,6 +10,11 @@ use crate::eq::{self, Settings};
 pub(crate) mod analysis;
 pub use analysis::{AudioTrack, Normalization};
 
+// Use mpv's direct lavfi bridge so it rejects a missing astats even while idle.
+// reset=1 measures the latest decoded frame, not the entire track.
+const METER_FILTER: &str =
+    "@meter:lavfi-astats=metadata=1:reset=1:measure_perchannel=Peak_level:measure_overall=none";
+
 #[derive(Default)]
 pub struct StreamDetails {
     pub codec: String,
@@ -64,8 +69,8 @@ pub struct Player {
     mpv: Option<Mpv>,
     volume: f32,
     eq: Settings,
-    /// True after a filter graph was installed, so a later flat curve can clear it.
-    filter_active: bool,
+    eq_filter_active: bool,
+    meter_enabled: bool,
     notice: Option<String>,
     phase: PlaybackPhase,
     /// Ignore the replaced file's trailing events until the next StartFile.
@@ -176,7 +181,7 @@ impl Player {
                     mpv: Some(mpv),
                     volume: 0.8,
                     eq: Settings::default(),
-                    filter_active: false,
+                    eq_filter_active: false, meter_enabled: false,
                     notice: None,
                     phase: PlaybackPhase::Idle,
                     awaiting_start: false,
@@ -198,7 +203,7 @@ impl Player {
                 mpv: None,
                 volume: 0.8,
                 eq: Settings::default(),
-                filter_active: false,
+                eq_filter_active: false, meter_enabled: false,
                 notice: Some(open_error(&err)),
                 phase: PlaybackPhase::Error,
                 awaiting_start: false,
@@ -245,6 +250,7 @@ impl Player {
             let mut next = Box::new(Self::open(PlayerOptions { null_audio: self.null_audio }));
             next.volume = self.volume;
             next.restore_eq(self.eq);
+            next.set_meter_enabled(self.meter_enabled);
             next.load_cookie_at(target, cookie, 0.0, true)?;
             if same_album && self.normalization == Normalization::Album {
                 next.gain_db = self.gain_db;
@@ -386,7 +392,7 @@ impl Player {
         next.apply_volume();
         next.set_paused(false);
         std::mem::swap(&mut self.mpv, &mut next.mpv);
-        std::mem::swap(&mut self.filter_active, &mut next.filter_active);
+        std::mem::swap(&mut self.eq_filter_active, &mut next.eq_filter_active);
         std::mem::swap(&mut self.entry_id, &mut next.entry_id);
         std::mem::swap(&mut self.hub_source, &mut next.hub_source);
         next.phase = PlaybackPhase::Playing;
@@ -688,6 +694,55 @@ impl Player {
         self.apply_volume();
     }
 
+    /// Attach/detach just our labeled tap without loading, seeking or changing gain.
+    pub fn set_meter_enabled(&mut self, enabled: bool) {
+        if self.meter_enabled == enabled { return; }
+        self.meter_enabled = enabled;
+        if let Some(mpv) = &self.mpv {
+            let args = if enabled { ["add", METER_FILTER] } else { ["remove", "@meter"] };
+            let _ = mpv.command("af", &args);
+        }
+        if let Some(deck) = self.prepared.as_mut().and_then(|p| p.deck.as_mut()) {
+            deck.set_meter_enabled(enabled);
+        }
+        if let Some(fade) = &mut self.fade { fade.outgoing.set_meter_enabled(enabled); }
+    }
+
+    /// Post-EQ peak envelope, scaled to the same -60..0 dB range on both channels.
+    pub fn meter_levels(&self) -> [f32; 2] {
+        if !self.meter_enabled { return [0.0; 2]; }
+        let mut db = self.deck_peak_db();
+        if let Some(fade) = &self.fade {
+            let outgoing = fade.outgoing.deck_peak_db();
+            for (current, previous) in db.iter_mut().zip(outgoing) {
+                // Independent outputs expose peaks, not phase-aligned PCM. Sum their
+                // weighted peak amplitudes (an upper bound on the mixed peak).
+                let sum = 10f64.powf(*current / 20.0) + 10f64.powf(previous / 20.0);
+                *current = 20.0 * sum.log10();
+            }
+        }
+        db.map(|value| ((value + 60.0) / 60.0).clamp(0.0, 1.0) as f32)
+    }
+
+    fn deck_peak_db(&self) -> [f64; 2] {
+        const SILENCE: [f64; 2] = [f64::NEG_INFINITY; 2];
+        if self.phase != PlaybackPhase::Playing || self.volume <= 0.0 || self.fade_factor <= 0.0 {
+            return SILENCE;
+        }
+        let Some(mpv) = &self.mpv else { return SILENCE; };
+        // core-idle includes explicit pause, cache underruns, seeking and EOF;
+        // af-metadata alone retains the last frame in those states.
+        if flag(mpv, "core-idle") != Some(false) { return SILENCE; }
+        let Ok(tags) = mpv.get_property::<analysis::Metadata>("af-metadata/meter") else {
+            return SILENCE;
+        };
+        let left = tags.raw_number("lavfi.astats.1.Peak_level").unwrap_or(f64::NEG_INFINITY);
+        let right = tags.raw_number("lavfi.astats.2.Peak_level").unwrap_or(left); // mono
+        // mpv applies its cubic volume curve, normalization and fade after user filters.
+        let gain_db = self.gain_db + 20.0 * (f64::from(self.volume).powi(3) * self.fade_factor).log10();
+        [left, right].map(|db| if db.is_finite() { db + gain_db } else { f64::NEG_INFINITY })
+    }
+
     pub fn eq(&self) -> Settings {
         self.eq
     }
@@ -774,15 +829,15 @@ impl Player {
         };
         match eq::chain(self.eq) {
             Some(filter) => {
-                if mpv.command("af", &["set", &filter]).is_ok()
-                    || mpv.set_property("af", filter.as_str()).is_ok()
-                {
-                    self.filter_active = true;
+                // mpv replaces a matching label in place; a new EQ goes before
+                // the optional meter so both see the same post-EQ signal.
+                if mpv.command("af", &["pre", &format!("@eq:{filter}")]).is_ok() {
+                    self.eq_filter_active = true;
                 }
             }
-            None if self.filter_active => {
-                if mpv.command("af", &["clr"]).is_ok() || mpv.set_property("af", "").is_ok() {
-                    self.filter_active = false;
+            None if self.eq_filter_active => {
+                if mpv.command("af", &["remove", "@eq"]).is_ok() {
+                    self.eq_filter_active = false;
                 }
             }
             None => {}
@@ -1065,30 +1120,96 @@ mod tests {
         }
     }
 
+    fn wait_for_levels(player: &mut Player, matches: impl Fn([f32; 2]) -> bool) -> [f32; 2] {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(!player.take_natural_end(), "ended before expected meter levels");
+            let levels = player.meter_levels();
+            if matches(levels) { return levels; }
+            assert!(Instant::now() < deadline, "last levels: {levels:?}, af: {}", player.audio_filter());
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    #[test]
+    fn stereo_meter_reads_live_channels_after_eq_and_detaches_without_reload() {
+        let url = serve_wav(tone_channels_wav(6.0, 44_100, &[8192.0, 2048.0]));
+        let mut player = open_null();
+        player.set_volume(1.0);
+        player.load(&url).unwrap();
+        let before = wait_until(&mut player, |s| s.position_s > 0.15).position_s;
+        assert!(!player.audio_filter().contains("astats"));
+        assert_eq!(player.meter_levels(), [0.0; 2]);
+
+        player.set_meter_enabled(true);
+        // Peaks at -12 and -24 dBFS on the common -60..0 scale.
+        wait_for_levels(&mut player, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.6).abs() < 0.02);
+        player.set_eq_enabled(true);
+        player.set_preamp(-6.0);
+        wait_for_levels(&mut player, |[l, r]| (l - 0.7).abs() < 0.02 && (r - 0.5).abs() < 0.02);
+        player.set_paused(true);
+        assert_eq!(player.meter_levels(), [0.0; 2]);
+        player.set_meter_enabled(false);
+        player.set_paused(false);
+        let filters = player.audio_filter();
+        assert!(!filters.contains("astats") && filters.contains("volume=-6.0dB"), "{filters}");
+        assert_eq!(player.meter_levels(), [0.0; 2]);
+        assert!(player.snapshot().position_s >= before);
+        player.stop();
+    }
+
+    #[test]
+    fn stereo_meter_combines_weighted_decks_and_duplicates_mono() {
+        let left_only = serve_wav(tone_channels_wav(3.0, 44_100, &[8192.0, 0.0]));
+        let mono = serve_wav(tone_channels_wav(4.0, 44_100, &[8192.0]));
+        let mut player = open_null();
+        player.set_volume(1.0);
+        player.set_crossfade(1.5, false);
+        player.load(&left_only).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        player.prepare_next(&mono, "", "mono", false).unwrap();
+        player.set_meter_enabled(true); // Include the already prepared, paused deck.
+        wait_for_levels(&mut player, |[l, r]| (l - 0.8).abs() < 0.02 && r == 0.0);
+        // Left stays at full source level while both decks contribute;
+        // right is silent on the outgoing track and rises with the mono deck.
+        wait_for_levels(&mut player, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.7).abs() < 0.02);
+        assert!(player.fade.is_some());
+        player.stop();
+        assert_eq!(player.meter_levels(), [0.0; 2]);
+    }
+
     fn tone_wav(seconds: f32) -> Vec<u8> {
         tone_wav_at_rate(seconds, 44_100)
     }
 
     fn tone_wav_at_rate(seconds: f32, rate: u32) -> Vec<u8> {
+        tone_channels_wav(seconds, rate, &[8_000.0])
+    }
+
+    fn tone_channels_wav(seconds: f32, rate: u32, amplitudes: &[f32]) -> Vec<u8> {
+        let channels = amplitudes.len() as u16;
+        let stride = channels * 2;
         let samples = (rate as f32 * seconds) as u32;
-        let data_bytes = samples * 2;
+        let data_bytes = samples * u32::from(stride);
         let mut bytes = Vec::with_capacity(44 + data_bytes as usize);
         bytes.extend(b"RIFF");
         bytes.extend((36 + data_bytes).to_le_bytes());
         bytes.extend(b"WAVEfmt ");
         bytes.extend(16u32.to_le_bytes());
         bytes.extend(1u16.to_le_bytes());
-        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(channels.to_le_bytes());
         bytes.extend(rate.to_le_bytes());
-        bytes.extend((rate * 2).to_le_bytes());
-        bytes.extend(2u16.to_le_bytes());
+        bytes.extend((rate * u32::from(stride)).to_le_bytes());
+        bytes.extend(stride.to_le_bytes());
         bytes.extend(16u16.to_le_bytes());
         bytes.extend(b"data");
         bytes.extend(data_bytes.to_le_bytes());
         for i in 0..samples {
             let t = i as f32 / rate as f32;
             let sample = (t * 440.0 * std::f32::consts::TAU).sin();
-            bytes.extend(((sample * 8_000.0) as i16).to_le_bytes());
+            for amplitude in amplitudes {
+                bytes.extend(((sample * amplitude) as i16).to_le_bytes());
+            }
         }
         bytes
     }
