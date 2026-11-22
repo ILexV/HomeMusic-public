@@ -1,4 +1,5 @@
-import { Button, ComboBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { GenreWavePicker } from "genre-wave.slint";
 import { AlbumMenu, TrackList } from "item-menus.slint";
 import { CatalogRow, CoverArt, NowPlayingArt, StereoLevels, VisualizationMode, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TrackActions, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
@@ -235,6 +236,9 @@ export component Large inherits Rectangle {
     in-out property <VisualizationMode> visualizer-mode;
     in property <[float]> spectrum-levels;
     in property <[float]> scope-samples;
+    in property <image> waterfall-image;
+    in property <bool> draw-visualizer: true;
+    callback expand-visualizer();
     in property <StereoLevels> levels;
     in property <bool> liked;
     in property <bool> disliked;
@@ -316,7 +320,7 @@ export component Large inherits Rectangle {
     callback open-album(int);
     callback navigate(string);
     callback pick-home(int);
-    callback start-genre-wave(int);
+    callback start-genre-wave(int, int, int);
 
     private property <bool> newest-expanded;
     private property <length> home-scroll-y;
@@ -368,6 +372,9 @@ export component Large inherits Rectangle {
                         visualizer-mode: root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
+                        waterfall-image: root.waterfall-image;
+                        draw-visualizer: root.draw-visualizer;
+                        toggle-expanded => { root.expand-visualizer(); }
                         levels: root.levels;
                     }
                     Text { height: 24px; text: root.track-title; color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; vertical-alignment: center; }
@@ -474,16 +481,10 @@ export component Large inherits Rectangle {
                                     clicked => { root.pick-home(item.source); }
                                 }
                             }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                cross-axis-alignment: center;
-                                Text { text: "Волна по жанру"; color: Theme.text; font-size: 13px; }
-                                genre := ComboBox { model: root.wave-genres; horizontal-stretch: 1; }
-                                Button {
-                                    text: "Запустить";
-                                    enabled: !root.wave-start-busy && genre.current-index >= 0;
-                                    clicked => { root.start-genre-wave(genre.current-index); }
-                                }
+                            GenreWavePicker {
+                                genres: root.wave-genres;
+                                busy: root.wave-start-busy;
+                                start(first, second, percent) => { root.start-genre-wave(first, second, percent); }
                             }
                             for section in root.home-sections : VerticalLayout {
                                 spacing: 8px;

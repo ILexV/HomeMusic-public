@@ -960,19 +960,28 @@ class TasteArtistsIn(BaseModel):
 # --- «Моя волна» (MIXES.md 7) ---------------------------------------------------------------------------------------
 
 
+WaveGenre = Literal["classical", "pop", "rock", "jazz", "electronic", "hiphop"]
+
+
 class WaveSeedIn(BaseModel):
-    """A wave can start from a track, an artist, or one genre (never combined)."""
+    """A wave starts from a track, an artist, or one or two genres."""
 
     ref: str | None = Field(default=None, max_length=64)  # "dz:…", "nd:<song>" or "file:<provider>:<id>"
     nd_song_id: str | None = Field(default=None, max_length=64)
     artist_ref: str | None = Field(default=None, max_length=64)  # "dz:…"
     nd_artist_id: str | None = Field(default=None, max_length=64)  # a Navidrome artist (the app's «Радиостанции»)
-    genre: Literal["classical", "pop", "rock", "jazz", "electronic", "hiphop"] | None = None
+    genre: WaveGenre | None = None
+    second_genre: WaveGenre | None = None
+    first_percent: int | None = Field(default=None, strict=True, ge=1, le=99)
 
     by_artist: bool = False  # resolve the artist of the supplied track
 
     @model_validator(mode="after")
     def _names_one(self) -> WaveSeedIn:
+        if (self.second_genre is None) != (self.first_percent is None):
+            raise ValueError("second_genre and first_percent must be specified together")
+        if self.second_genre is not None and (self.genre is None or self.genre == self.second_genre):
+            raise ValueError("a genre mix requires two distinct genres")
         if self.genre is not None:
             if self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id or self.by_artist:
                 raise ValueError("genre cannot be combined with a track or artist seed")

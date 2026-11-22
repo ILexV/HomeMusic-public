@@ -1,9 +1,9 @@
 //! Display live audio measurements only while the artwork is visible.
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Model, ModelNotify, ModelTracker, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelNotify, ModelTracker, Rgb8Pixel, SharedPixelBuffer, VecModel};
 
 use crate::{player::{MeterMode, SCOPE_POINTS}, AppWindow, Player, VisualizationMode};
 
@@ -67,52 +67,131 @@ impl ScopeFrame {
     }
 }
 
+// Each row is one measurement of the ten logarithmic bands, low to high.
+// Ping-pong the immutable Slint images instead of allocating pixel storage per tick.
+const ROW_TIME: Duration = Duration::from_millis(40);
+const HISTORY_ROWS: usize = 120;
+const BANDS: usize = 10;
+
+struct Waterfall {
+    front: SharedPixelBuffer<Rgb8Pixel>,
+    back: SharedPixelBuffer<Rgb8Pixel>,
+    peaks: [f32; BANDS],
+    last: Option<Instant>,
+}
+
+impl Waterfall {
+    fn new() -> Self {
+        let mut front = SharedPixelBuffer::new(BANDS as u32, HISTORY_ROWS as u32);
+        front.make_mut_slice().fill(Self::color(0.0));
+        let back = SharedPixelBuffer::new(BANDS as u32, HISTORY_ROWS as u32);
+        Self { front, back, peaks: [0.0; BANDS], last: None }
+    }
+
+    fn color(level: f32) -> Rgb8Pixel {
+        const RAMP: [[u8; 3]; 5] = [
+            [27, 27, 27], [49, 40, 84], [135, 57, 106], [232, 135, 42], [255, 240, 176],
+        ];
+        let pos = level.clamp(0.0, 1.0) * 4.0;
+        let i = (pos as usize).min(3);
+        let channel = |c: usize| {
+            let a = f32::from(RAMP[i][c]);
+            (a + (f32::from(RAMP[i + 1][c]) - a) * (pos - i as f32)).round() as u8
+        };
+        Rgb8Pixel::new(channel(0), channel(1), channel(2))
+    }
+
+    fn update(&mut self, now: Instant, samples: [f32; BANDS]) -> Option<Image> {
+        let steps = match self.last {
+            None => 1,
+            Some(last) => ((now - last).as_millis() / ROW_TIME.as_millis()).min(HISTORY_ROWS as u128) as usize,
+        };
+        // Preserve a short attack that lands between two raster rows.
+        for (peak, level) in self.peaks.iter_mut().zip(samples) { *peak = peak.max(level); }
+        if steps == 0 { return None; }
+        self.last = Some(match self.last {
+            Some(last) if steps < HISTORY_ROWS => last + ROW_TIME * steps as u32,
+            _ => now,
+        });
+        let retained = (HISTORY_ROWS - steps) * BANDS;
+        let newest = (HISTORY_ROWS - 1) * BANDS;
+        let pixels = self.back.make_mut_slice();
+        pixels[..retained].copy_from_slice(&self.front.as_slice()[steps * BANDS..]);
+        // A delayed UI frame is a gap, not a repeated audio measurement.
+        pixels[retained..newest].fill(Self::color(0.0));
+        for (p, peak) in pixels[newest..].iter_mut().zip(&mut self.peaks) {
+            *p = Self::color(std::mem::take(peak));
+        }
+        std::mem::swap(&mut self.front, &mut self.back);
+        Some(Image::from_rgb8(self.front.clone()))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Meter {
-    active: MeterMode,
+    active: VisualizationMode,
     last_sample: Option<Instant>,
     channels: [Channel; 2],
     spectrum: Option<Rc<VecModel<f32>>>,
     scope: Option<Rc<ScopeFrame>>,
+    waterfall: Option<Waterfall>,
 }
 
 impl Meter {
     /// Called by the transport tick so a hidden window needs no animation timer.
     pub(crate) fn sync_mode(&mut self, ui: &AppWindow, player: &mut Player) -> bool {
-        let mode = match ui.get_visualizer_mode() {
-            VisualizationMode::Cover => MeterMode::Off,
-            _ if !ui.window().is_visible() || ui.window().is_minimized() => MeterMode::Off,
-            VisualizationMode::Stereo => MeterMode::Stereo,
-            VisualizationMode::Spectrum => MeterMode::Spectrum,
-            VisualizationMode::Scope => MeterMode::Scope,
+        let mode = if ui.window().is_visible() && !ui.window().is_minimized() {
+            ui.get_visualizer_mode()
+        } else {
+            VisualizationMode::Cover
         };
         if mode != self.active {
-            player.set_meter_mode(mode);
+            player.set_meter_mode(match mode {
+                VisualizationMode::Cover => MeterMode::Off,
+                VisualizationMode::Stereo => MeterMode::Stereo,
+                VisualizationMode::Spectrum | VisualizationMode::Waterfall => MeterMode::Spectrum,
+                VisualizationMode::Scope => MeterMode::Scope,
+            });
             match self.active {
-                MeterMode::Stereo => {
+                VisualizationMode::Stereo => {
                     self.channels = Default::default();
                     self.publish_stereo(ui);
                 }
-                MeterMode::Spectrum => {
+                VisualizationMode::Spectrum => {
                     if let Some(bands) = &self.spectrum {
                         for i in 0..bands.row_count() { bands.set_row_data(i, 0.0); }
                     }
                 }
-                MeterMode::Scope => {
+                VisualizationMode::Scope => {
                     if let Some(frame) = &self.scope { frame.replace([0.0; SCOPE_POINTS]); }
                 }
-                MeterMode::Off => {}
+                VisualizationMode::Waterfall => {
+                    self.waterfall = None;
+                    ui.set_waterfall_image(Image::default());
+                }
+                VisualizationMode::Cover => {}
             }
             self.active = mode;
             self.last_sample = None;
         }
-        mode != MeterMode::Off
+        mode != VisualizationMode::Cover
     }
 
     pub(crate) fn update(&mut self, ui: &AppWindow, player: &Player) {
         match self.active {
-            MeterMode::Scope => self.update_scope(ui, player.scope_samples()),
-            MeterMode::Stereo => {
+            VisualizationMode::Waterfall => {
+                if ui.get_playing() {
+                    let waterfall = self.waterfall.get_or_insert_with(Waterfall::new);
+                    if let Some(image) = waterfall.update(Instant::now(), player.spectrum_levels()) {
+                        ui.set_waterfall_image(image);
+                    }
+                } else if let Some(waterfall) = &mut self.waterfall {
+                    waterfall.last = None; // Freeze the picture rather than counting paused time.
+                    waterfall.peaks = [0.0; BANDS];
+                }
+            }
+            VisualizationMode::Scope => self.update_scope(ui, player.scope_samples()),
+            VisualizationMode::Stereo => {
                 let elapsed = self.elapsed();
                 let envelope = Envelope::new(elapsed);
                 for (channel, sample) in self.channels.iter_mut().zip(player.meter_levels()) {
@@ -120,11 +199,11 @@ impl Meter {
                 }
                 self.publish_stereo(ui);
             }
-            MeterMode::Spectrum => {
+            VisualizationMode::Spectrum => {
                 let envelope = Envelope::new(self.elapsed());
                 self.update_bands(ui, player.spectrum_levels(), &envelope);
             }
-            MeterMode::Off => {}
+            VisualizationMode::Cover => {}
         }
     }
 
@@ -163,5 +242,31 @@ impl Meter {
         ui.set_meter_right(right.level);
         ui.set_peak_left(left.peak);
         ui.set_peak_right(right.peak);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waterfall_scrolls_old_energy_up_and_preserves_attacks_between_rows() {
+        let mut plot = Waterfall::new();
+        let start = Instant::now();
+        let mut bass = [0.0; BANDS];
+        bass[0] = 0.75;
+        let mut high = [0.0; BANDS];
+        high[BANDS - 1] = 1.0;
+        plot.update(start, bass);
+        assert!(plot.update(start + ROW_TIME / 2, high).is_none());
+        plot.update(start + ROW_TIME, [0.0; BANDS]);
+        // Skip one row: a delayed tick must not stretch the burst across the gap.
+        plot.update(start + ROW_TIME * 3, bass);
+        let rows = plot.front.as_slice().chunks_exact(BANDS).rev().take(4).collect::<Vec<_>>();
+        assert_eq!(rows[0][0], Waterfall::color(0.75));
+        assert!(rows[1].iter().all(|&pixel| pixel == Waterfall::color(0.0)));
+        assert_eq!(rows[2][BANDS - 1], Waterfall::color(1.0));
+        assert_eq!(rows[2][0], Waterfall::color(0.0));
+        assert_eq!(rows[3][0], Waterfall::color(0.75));
     }
 }

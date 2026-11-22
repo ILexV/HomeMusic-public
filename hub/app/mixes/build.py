@@ -82,6 +82,7 @@ class Cand:
     explanation: list[str] = field(default_factory=list)
     recent_offer_penalty: float = 0.0
     novelty: str | None = None  # absent from historical decisions; never infer those from `familiar`
+    wave_genres: frozenset[str] = frozenset()  # first/second source membership in a two-genre wave
 
     @property
     def key(self) -> str:

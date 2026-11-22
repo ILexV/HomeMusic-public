@@ -13,6 +13,9 @@ export component Medium inherits Rectangle {
     in-out property <VisualizationMode> visualizer-mode;
     in property <[float]> spectrum-levels;
     in property <[float]> scope-samples;
+    in property <image> waterfall-image;
+    in property <bool> draw-visualizer: true;
+    callback expand-visualizer();
     in property <StereoLevels> levels;
     in property <string> time-label;
     in property <string> duration-label;
@@ -105,6 +108,9 @@ export component Medium inherits Rectangle {
                         visualizer-mode: root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
+                        waterfall-image: root.waterfall-image;
+                        draw-visualizer: root.draw-visualizer;
+                        toggle-expanded => { root.expand-visualizer(); }
                         levels: root.levels;
                         width: 112px;
                         height: 112px;

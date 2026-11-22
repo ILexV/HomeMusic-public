@@ -69,6 +69,7 @@ QUEUED_BONUS = 0.3  # a track the client has queued already is not swapped for a
 SESSION_RADIO = "session_radio"
 ARTIST_SONGS = "artist_songs"
 GENRE = "genre"
+SECOND_GENRE = "second_genre"
 ARTIST_SONGS_MAX = 60  # the seed artist's library songs put in the pool
 ARTIST_ALBUMS_MAX = 30  # ... read from this many of their albums
 SESSION_WEIGHTS = {"seed": 10.0, SESSION_RADIO: 1.2, ARTIST_SONGS: 1.2, GENRE: 1.0}
@@ -81,7 +82,7 @@ EMBED_NEW = 60  # new candidates without a vector whose previews go to the embed
 VECTORS_TOP = 80  # best candidates whose vectors are asked for the session's sound centers
 ASK_AGAIN_S = 60  # a vector the embedder did not have is asked again after this
 REFILL_SEEDS = 3
-PREPARE_POOL = 10  # bounded reserve: failed audio never turns into a taste signal
+PREPARE_POOL = 2 * BATCH  # bounded reserve: failed audio never turns into a taste signal
 PREFERENCE_WEIGHT = 2.0
 PREFERENCE_PROMPTS = {
     "energy": ("calm, gentle, relaxing music with low energy", "energetic, intense, driving music"),
@@ -101,14 +102,16 @@ class WaveError(Exception):
 def cand_json(c: build.Cand) -> dict[str, Any]:
     return {"track": c.track.model_dump(mode="json"), "gens": c.gens, "familiar": c.familiar, "novelty": c.novelty,
             "nd_song_id": c.nd_song_id, "library_track_id": c.library_track_id, "sim": c.sim,
-            "score": c.score, "parts": c.parts, "known": c.known, "explanation": c.explanation}
+            "score": c.score, "parts": c.parts, "known": c.known, "explanation": c.explanation,
+            **({"wave_genres": sorted(c.wave_genres)} if c.wave_genres else {})}
 
 
 def cand_of(d: dict[str, Any]) -> build.Cand:
     return build.Cand(track=CatalogTrack.model_validate(d["track"]), gens=dict(d.get("gens") or {}),
                       familiar=bool(d.get("familiar")), novelty=d.get("novelty"), nd_song_id=d.get("nd_song_id"),
                       library_track_id=d.get("library_track_id"), sim=d.get("sim"), score=float(d.get("score") or 0),
-                      parts=d.get("parts"), known=d.get("known"), explanation=list(d.get("explanation") or []))
+                      parts=d.get("parts"), known=d.get("known"), explanation=list(d.get("explanation") or []),
+                      wave_genres=frozenset(d.get("wave_genres") or ()))
 
 
 def fp_of(c: build.Cand) -> str:
@@ -158,7 +161,7 @@ class State:
     unavailable: set[str] = field(default_factory=set)
     refills_since_play: int = 0
     more_to_prepare: bool = False
-    genre_page: int | None = None  # next 0-based source page; None when exhausted or not a genre wave
+    genre_pages: dict[str, int] = field(default_factory=dict)  # source -> next page; absent once exhausted
 
     def dump(self) -> dict[str, Any]:
         return {"version": self.version, "taste_model": self.taste_model, "seen": sorted(self.seen),
@@ -171,7 +174,7 @@ class State:
                 "preferences_status": self.preferences_status, "preparation": self.preparation,
                 "awaiting_seed": self.awaiting_seed, "unavailable": sorted(self.unavailable),
                 "refills_since_play": self.refills_since_play, "more_to_prepare": self.more_to_prepare,
-                "genre_page": self.genre_page}
+                "genre_pages": self.genre_pages}
 
     @classmethod
     def load(cls, d: dict[str, Any]) -> State:
@@ -189,7 +192,9 @@ class State:
                  preparation=d.get("preparation") or {"ready": 0, "pending": 0, "unavailable": 0},
                  awaiting_seed=d.get("awaiting_seed"), unavailable=set(d.get("unavailable") or []),
                  refills_since_play=int(d.get("refills_since_play") or 0),
-                 more_to_prepare=bool(d.get("more_to_prepare")), genre_page=d.get("genre_page"))
+                 more_to_prepare=bool(d.get("more_to_prepare")), genre_pages=dict(d.get("genre_pages") or {}))
+        if d.get("genre_page") is not None:  # sessions saved before two-genre waves
+            st.genre_pages[GENRE] = d["genre_page"]
         st.pool = {c.track.ref: c for c in map(cand_of, d.get("pool") or [])}
         st.out = {c.track.ref: c for c in map(cand_of, d.get("out") or [])}
         st.played = [Played(**p) for p in d.get("played") or []]
@@ -217,7 +222,8 @@ class Runtime:
     save: Callable[[str, Runtime], Awaitable[None]] | None = None
     download_finished: bool = True
     blocked: Callable[[build.Cand], bool] | None = None  # candidates the session never takes (its own songs...)
-    genre: str | None = None  # immutable session seed, restored from WaveSession.seed_json
+    genre_seed: dict[str, Any] | None = None  # immutable, restored from WaveSession.seed_json
+    genre_pending: set[str] = field(default_factory=set)  # pages still being fetched, independently per genre
 
 
 _rt: dict[str, Runtime] = {}
@@ -238,7 +244,7 @@ async def _runtime(sid: str, user: User) -> Runtime:
             if row is None or row.user_id != user.id or row.updated_at < utcnow() - IDLE:
                 raise WaveError(404, "Волна закончилась: запустите новую")
             rt = Runtime(user_id=user.id, mode=row.mode, state=State.load(row.state_json or {}),
-                         genre=(row.seed_json or {}).get("genre"))
+                         genre_seed=row.seed_json if (row.seed_json or {}).get(GENRE) else None)
             if "seen" not in (row.state_json or {}):
                 # Legacy state has no event ledger. Preserve its already-saved learning
                 # rather than applying the old journal again when an offline client retries.
@@ -310,8 +316,14 @@ def generators(p: Profile, seed: CatalogTrack | None, seed_artist: dict[str, Any
     return build.generators(p, seeds)
 
 
-def _genre_generators(genre: str, page: int) -> dict[str, build.Gen]:
-    return {GENRE: lambda: genre_tracks(genre, page)}
+def _genre_generators(rt: Runtime, needed: set[str]) -> dict[str, build.Gen]:
+    assert rt.genre_seed is not None
+    gens = {}
+    for source, page in rt.state.genre_pages.items():
+        if source in needed and source not in rt.genre_pending:
+            gens[source] = lambda genre=rt.genre_seed[source], page=page: genre_tracks(genre, page)
+    rt.genre_pending.update(gens)
+    return gens
 
 
 def refill_generators(p: Profile, st: State) -> dict[str, build.Gen]:
@@ -343,21 +355,36 @@ async def absorb(rt: Runtime, results: list[build.GenResult]) -> int:
     assert p is not None
     st = rt.state
     for r in results:
-        g = st.gens.setdefault(r.name, {"tracks": 0, "seconds": 0.0})
-        if r.name == GENRE and st.genre_page is not None and r.error is None:
-            # A cancelled or failed request is not EOF: retry this page within the no-play refill budget.
-            st.genre_page = st.genre_page + 1 if r.tracks else None
+        if rt.genre_seed and r.name in (GENRE, SECOND_GENRE):
+            rt.genre_pending.discard(r.name)
+            # A failed request is not EOF: retry this page within the no-play refill budget.
+            if r.error is None:
+                if r.tracks:
+                    st.genre_pages[r.name] += 1
+                else:
+                    st.genre_pages.pop(r.name)
+        g = st.gens.setdefault(GENRE if r.name == SECOND_GENRE else r.name, {"tracks": 0, "seconds": 0.0})
         g["tracks"] += len(r.tracks)
         g["seconds"] = round(g["seconds"] + r.seconds, 2)
         if r.error:
             g["error"], g["off"] = r.error, r.off
     merged = build.merge(results)
     by_fp = {fp_of(c): c for c in st.pool.values()}
+    mixed = rt.genre_seed is not None and SECOND_GENRE in rt.genre_seed
+    if mixed:
+        by_fp.update((fp_of(c), c) for c in st.out.values())
     known = st.known_fps()
     fresh: dict[str, build.Cand] = {}
     for c in merged.values():
+        if mixed:
+            # A track may belong to both stations. Keep that evidence through deduplication,
+            # but still score and report a single public "genre" generator.
+            c.wave_genres = frozenset(c.gens)
+            c.gens = {GENRE: min(c.gens.values())}
         fp = fp_of(c)
         if (have := by_fp.get(fp)) is not None:
+            if mixed:
+                have.wave_genres |= c.wave_genres
             for g, pos in c.gens.items():
                 have.gens[g] = min(have.gens.get(g, pos), pos)
             have.score = build.score(have, weights(), p)
@@ -414,9 +441,32 @@ async def _gather(sid: str, rt: Runtime, gens: list[tuple[str, build.Gen]], enou
         if enough():
             break
     for t in pending:
-        late = asyncio.create_task(_late(sid, rt, t))
-        rt.tasks.add(late)
-        late.add_done_callback(rt.tasks.discard)
+        _keep_late(sid, rt, t)
+
+
+def _refill_genres(sid: str, rt: Runtime, eligible: set[str], handed: bool) -> None:
+    st = rt.state
+    if not st.genre_pages or st.refills_since_play >= REFILL_SEEDS:
+        return
+    if not handed:
+        needed = set(st.genre_pages)
+    elif SECOND_GENRE in (rt.genre_seed or {}):
+        # Abundant tracks from one station must not hold up refilling the other.
+        supply = Counter(g for ref, c in st.pool.items() if ref in eligible for g in c.wave_genres)
+        needed = {g for g in st.genre_pages if supply[g] < POOL_LOW}
+    else:
+        needed = {GENRE} if len(st.pool) < POOL_LOW else set()
+    gens = _genre_generators(rt, needed)
+    if gens:
+        st.refills_since_play += 1
+        for g, fetch in gens.items():
+            _keep_late(sid, rt, asyncio.create_task(build.run_generators({g: fetch})))
+
+
+def _keep_late(sid: str, rt: Runtime, task: asyncio.Task) -> None:
+    late = asyncio.create_task(_late(sid, rt, task))
+    rt.tasks.add(late)
+    late.add_done_callback(rt.tasks.discard)
 
 
 async def _late(sid: str, rt: Runtime, task: asyncio.Task) -> None:
@@ -434,17 +484,13 @@ async def _late(sid: str, rt: Runtime, task: asyncio.Task) -> None:
 
 
 def _refill(sid: str, rt: Runtime) -> None:
-    """Fetch the next genre page or the radios of the next profile seeds in the background."""
+    """Fetch radios of the next profile seeds in the background."""
     if rt.refilling or rt.profile is None or rt.state.refills_since_play >= REFILL_SEEDS:
         return
     profile = rt.profile
-    v2 = rt.genre is None and isinstance(profile, V2Profile)
+    v2 = isinstance(profile, V2Profile)
     chosen = []
-    if rt.genre is not None:
-        if rt.state.genre_page is None or rt.tasks:
-            return  # exhausted, or an initial page is still answering
-        gens = _genre_generators(rt.genre, rt.state.genre_page)
-    elif v2:
+    if v2:
         gens = {}
         pool = [t for t in profile.seeds(get_settings().cfg.mixes.seeds * 4) if t.key not in rt.state.seeds_used]
         if not pool:
@@ -604,10 +650,20 @@ def _familiar_share(st: State, mode: str) -> float:
         preference, build.MODES.get(mode, build.MODES["normal"]))
 
 
+def _genre_slots(first_percent: int, started: int) -> tuple[str, ...]:
+    """The rounded cumulative first-genre quota grows by one exactly at its slots.
+
+    Only playback advances the cursor: a queue refresh, retry or restart cannot consume a slot.
+    A missing genre gives its slot to the other without accumulating a long catch-up streak.
+    """
+    return tuple(GENRE if (i * first_percent + 50) % 100 + first_percent >= 100 else SECOND_GENRE
+                 for i in range(started, started + BATCH))
+
+
 def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: int = BATCH,
          queued: set[str] = frozenset(), first: build.Cand | None = None,
          values: dict[str, float] | None = None, eligible: set[str] | None = None,
-         known_artist_share: float | None = None) -> list[build.Cand]:
+         known_artist_share: float | None = None, genre_slots: tuple[str, ...] = ()) -> list[build.Cand]:
     """The next `n`: the best by `value` keeping the mode's familiar share, an artist at most once in `ARTIST_GAP`
     tracks (counting the played ones; the artist of a wave by an artist — once in `SEED_ARTIST_GAP`); with nothing else left, the gap gives way (never the same artist twice in a
     row). «Не нравится» set since the candidate came in drops it. `queued` — refs the client has ahead already.
@@ -630,6 +686,10 @@ def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: i
         total, fam = st.started + len(out), st.started_familiar + sum(c.familiar for c in out)
         want_fam = fam + 1 <= share * (total + 1) + 0.5
         ok = [c for c in ranked if c.artist not in (seed_gap if c.artist == st.seed_artist else gap)]
+        if genre_slots:
+            spaced = ok or [c for c in ranked if not seq or c.artist != seq[-1]]
+            slot = genre_slots[len(out)]
+            ok = [c for c in spaced if slot in c.wave_genres] or spaced
         best = (next((c for c in ok if c.familiar == want_fam), None) or (ok[0] if ok else None)
                 or next((c for c in ranked if not seq or c.artist != seq[-1]), None))
         if best is None:
@@ -644,12 +704,13 @@ def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: i
         ranked.remove(best)
         out.append(best)
     if share == build.MODES["discover"] and known_artist_share is not None and ranked:
-        _tilt_discover(st, out, ranked, recent, vals, queued, first, known_artist_share)
+        _tilt_discover(st, out, ranked, recent, vals, queued, first, known_artist_share, genre_slots)
     return out
 
 
 def _tilt_discover(st: State, out: list[build.Cand], unused: list[build.Cand], recent: list[str],
-                   values: dict[int, float], queued: set[str], first: build.Cand | None, share: float) -> None:
+                   values: dict[int, float], queued: set[str], first: build.Cand | None, share: float,
+                   genre_slots: tuple[str, ...]) -> None:
     """Trade only neutral new picks for unused eligible candidates. Neither queue nor seed moves."""
     seq = recent + [c.artist for c in out]
     offset = st.started - st.started_familiar
@@ -666,6 +727,8 @@ def _tilt_discover(st: State, out: list[build.Cand], unused: list[build.Cand], r
             pos = len(recent) + i
             for c in unused:
                 if c.novelty != preferred:
+                    continue
+                if genre_slots and genre_slots[i] in out[i].wave_genres and genre_slots[i] not in c.wave_genres:
                     continue
                 artist = c.artist
                 gap = SEED_ARTIST_GAP if artist == st.seed_artist else ARTIST_GAP
@@ -902,7 +965,7 @@ async def learn(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
             x = Played(ref, data.get("handed_nd") or data.get("nd_song_id"), data["key"], data["artist"],
                        bool(data.get("familiar")), track=data["track"])
             await _download(sid, rt, x)
-        if rt.genre is None and ref not in st.radios:
+        if rt.genre_seed is None and ref not in st.radios:
             st.radios.append(ref)
             t = CatalogTrack.model_validate(data["track"])
             radios.append((SESSION_RADIO, lambda t=t: radio_of(t)))
@@ -983,6 +1046,9 @@ def title_of(seed: dict[str, Any] | None) -> str:
     if not seed:
         return "Моя волна"
     if genre := seed.get("genre"):
+        if second := seed.get(SECOND_GENRE):
+            pct = seed["first_percent"]
+            return f"Моя волна: {GENRE_TITLES[genre]} {pct}% + {GENRE_TITLES[second]} {100 - pct}%"
         return f"Моя волна: {GENRE_TITLES[genre]}"
     return f"Волна по треку «{seed.get('title')}»" if seed.get("ref") else f"Волна: {seed.get('artist')}"
 
@@ -1211,13 +1277,16 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
         if profile.empty or not seeds:
             raise WaveError(409, "Волне не от чего оттолкнуться: послушайте что-нибудь или выберите исполнителей")
     sid = uuid.uuid4().hex[:16]
-    rt = Runtime(user_id=user.id, mode=mode, genre=genre, profile=profile,
-                 state=State(taste_model=cfg.taste_model, genre_page=0 if genre is not None else None,
+    genre_seed = ({k: seed[k] for k in (GENRE, SECOND_GENRE, "first_percent") if k in seed}
+                  if seed and genre is not None else None)
+    rt = Runtime(user_id=user.id, mode=mode, genre_seed=genre_seed, profile=profile,
+                 state=State(taste_model=cfg.taste_model,
+                             genre_pages={g: 0 for g in (GENRE, SECOND_GENRE) if genre_seed and g in genre_seed},
                              preferences=WavePreferences.model_validate(preferences or {}).model_dump()))
     rt.state.seeds_used = [t.key for t in seeds]
     rt.state.seed_artist = artist_key(seed_artist["name"]) if seed_artist else None
     if genre is not None:
-        seed_json = {"genre": genre}
+        seed_json = genre_seed
     elif seed_track:
         seed_json = {"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title}
     elif seed_artist:
@@ -1241,9 +1310,10 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
             first.score = build.score(first, weights(), profile)
         if first is not None:
             rt.state.heard.add(fp_of(first))  # the radios' copies of the seed stay out
-        gens = (_genre_generators(genre, 0) if genre is not None else
+        gens = (_genre_generators(rt, set(rt.state.genre_pages)) if genre_seed else
                 generators(profile, seed_track, seed_artist, seeds))
-        await _gather(sid, rt, list(gens.items()), lambda: len(rt.state.pool) >= 4 * BATCH)
+        await _gather(sid, rt, list(gens.items()),
+                      lambda: not rt.genre_pending and len(rt.state.pool) >= 4 * BATCH)
         tracks = await _hand_out(sid, rt, set(), first)
         pending = bool(rt.tasks) or rt.state.preparation["pending"] > 0 or rt.state.more_to_prepare
     return Batch(sid, title_of(seed_json), mode, seed_json, tracks, pending,
@@ -1274,7 +1344,7 @@ async def next_batch(user: User, sid: str, played: list[Any], queued: list[str],
             st.preferences = WavePreferences.model_validate(preferences).model_dump()
         # No actual playback between calls: try only a bounded number of new source batches.
         # Repeated empty/all-unavailable results must not keep clients polling forever.
-        if rt.genre is None and len(st.pool) < POOL_LOW:
+        if rt.genre_seed is None and len(st.pool) < POOL_LOW:
             _refill(sid, rt)
         tracks = await _hand_out(sid, rt, {q for q in queued if q in st.out})
         pending = bool(rt.tasks) or st.preparation["pending"] > 0 or st.more_to_prepare
@@ -1379,8 +1449,13 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
     values: dict[str, float] = {}
     share = (await recommendations.discovery_share(rt.user_id)
              if _familiar_share(st, rt.mode) == build.MODES["discover"] else None)
+    pct = (rt.genre_seed or {}).get("first_percent")
+    slots = _genre_slots(pct, st.started) if pct is not None else ()
+    # Mirror the upcoming slots for the reserve. Even at 99:1 we check enough full
+    # recordings from the other genre to fill a batch if the preferred audio fails.
+    reserve_slots = slots + tuple(SECOND_GENRE if slot == GENRE else GENRE for slot in slots)
     reserve = pick(st, rt.profile, rt.mode, vectors, n=PREPARE_POOL, queued=queued, first=first,
-                   values=values, eligible=eligible)  # neutral reserve: apply the nudge once, among ready tracks
+                   values=values, eligible=eligible, genre_slots=reserve_slots)
     st.more_to_prepare = len(reserve) == PREPARE_POOL and len(eligible) > len(reserve)
     refs = {c.track.ref: f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in reserve}
     statuses = await listen.prepare_full(rt.user_id, list(dict.fromkeys(refs.values())), timeout_s=2.0)
@@ -1397,7 +1472,7 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
         raise WaveError(409, "Полная запись начального трека недоступна; другой трек не подставлен")
     tracks = ([] if first is not None and first.track.ref not in ready else
               pick(st, rt.profile, rt.mode, vectors, queued=queued, first=first, values=values, eligible=ready,
-                   known_artist_share=share))
+                   known_artist_share=share, genre_slots=slots))
     if tracks and first is not None:
         st.awaiting_seed = None
     for ref in list(st.out):
@@ -1424,8 +1499,8 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
         st.pool.pop(c.track.ref, None)
         st.out[c.track.ref] = c
     # Use the result of the eligibility and full-recording checks: even a large page may have no playable tracks.
-    if rt.genre is not None and (not tracks or len(st.pool) < POOL_LOW):
-        _refill(sid, rt)
+    if rt.genre_seed:
+        _refill_genres(sid, rt, eligible - pending, bool(tracks))
     await _save(sid, rt)
     try:
         async with session_scope() as s:

@@ -145,3 +145,28 @@ test('retrying a pending explicit seed continues its existing server session', a
   assert.equal(starts, 1);
   assert.equal(h.state.track.ref, 'dz:7');
 });
+
+test('changing the genre ratio starts a distinct pending wave; retry and restore keep the new ratio', async () => {
+  const { wave, h, saved } = tab();
+  const seed = { genre: 'classical', second_genre: 'pop', first_percent: 70 };
+  const starts = [];
+  h.start = async body => {
+    starts.push(body.seed);
+    return { ...response(`mix-${body.seed.first_percent}`, []), pending: true };
+  };
+  assert.equal(await wave.startWave({ ...seed, first_percent: 30 }, 'catalog_card'), false);
+  assert.equal(await wave.startWave(seed, 'catalog_card'), false);
+  assert.deepEqual(starts, [{ ...seed, first_percent: 30 }, seed]);
+  assert.equal(h.starts, 0);
+  h.next = async id => {
+    assert.equal(id, 'mix-70');
+    return { ...response(id, ['dz:70']), seed };
+  };
+  assert.equal(await wave.startWave(seed, 'catalog_card'), true);
+  assert.equal(h.starts, 1);
+  assert.deepEqual(JSON.parse(saved.get('hm-wave-session:1')).genreSeed, seed);
+  wave.restoreWave(null);
+  wave.restoreWave(1);
+  assert.deepEqual({ ...wave.useWave().genreSeed }, seed);
+  assert.equal(h.starts, 1);
+});

@@ -795,11 +795,11 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_wave_genres(hub::WAVE_GENRES.map(|(_, label)| label.into()).into());
     let ui_genre = ui.as_weak();
     let hub_genre = hub_state.clone();
-    ui.on_start_genre_wave(move |index| {
-        let Some(&(slug, _)) = hub::WAVE_GENRES.get(index as usize) else { return };
+    ui.on_start_genre_wave(move |first, second, first_percent| {
+        let Some(seed) = hub::WaveSeed::from_genre_picker(first, second, first_percent) else { return };
         if let Some(ui) = ui_genre.upgrade() {
             if !hub_genre.wave_busy.get() {
-                begin_wave(&ui, &hub_genre, Some(hub::WaveSeed::Genre(slug)), "home_card");
+                begin_wave(&ui, &hub_genre, Some(seed), "home_card");
                 refresh_home(&ui, &hub_genre, hub_genre.was_playing.get());
             }
         }

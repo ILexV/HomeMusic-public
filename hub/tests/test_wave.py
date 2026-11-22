@@ -329,6 +329,108 @@ async def test_genre_wave_feedback_and_refills_survive_restart(env, monkeypatch,
     assert calls == [("classical", i) for i in range(4)] and stray == {"seed": [], "radio": []}
 
 
+@pytest.mark.parametrize("extra", [
+    {"second_genre": "jazz"}, {"first_percent": 50}, {"second_genre": "classical", "first_percent": 50},
+    {"second_genre": "unknown", "first_percent": 50}, {"second_genre": "pop", "first_percent": 0},
+    {"second_genre": "pop", "first_percent": 100}, {"second_genre": "pop", "first_percent": 50.5},
+    {"second_genre": "pop", "first_percent": "50"}, {"second_genre": "pop", "first_percent": True},
+    {"second_genre": "pop", "first_percent": 50, "by_artist": True},
+    {"second_genre": "pop", "first_percent": 50, "artist_ref": "dz:7"},
+    {"second_genre": "pop", "first_percent": 50, "ref": "dz:1"},
+    {"second_genre": "pop", "first_percent": 50, "genre": None},
+])
+async def test_genre_mix_rejects_invalid_seed(env, extra):
+    res = await env["client"].post("/api/wave/start", json={"seed": {"genre": "classical", **extra}})
+    assert res.status_code == 422, res.text
+
+
+def test_genre_mix_extreme_percentages_still_allocate_the_minority_a_slot():
+    for pct in (1, 99):
+        slots = [slot for pos in range(0, 100, wave.BATCH) for slot in wave._genre_slots(pct, pos)]
+        assert slots.count(wave.GENRE) == pct and slots.count(wave.SECOND_GENRE) == 100 - pct
+
+
+def test_single_genre_saved_page_migrates_without_restarting_the_station():
+    assert wave.State.load({"genre_page": 3}).genre_pages == {wave.GENRE: 3}
+    assert wave.State.load({"genre_page": None}).genre_pages == {}
+
+
+@pytest.mark.parametrize(("pct", "expected"), [
+    (70, "ABAAABAABA"), (50, "ABABABABAB"), (30, "BABBABBBAB"),
+])
+async def test_genre_mix_orders_playback_across_batches_and_resume(env, monkeypatch, pct, expected):
+    c = env["client"]
+    seed = {"genre": "classical", "second_genre": "pop", "first_percent": pct}
+
+    async def tracks(genre, page):
+        start = {"classical": 5000, "pop": 6000}[genre]
+        return [] if page else [tr(i) for i in range(start, start + 32)]
+
+    def order(batch):
+        assert batch["seed"] == seed
+        assert batch["title"] == f"Моя волна: Классика {pct}% + Поп {100 - pct}%"
+        assert all(t["generator"] == "genre" for t in batch["tracks"])
+        return "".join("A" if int(t["id"]) < 6000 else "B" for t in batch["tracks"])
+
+    monkeypatch.setattr(wave, "genre_tracks", tracks)
+    res = await c.post("/api/wave/start", json={"seed": seed})
+    assert res.status_code == 200, res.text
+    first = res.json()
+    sid = first["session_id"]
+    refs = [t["ref"] for t in first["tracks"]]
+    assert order(first) == expected[:5]
+    await wave.settle(sid)
+    await wave.reset()
+    url = f"/api/wave/{sid}/next"
+    # A preferences/queue refresh neither changes the immutable seed nor consumes a slot.
+    again = (await c.post(url, json={"queued": refs, "seed": {"genre": "rock"},
+                                     "preferences": {"discovery": "new"}})).json()
+    assert order(again) == expected[:5]
+    assert [t["ref"] for t in again["tracks"]] == refs
+    more = (await c.post(url, json={"played": [ev("start", ref) for ref in refs]})).json()
+    assert order(more) == expected[5:]
+    assert not set(refs).intersection(t["ref"] for t in more["tracks"])
+    await wave.settle(sid)
+
+
+async def test_genre_mix_shortage_deduplication_and_independent_refill(env, monkeypatch):
+    from app import listen
+
+    c = env["client"]
+    calls = []
+    shared = tr(6000)
+
+    async def tracks(genre, page):
+        calls.append((genre, page))
+        if genre == "pop":
+            # Ample stock must not prevent the other page being fetched.
+            return [shared, *(tr(i) for i in range(6001, 6050))] if not page else []
+        if not page:
+            return [shared, *(tr(i) for i in range(5000, 5008))]
+        return [tr(5500 + i) for i in range(8)] if page == 1 else []
+
+    async def prepare(uid, refs, *, timeout_s):
+        return {ref: "unavailable" if 5000 <= int(ref.split(":")[1]) < 5500 else "ready" for ref in refs}
+
+    monkeypatch.setattr(wave, "genre_tracks", tracks)
+    monkeypatch.setattr(listen, "prepare_full", prepare)
+    seed = {"genre": "classical", "second_genre": "pop", "first_percent": 99}
+    res = await c.post("/api/wave/start", json={"seed": seed})
+    assert res.status_code == 200, res.text
+    batch = res.json()
+    sid = batch["session_id"]
+    refs = [t["ref"] for t in batch["tracks"]]
+    assert len(set(refs)) == len(refs) == 5 and shared.ref in refs
+    assert all(ref.startswith("dz:6") for ref in refs)
+    await wave.settle(sid)
+    assert sorted(calls) == [("classical", 0), ("classical", 1), ("pop", 0)]
+    await wave.reset()
+    more = (await c.post(f"/api/wave/{sid}/next", json={"played": [ev("start", ref) for ref in refs]})).json()
+    assert more["seed"] == seed
+    assert len(more["tracks"]) == 5 and all(t["ref"].startswith("dz:55") for t in more["tracks"])
+    await wave.settle(sid)
+
+
 async def test_genre_wave_late_page_stays_in_its_own_session(env, monkeypatch):
     from app.config import get_settings
 

@@ -1,0 +1,57 @@
+import { Button, ComboBox, Slider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component GenreWavePicker inherits VerticalLayout {
+    in property <[string]> genres;
+    in property <bool> busy;
+    callback start(int, int, int);
+    private property <int> second-index: 1;
+    private property <float> balance: 50;
+    private property <int> first-percent: round(root.balance);
+    private property <bool> distinct: first.current-index != root.second-index;
+    spacing: 6px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        cross-axis-alignment: center;
+        Text { text: "Волна по жанру"; color: Theme.text; font-size: 13px; }
+        mix := Button {
+            text: "Два жанра";
+            checkable: true;
+            enabled: root.genres.length > 1;
+            clicked => {
+                if self.checked && !root.distinct {
+                    root.second-index = first.current-index == 0 ? 1 : 0;
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        first := ComboBox { model: root.genres; accessible-label: "Первый жанр"; min-width: 125px; }
+        if mix.checked : ComboBox {
+            model: root.genres;
+            min-width: 125px;
+            accessible-label: "Второй жанр";
+            current-index <=> root.second-index;
+        }
+        Button {
+            text: "Запустить";
+            enabled: !root.busy && first.current-index >= 0 && first.current-index < root.genres.length
+                && (!mix.checked || (root.distinct && root.second-index >= 0 && root.second-index < root.genres.length));
+            clicked => { root.start(first.current-index, mix.checked ? root.second-index : -1, root.first-percent); }
+        }
+    }
+    if mix.checked : Text {
+        text: root.distinct ? first.current-value + ": " + root.first-percent + "% · "
+            + root.genres[root.second-index] + ": " + (100 - root.first-percent) + "%" : "Выберите два разных жанра";
+        color: root.distinct ? Theme.muted : Theme.orange;
+        font-size: 13px;
+    }
+    if mix.checked : Slider {
+        accessible-label: "Доля первого жанра в процентах: " + first.current-value;
+        enabled: root.distinct;
+        minimum: 1; maximum: 99; step: 1;
+        value <=> root.balance;
+    }
+}

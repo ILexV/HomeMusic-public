@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { ApiError, api, errorMessage } from '../api/client';
 import type { PlayEventIn, WaveOrigin, WaveOut, WavePreferences, WaveSeedIn, WaveTrackOut } from '../api/types';
+import { readWaveGenreSeed, waveGenreIds, waveGenreTitle, type WaveGenreSeed } from '../api/waveGenres';
 import { EMBEDDED } from './embedded';
 import { getListenState, listenAll, replaceUpcoming, type ListenTrack } from './listen';
 import { canPlayAll, canPlayWave, playWave } from './player';
@@ -36,6 +37,7 @@ interface Session {
   preparation: WaveOut['preparation'] | null;
   error: string | null;
   title: string;
+  genreSeed: WaveGenreSeed | null;
   context: string;
   refs: Set<string>;
   songs: Set<string>;
@@ -60,7 +62,7 @@ const subscribers = new Set<() => void>();
 let snapshot = waveSnapshot();
 
 function waveSnapshot() {
-  return { id: session?.id ?? null, title: session?.title ?? null, starting,
+  return { id: session?.id ?? null, title: session?.title ?? null, genreSeed: session?.genreSeed ?? null, starting,
     preferences: session?.preferences ?? startPreferences,
     startPreferences,
     preferencesStatus: session?.preferencesStatus ?? startStatus,
@@ -98,7 +100,7 @@ function persistWave() {
   try {
     const key = SESSION_KEY + sessionAccount;
     if (!session) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify({ id: session.id, title: session.title,
+    else localStorage.setItem(key, JSON.stringify({ id: session.id, title: session.title, genreSeed: session.genreSeed,
       preferences: session.preferences, preferencesStatus: session.preferencesStatus,
       preparation: session.preparation, refs: [...session.refs], songs: [...session.songs],
       pending: [...session.inFlight, ...session.pending] }));
@@ -119,11 +121,17 @@ export function restoreWave(account: number | null) {
   const st = getListenState();
   if (account !== null && !canPlayAll() && st.track && st.context.startsWith('wave:')) {
     const id = st.context.slice('wave:'.length);
-    let saved: { id?: string; title?: string; refs?: string[]; songs?: string[]; pending?: PlayEventIn[];
+    let saved: { id?: string; title?: string; genreSeed?: WaveGenreSeed | null; refs?: string[]; songs?: string[]; pending?: PlayEventIn[];
       preferences?: WavePreferences; preferencesStatus?: string | null; preparation?: WaveOut['preparation'] | null } | null = null;
     try { saved = JSON.parse(localStorage.getItem(SESSION_KEY + account) ?? 'null'); } catch { /* rebuild from the queue */ }
     if (saved?.id !== id) saved = null;
-    session = { id, title: typeof saved?.title === 'string' ? saved.title : 'Моя волна', context: st.context,
+    let genreSeed = readWaveGenreSeed(saved?.genreSeed);
+    if (saved && saved.genreSeed === undefined) {
+      // Versions before genre blends saved only the title of a single-genre wave.
+      const genre = waveGenreIds.find(genre => waveGenreTitle({ genre }) === saved?.title);
+      if (genre) genreSeed = { genre };
+    }
+    session = { id, title: typeof saved?.title === 'string' ? saved.title : 'Моя волна', genreSeed, context: st.context,
       preferences: saved?.preferences ?? { ...DEFAULT_WAVE_PREFERENCES },
       preferencesStatus: saved?.preferencesStatus ?? null, preparation: saved?.preparation ?? null, error: null,
       refs: new Set([...(Array.isArray(saved?.refs) ? saved.refs.filter((r) => typeof r === 'string') : []), ...st.queue.map((t) => t.ref)]),
@@ -148,7 +156,8 @@ export function useWave() {
   return useSyncExternalStore(subscribe, () => snapshot);
 }
 
-export const seedKey = (seed?: WaveSeedIn | null) => seed?.genre ? `genre:${seed.genre}` :
+export const seedKey = (seed?: WaveSeedIn | null) => seed?.genre
+  ? `genre:${seed.genre}${seed.second_genre ? `:${seed.second_genre}:${seed.first_percent}` : ''}` :
   (seed?.by_artist ? 'artist:' : '') + (seed?.ref ?? seed?.nd_song_id ?? seed?.artist_ref ?? seed?.nd_artist_id ?? '');
 
 type SeedTrack = { ref?: string | null; nd_song_id?: string | null; artist_ref?: string | null };
@@ -225,7 +234,8 @@ export async function startWave(seed: WaveSeedIn | null | undefined, origin: Wav
       playWave(w);
       return true;
     }
-    const s: Session = { id: w.session_id, title: w.title, context: `wave:${w.session_id}`, refs: new Set(), songs: new Set(), pending: [], inFlight: [], busy: false, again: false,
+    const s: Session = { id: w.session_id, title: w.title, genreSeed: readWaveGenreSeed(w.seed ?? seed),
+      context: `wave:${w.session_id}`, refs: new Set(), songs: new Set(), pending: [], inFlight: [], busy: false, again: false,
       preferences: w.preferences, preferencesStatus: w.preferences_status, preparation: w.preparation, error: null };
     remember(s, w);
     const tracks = w.tracks.map(listenTrack);

@@ -1,7 +1,7 @@
 import { Large } from "large.slint";
 import { Medium } from "medium.slint";
 import { Mini } from "mini.slint";
-import { Equalizer, ModeSwitch, StereoLevels, Theme, TitleButton, VisualizationMode } from "theme.slint";
+import { Equalizer, ModeSwitch, NowPlayingArt, StereoLevels, Theme, TitleButton, VisualizationMode } from "theme.slint";
 export { VisualizationMode }
 
 export { ItemActions, TrackList, TrackPlacement } from "item-menus.slint";
@@ -57,6 +57,8 @@ export component AppWindow inherits Window {
     in-out property <VisualizationMode> visualizer-mode: VisualizationMode.cover;
     in-out property <[float]> spectrum-levels: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     in-out property <[float]> scope-samples;
+    in-out property <image> waterfall-image;
+    out property <bool> visualizer-expanded: expanded-view.is-open;
     in-out property <float> meter-left;
     in-out property <float> meter-right;
     in-out property <float> peak-left;
@@ -165,7 +167,7 @@ export component AppWindow inherits Window {
     callback check-source(int);
     callback star-album(int);
     callback pick-home(int);
-    callback start-genre-wave(int);
+    callback start-genre-wave(int, int, int);
     callback navigate(string);
     callback minimize();
     callback close-window();
@@ -174,17 +176,58 @@ export component AppWindow inherits Window {
 
     callback open-tools();
 
+    function player-key(event: KeyEvent) -> EventResult {
+        return root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta)
+            ? EventResult.accept : EventResult.reject;
+    }
+
+    // Winit embeds this popup in the player and restores the previous focus
+    // item on close. Leave the player layouts mounted to preserve their state.
+    expanded-view := PopupWindow {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        close-policy: no-auto-close;
+        forward-focus: expanded-keys;
+        expanded-keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    expanded-view.close();
+                    return accept;
+                }
+                return root.player-key(event);
+            }
+            NowPlayingArt {
+                expanded: true;
+                visualizer-mode: root.visualizer-mode;
+                spectrum-levels: root.spectrum-levels;
+                scope-samples: root.scope-samples;
+                waterfall-image: root.waterfall-image;
+                levels: root.levels;
+                toggle-expanded => { expanded-view.close(); }
+            }
+            TitleButton {
+                x: parent.width - self.width - 4px;
+                y: 2px;
+                glyph: "×";
+                tip: "Вернуться к плееру (Esc или двойной щелчок)";
+                clicked => { expanded-view.close(); }
+            }
+        }
+    }
+
+    changed visualizer-mode => {
+        if root.visualizer-mode == VisualizationMode.cover && root.visualizer-expanded {
+            expanded-view.close();
+        }
+    }
+
     keys := FocusScope {
         width: 100%;
         height: 100%;
 
-        key-pressed(event) => {
-            if (root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta)) {
-                accept
-            } else {
-                reject
-            }
-        }
+        key-pressed(event) => { return root.player-key(event); }
 
         Rectangle {
             width: 100%;
@@ -255,6 +298,9 @@ export component AppWindow inherits Window {
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
+                        waterfall-image: root.waterfall-image;
+                        draw-visualizer: !root.visualizer-expanded;
+                        expand-visualizer => { expanded-view.show(); }
                         levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
@@ -293,6 +339,9 @@ export component AppWindow inherits Window {
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
+                        waterfall-image: root.waterfall-image;
+                        draw-visualizer: !root.visualizer-expanded;
+                        expand-visualizer => { expanded-view.show(); }
                         levels: root.levels;
                         time-label: root.time-label;
                         duration-label: root.duration-label;
@@ -418,6 +467,9 @@ export component AppWindow inherits Window {
                         visualizer-mode <=> root.visualizer-mode;
                         spectrum-levels: root.spectrum-levels;
                         scope-samples: root.scope-samples;
+                        waterfall-image: root.waterfall-image;
+                        draw-visualizer: !root.visualizer-expanded;
+                        expand-visualizer => { expanded-view.show(); }
                         levels: root.levels;
                         play-pause => { root.play-pause(); }
                         stop => { root.stop(); }
@@ -455,7 +507,7 @@ export component AppWindow inherits Window {
                         home-sections: root.home-sections;
                         wave-genres: root.wave-genres;
                         wave-start-busy: root.wave-start-busy;
-                        start-genre-wave(index) => { root.start-genre-wave(index); }
+                        start-genre-wave(first, second, percent) => { root.start-genre-wave(first, second, percent); }
                         navigate(page) => { root.navigate(page); }
                         pick-home(index) => { root.pick-home(index); }
                     }

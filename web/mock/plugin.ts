@@ -3,7 +3,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import type { FavoriteSubject, FavoriteTarget } from '../src/api/types.ts';
-import { waveGenres, type WaveGenre } from '../src/api/waveGenres.ts';
+import { readWaveGenreSeed, waveGenreTitle } from '../src/api/waveGenres.ts';
 import { insightsMock } from './insights.ts';
 
 type Json = Record<string, unknown>;
@@ -609,19 +609,29 @@ function waveTrack(ref: string) {
 }
 
 function wavePick(w: { played: string[]; skipped: Set<string>; seed: Json | null }, queued: string[], first: Json[] = []) {
-  const genre = w.seed?.genre;
-  const pool = typeof genre === 'string'
-    ? libTracks.filter((t) => libAlbums.find((a) => a.id === t.album_id)?.genre?.toLowerCase() === genre)
-      .map((t) => waveTrack(`nd:nd${t.id}`))
-    : searchTracks().map((t) => waveTrack(t.ref));
-  const order = [...queued.map((r) => pool.find((t) => t.ref === r)).filter((t) => !!t), ...pool];
+  const seed = readWaveGenreSeed(w.seed);
+  const pools = seed
+    ? (seed.second_genre ? [seed.genre, seed.second_genre] : [seed.genre]).map(genre => libTracks
+        .filter((t) => libAlbums.find((a) => a.id === t.album_id)?.genre?.toLowerCase() === genre)
+        .map((t) => waveTrack(`nd:nd${t.id}`)))
+    : [searchTracks().map((t) => waveTrack(t.ref))];
+  const orders = pools.map(pool => [...queued.map((r) => pool.find((t) => t.ref === r)).filter(t => !!t), ...pool]);
   const out: Json[] = [...first];
   const recent = w.played.slice(-7).map((r) => waveTrack(r).artist);
-  for (const t of order) {
-    if (out.length >= 5) break;
-    const seq = [...recent, ...out.map((x) => String(x.artist))].slice(-7);
-    if (w.played.includes(t.ref) || out.some((x) => x.ref === t.ref) || seq.includes(t.artist) || w.skipped.has(t.artist)) continue;
-    out.push(t);
+  const firstRefs = seed?.second_genre ? new Set(pools[0].map(t => t.ref)) : null;
+  let usedFirst = firstRefs ? w.played.filter(ref => firstRefs.has(ref)).length : 0;
+  while (out.length < 5) {
+    const artists = [...recent, ...out.map((x) => String(x.artist))].slice(-7);
+    // Prefer the pool behind its share, but don't withhold a ready track for a missing genre.
+    const preferSecond = seed?.second_genre && Math.round((w.played.length + out.length + 1) * seed.first_percent / 100) <= usedFirst;
+    let next;
+    for (let n = 0; n < orders.length && !next; n++) {
+      next = orders[preferSecond ? 1 - n : n].find(t => !w.played.includes(t.ref) && !out.some(x => x.ref === t.ref) &&
+        !artists.includes(t.artist) && !w.skipped.has(t.artist));
+    }
+    if (!next) break;
+    out.push(next);
+    if (firstRefs?.has(next.ref)) usedFirst++;
   }
   return out;
 }
@@ -1389,9 +1399,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
     const track = library ? ndSongOut(library) : file ?? catalog;
     if (seed && (seed.ref || seed.nd_song_id) && !track) return send(res, 404, { detail: 'Трек не найден' }), true;
     if (seed?.by_artist && file) return send(res, 404, { detail: 'Исполнитель трека не найден' }), true;
-    if (typeof seed?.genre === 'string' && Object.hasOwn(waveGenres, seed.genre)) {
-      w.title = `Моя волна: ${waveGenres[seed.genre as WaveGenre]}`;
-      w.seed = { genre: seed.genre };
+    if (seed && ('genre' in seed || 'second_genre' in seed || 'first_percent' in seed)) {
+      const genres = readWaveGenreSeed(seed);
+      if (!genres) return send(res, 422, { detail: 'Некорректное сочетание жанров' }), true;
+      w.title = waveGenreTitle(genres);
+      w.seed = genres;
     } else if (seed?.by_artist && track) {
       w.title = `Волна: ${track.artist}`;
       w.seed = library ? { nd_artist_id: ndArtistId(library.artist), artist: track.artist } : { artist_ref: catalog?.artist_ref, artist: track.artist };

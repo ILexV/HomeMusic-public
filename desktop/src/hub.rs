@@ -82,14 +82,30 @@ pub(super) enum WaveSeed {
     Track(String),  // stable catalog, provider-file, or nd:<song> ref
     Artist(String), // Navidrome artist id
     Genre(&'static str),
+    GenreMix { first: &'static str, second: &'static str, first_percent: u8 },
 }
 
 impl WaveSeed {
+    pub(super) fn from_genre_picker(first: i32, second: i32, first_percent: i32) -> Option<Self> {
+        let &(first, _) = WAVE_GENRES.get(usize::try_from(first).ok()?)?;
+        if second == -1 {
+            return Some(Self::Genre(first));
+        }
+        let &(second, _) = WAVE_GENRES.get(usize::try_from(second).ok()?)?;
+        if first == second || !(1..=99).contains(&first_percent) {
+            return None;
+        }
+        Some(Self::GenreMix { first, second, first_percent: first_percent as u8 })
+    }
+
     fn json(&self) -> Value {
         match self {
             Self::Track(reference) => serde_json::json!({ "ref": reference }),
             Self::Artist(id) => serde_json::json!({ "nd_artist_id": id }),
             Self::Genre(slug) => serde_json::json!({ "genre": slug }),
+            Self::GenreMix { first, second, first_percent } => serde_json::json!({
+                "genre": first, "second_genre": second, "first_percent": first_percent,
+            }),
         }
     }
 }
@@ -1214,8 +1230,8 @@ mod tests {
 
     #[test]
     fn genre_wave_sends_only_the_selected_genre_and_keeps_the_empty_response_title() {
-        for (slug, label) in WAVE_GENRES {
-            let seed = WaveSeed::Genre(slug).json();
+        for (index, (slug, label)) in WAVE_GENRES.into_iter().enumerate() {
+            let seed = WaveSeed::from_genre_picker(index as i32, -1, 50).unwrap().json();
             assert_eq!(seed, serde_json::json!({"genre": slug}));
             let title = format!("Моя волна: {label}");
             let empty = parse_wave(&serde_json::json!({
@@ -1224,6 +1240,26 @@ mod tests {
             assert!(empty.tracks.is_empty() && !empty.pending);
             assert_eq!(empty.title, title);
             assert!(empty.notice.starts_with(&format!("{title} — нет доступных полных записей.")));
+        }
+    }
+
+    #[test]
+    fn mixed_genre_picker_preserves_the_order_and_first_weight() {
+        for percent in [1, 50, 70, 99] {
+            let seed = WaveSeed::from_genre_picker(1, 0, percent).unwrap().json();
+            assert_eq!(seed, serde_json::json!({
+                "genre": "pop", "second_genre": "classical", "first_percent": percent,
+            }));
+        }
+    }
+
+    #[test]
+    fn invalid_genre_picker_input_does_not_start_a_wave() {
+        for (first, second, percent) in [
+            (0, 0, 50), (0, 1, 0), (0, 1, 100), (-1, 0, 50), (0, -2, 50),
+            (WAVE_GENRES.len() as i32, -1, 50), (0, WAVE_GENRES.len() as i32, 50),
+        ] {
+            assert!(WaveSeed::from_genre_picker(first, second, percent).is_none());
         }
     }
 

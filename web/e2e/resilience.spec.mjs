@@ -69,19 +69,45 @@ test('genre wave starts distinct sessions, retries only its own pending session 
   await expect(page.getByText('Моя волна: Рок', { exact: true })).toBeVisible();
 });
 
-test('embedded genre wave sends the catalog choice to the Hub and plays a ready track', async ({ page }) => {
+test('embedded genre wave sends both genres and their balance without restarting on edits', async ({ page }) => {
   await login(page, 'genre-embedded', '/search');
   await page.goto('/?embedded=1#/search');
-  await page.getByRole('combobox', { name: 'Жанр волны' }).selectOption('rock');
+  const first = page.getByRole('combobox', { name: 'Жанр волны' });
+  const second = page.getByRole('combobox', { name: 'Второй жанр' });
+  const ratio = page.getByRole('slider', { name: 'Доля первого жанра: Рок' });
+  const starts = [];
+  page.on('request', r => { if (new URL(r.url()).pathname === '/api/wave/start') starts.push(r.postDataJSON()); });
+  await first.selectOption('rock');
+  await expect(second.locator('option[value=rock]')).toHaveCount(0);
+  await second.selectOption('pop');
+  await expect(ratio).toHaveValue('50');
+  for (let i = 0; i < 20; i++) await ratio.press('ArrowRight');
+  await expect(page.getByText('Рок 70% · Поп 30%')).toBeVisible();
   const [response] = await Promise.all([
     page.waitForResponse((r) => new URL(r.url()).pathname === '/api/wave/start'),
-    page.getByRole('button', { name: 'Моя волна: Рок: слушать' }).click(),
+    page.getByRole('button', { name: 'Моя волна: Рок 70% + Поп 30%: слушать' }).click(),
   ]);
-  expect(response.request().postDataJSON()).toMatchObject({ seed: { genre: 'rock' }, client: 'pwa-app', origin: 'catalog_card' });
+  expect(response.request().postDataJSON()).toMatchObject({
+    seed: { genre: 'rock', second_genre: 'pop', first_percent: 70 }, client: 'pwa-app', origin: 'catalog_card',
+  });
   expect(response.status()).toBe(200);
   const player = page.getByRole('region', { name: 'Прослушивание' });
   await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
   await expect.poll(async () => Number(await player.getByRole('slider', { name: 'Перемотка' }).inputValue())).toBeGreaterThan(0);
+  await page.evaluate(() => { location.hash = '/downloads'; });
+  await expect(first).toBeHidden();
+  await page.evaluate(() => { location.hash = '/search'; });
+  await expect(first).toHaveValue('rock');
+  await expect(second).toHaveValue('pop');
+  await expect(ratio).toHaveValue('70');
+  await second.selectOption('');
+  await expect(ratio).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Моя волна: Рок: слушать' })).toBeVisible();
+  await first.selectOption('');
+  await expect(second).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Моя волна: слушать' })).toBeVisible();
+  await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
+  expect(starts).toHaveLength(1);
 });
 
 test('an automatic update waits for an unsent screenshot even without message text', async ({ page }) => {
