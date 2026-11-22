@@ -125,7 +125,7 @@ impl Metadata {
         self.raw_number(name).filter(|value| value.is_finite())
     }
 
-    // A peak of -inf is a real, silent channel, distinct from an absent channel.
+    // A level of -inf is a real, silent channel, distinct from an absent channel.
     pub(super) fn raw_number(&self, name: &str) -> Option<f64> {
         use libmpv2::mpv_format;
         use std::ffi::CStr;

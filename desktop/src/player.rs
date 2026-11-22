@@ -20,7 +20,7 @@ pub(crate) enum MeterMode { #[default] Off, Stereo, Spectrum }
 // Use mpv's direct lavfi bridge so it rejects a missing astats even while idle.
 // reset=1 measures the latest decoded frame, not the entire track.
 const METER_FILTER: &str =
-    "@meter:lavfi-astats=metadata=1:reset=1:measure_perchannel=Peak_level:measure_overall=none";
+    "@meter:lavfi-astats=metadata=1:reset=1:measure_perchannel=RMS_level:measure_overall=none";
 
 #[derive(Default)]
 pub struct StreamDetails {
@@ -748,39 +748,39 @@ impl Player {
         true
     }
 
-    /// Post-EQ peak envelope, scaled to the same -60..0 dB range on both channels.
+    /// Post-EQ channel RMS on a shared -48..0 dBFS scale.
     pub fn meter_levels(&self) -> [f32; 2] {
-        self.mixed_levels(MeterMode::Stereo, |_, mpv| {
+        self.mixed_levels(MeterMode::Stereo, 48.0, |_, mpv| {
             let Ok(tags) = mpv.get_property::<analysis::Metadata>("af-metadata/meter") else {
                 return [f64::NEG_INFINITY; 2];
             };
-            let left = tags.raw_number("lavfi.astats.1.Peak_level").unwrap_or(f64::NEG_INFINITY);
-            [left, tags.raw_number("lavfi.astats.2.Peak_level").unwrap_or(left)] // mono
+            let left = tags.raw_number("lavfi.astats.1.RMS_level").unwrap_or(f64::NEG_INFINITY);
+            [left, tags.raw_number("lavfi.astats.2.RMS_level").unwrap_or(left)] // mono
         })
     }
 
     pub(crate) fn spectrum_levels(&self) -> [f32; 10] {
-        self.mixed_levels(MeterMode::Spectrum, |deck, _| {
+        self.mixed_levels(MeterMode::Spectrum, 60.0, |deck, _| {
             deck.spectrum_tap.as_deref().map_or([f64::NEG_INFINITY; 10], SpectrumTap::peaks)
         })
     }
 
-    fn mixed_levels<const N: usize>(&self, mode: MeterMode, peaks: fn(&Self, &Mpv) -> [f64; N]) -> [f32; N] {
+    fn mixed_levels<const N: usize>(&self, mode: MeterMode, range_db: f64, read: fn(&Self, &Mpv) -> [f64; N]) -> [f32; N] {
         if self.meter_mode != mode { return [0.0; N]; }
-        let mut db = self.deck_peak_db(peaks);
+        let mut db = self.deck_levels_db(read);
         if let Some(fade) = &self.fade {
-            let outgoing = fade.outgoing.deck_peak_db(peaks);
+            let outgoing = fade.outgoing.deck_levels_db(read);
             for (current, previous) in db.iter_mut().zip(outgoing) {
-                // Independent outputs expose peaks, not phase-aligned PCM. Sum their
-                // weighted peak amplitudes (an upper bound on the mixed peak).
+                // The decks do not expose phase-aligned PCM. Summing their weighted
+                // amplitudes bounds the mixed RMS (stereo) or peak (spectrum).
                 let sum = 10f64.powf(*current / 20.0) + 10f64.powf(previous / 20.0);
                 *current = 20.0 * sum.log10();
             }
         }
-        db.map(|value| ((value + 60.0) / 60.0).clamp(0.0, 1.0) as f32)
+        db.map(|value| ((value + range_db) / range_db).clamp(0.0, 1.0) as f32)
     }
 
-    fn deck_peak_db<const N: usize>(&self, peaks: fn(&Self, &Mpv) -> [f64; N]) -> [f64; N] {
+    fn deck_levels_db<const N: usize>(&self, read: fn(&Self, &Mpv) -> [f64; N]) -> [f64; N] {
         let audible = self.phase == PlaybackPhase::Playing && self.volume > 0.0 && self.fade_factor > 0.0;
         // core-idle includes explicit pause, cache underruns, seeking and EOF;
         // the last decoded measurement alone doesn't reflect those states.
@@ -790,7 +790,7 @@ impl Player {
         };
         // mpv applies its cubic volume curve, normalization and fade after user filters.
         let gain_db = self.gain_db + 20.0 * (f64::from(self.volume).powi(3) * self.fade_factor).log10();
-        peaks(self, mpv).map(|db| if db.is_finite() { db + gain_db } else { f64::NEG_INFINITY })
+        read(self, mpv).map(|db| if db.is_finite() { db + gain_db } else { f64::NEG_INFINITY })
     }
 
     pub fn eq(&self) -> Settings {
@@ -1185,7 +1185,13 @@ mod tests {
 
     #[test]
     fn stereo_meter_reads_live_channels_after_eq_and_detaches_without_reload() {
-        let url = serve_wav(tone_channels_wav(6.0, 44_100, &[8192.0, 2048.0]));
+        let mut wav = tone_channels_wav(6.0, 44_100, &[8192.0, 8192.0]);
+        // Equal peaks, different energy: keep one in sixteen right-channel
+        // samples. A peak-only tap would pin both bars at the same height.
+        for (i, pair) in wav[44..].chunks_exact_mut(4).enumerate() {
+            if i % 16 != 0 { pair[2..].fill(0); }
+        }
+        let url = serve_wav(wav);
         let mut player = open_null();
         player.set_volume(1.0);
         player.load(&url).unwrap();
@@ -1194,11 +1200,11 @@ mod tests {
         assert_eq!(player.meter_levels(), [0.0; 2]);
 
         player.set_meter_mode(MeterMode::Stereo);
-        // Peaks at -12 and -24 dBFS on the common -60..0 scale.
-        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.6).abs() < 0.02);
+        // The sine reads -15 dBFS RMS; the sparse channel is another 12 dB down.
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.687).abs() < 0.02 && (r - 0.436).abs() < 0.02);
         player.set_eq_enabled(true);
         player.set_preamp(-6.0);
-        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.7).abs() < 0.02 && (r - 0.5).abs() < 0.02);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.562).abs() < 0.02 && (r - 0.311).abs() < 0.02);
         player.set_paused(true);
         assert_eq!(player.meter_levels(), [0.0; 2]);
         player.set_meter_mode(MeterMode::Off);
@@ -1221,10 +1227,10 @@ mod tests {
         wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
         player.prepare_next(&mono, "", "mono", false).unwrap();
         player.set_meter_mode(MeterMode::Stereo); // Include the already prepared, paused deck.
-        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.8).abs() < 0.02 && r == 0.0);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.687).abs() < 0.02 && r == 0.0);
         // Left stays at full source level while both decks contribute;
         // right is silent on the outgoing track and rises with the mono deck.
-        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.7).abs() < 0.02);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.687).abs() < 0.02 && (r - 0.562).abs() < 0.02);
         assert!(player.fade.is_some());
         player.stop();
         assert_eq!(player.meter_levels(), [0.0; 2]);
@@ -1251,7 +1257,7 @@ mod tests {
         assert_eq!(player.spectrum_levels(), [0.0; 10]);
         player.set_meter_mode(MeterMode::Stereo);
         player.set_paused(false);
-        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| l == 0.0 && r > 0.85);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| l == 0.0 && (r - 0.812).abs() < 0.02);
         assert_eq!(player.spectrum_levels(), [0.0; 10]);
         player.set_meter_mode(MeterMode::Off);
         assert!(!player.audio_filter().contains("astats"));

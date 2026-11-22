@@ -8,7 +8,9 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::time::{Duration, Instant};
 
 const PACKET: usize = 1024;
-const MAX_PACKETS: usize = 64;
+// Direct AVIO may send the header and each of the 20 keys as separate packets.
+// Allow decoder bursts, but never spend an unbounded UI tick draining a socket.
+const MAX_PACKETS: usize = 256;
 const SILENCE: [f64; 10] = [f64::NEG_INFINITY; 10];
 
 pub(super) struct SpectrumTap {
@@ -35,10 +37,10 @@ impl SpectrumTap {
         let graph = format!(concat!(
             "@meter:lavfi=[asplit=2[dry][wet];[wet]",
             "aformat=sample_rates=48000:sample_fmts=fltp:channel_layouts=stereo,",
-            "asetnsamples=n=1920:p=0,acrossover=split=44 88 177 354 707 1414 2828 5657 11314:order=4th",
+            "asetnsamples=n=800:p=0,acrossover=split=44 88 177 354 707 1414 2828 5657 11314:order=4th",
             "[a][b][c][d][e][f][g][h][i][j];[a][b][c][d][e][f][g][h][i][j]amerge=inputs=10,",
             "ametadata=delete,astats=metadata=1:reset=1:measure_perchannel=Peak_level:measure_overall=none,",
-            "ametadata=print:file='udp\\://127.0.0.1\\:{}?pkt_size=1024',anullsink;[dry]anull]:o=[threads=1]"
+            "ametadata=print:direct=1:file='udp\\://127.0.0.1\\:{}?pkt_size=1024',anullsink;[dry]anull]:o=[threads=1]"
         ), port);
         Ok((Self { socket, frames: RefCell::new(Frames {
             bytes: [0; PACKET * 3], len: 0, last: None, discarding: false,
@@ -88,10 +90,16 @@ impl Frames {
 
     fn decode_latest(&mut self) {
         let Ok(text) = std::str::from_utf8(&self.bytes[..self.len]) else { self.len = 0; return; };
-        let Some(end) = text.rfind("frame:") else { return; };
-        let complete = &text[..end];
-        if let Some((_, frame)) = complete.rsplit_once("frame:") {
-            let mut lines = frame.lines().skip(1);
+        // Consume the latest complete record immediately, even if its successor
+        // hasn't started yet. Never parse a numeric prefix from a split datagram.
+        let Some(last_newline) = text.rfind('\n') else { return; };
+        let complete = &text[..=last_newline];
+        let Some(final_key) = complete.rfind("\nlavfi.astats.20.Peak_level=") else { return; };
+        let (head, tail) = complete.split_at(final_key + 1);
+        let Some((_, rest)) = tail.split_once('\n') else { return; };
+        let end = complete.len() - rest.len();
+        if let Some(start) = head.rfind("frame:") {
+            let mut lines = complete[start..end].lines().skip(1);
             let mut peaks = SILENCE;
             let mut count = 0;
             for (channel, line) in (1..=20).zip(&mut lines) {
@@ -101,9 +109,50 @@ impl Frames {
                 if db.is_finite() { peaks[(channel - 1) / 2] = peaks[(channel - 1) / 2].max(db); }
                 count += 1;
             }
-            if count == 20 { self.last = Some((Instant::now(), peaks)); }
+            if count == 20 && lines.next().is_none() { self.last = Some((Instant::now(), peaks)); }
         }
         self.bytes.copy_within(end..self.len, 0);
         self.len -= end;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write;
+
+    fn frame(db: i32) -> String {
+        let mut frame = "frame:1 pts:800 pts_time:0.0166667\n".to_owned();
+        for channel in 1..=20 {
+            writeln!(frame, "lavfi.astats.{channel}.Peak_level={db}").unwrap();
+        }
+        frame
+    }
+
+    fn deliver(frames: &mut Frames, bytes: &[u8]) {
+        frames.bytes[frames.len..frames.len + bytes.len()].copy_from_slice(bytes);
+        frames.len += bytes.len();
+        frames.decode_latest();
+    }
+
+    #[test]
+    fn spectrum_publishes_the_latest_complete_frame_without_waiting_for_the_next() {
+        let mut frames = Frames { bytes: [0; PACKET * 3], len: 0, last: None, discarding: false };
+        let quiet = frame(-42);
+        let loud = frame(-6);
+        // A backlog ending mid-header still yields its newest complete record.
+        deliver(&mut frames, format!("{loud}{quiet}fra").as_bytes());
+        assert_eq!(frames.last.unwrap().1, [-42.0; 10]);
+        // Split a valid numeric prefix from the final newline. Only the newline
+        // completes the record, and no subsequent packet/header is needed.
+        deliver(&mut frames, &loud.as_bytes()[3..loud.len() - 1]);
+        assert_eq!(frames.last.unwrap().1, [-42.0; 10]);
+        deliver(&mut frames, b"\n");
+        assert_eq!(frames.last.unwrap().1, [-6.0; 10]);
+        assert_eq!(frames.len, 0);
+
+        let missing_channel = quiet.replace("lavfi.astats.10.Peak_level=-42\n", "");
+        deliver(&mut frames, missing_channel.as_bytes());
+        assert_eq!(frames.last.unwrap().1, [-6.0; 10]);
     }
 }
