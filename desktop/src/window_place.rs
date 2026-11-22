@@ -2,6 +2,7 @@
 //! A file that only has `x` and `y` still loads.
 
 use std::path::{Path, PathBuf};
+use crate::VisualizationMode;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Place {
@@ -14,7 +15,7 @@ pub struct Place {
     pub volume: Option<f32>,
     pub eq_on: Option<bool>,
     pub eq_open: Option<bool>,
-    pub visualizer_on: bool,
+    pub visualizer_mode: VisualizationMode,
     pub preamp: Option<f32>,
     pub bands: Option<[f32; 10]>,
     pub mini_position: Option<(f32, f32)>,
@@ -48,7 +49,7 @@ pub fn same(left: Place, right: Place) -> bool {
         && near(left.volume, right.volume, 0.005)
         && left.eq_on == right.eq_on
         && left.eq_open == right.eq_open
-        && left.visualizer_on == right.visualizer_on
+        && left.visualizer_mode == right.visualizer_mode
         && near(left.preamp, right.preamp, 0.05)
         && match (left.bands, right.bands) {
             (Some(left), Some(right)) => left.iter().zip(right).all(|(a, b)| (a - b).abs() < 0.05),
@@ -109,8 +110,10 @@ fn save_at(path: &Path, place: Place) -> std::io::Result<bool> {
             if eq_open { "true" } else { "false" }
         ));
     }
-    if place.visualizer_on {
-        body.push_str("visualizer = true\n");
+    match place.visualizer_mode {
+        VisualizationMode::Cover => {}
+        VisualizationMode::Stereo => body.push_str("visualizer = \"stereo\"\n"),
+        VisualizationMode::Spectrum => body.push_str("visualizer = \"spectrum\"\n"),
     }
     if let Some(preamp) = place.preamp {
         body.push_str(&format!("preamp = {preamp}\n"));
@@ -137,7 +140,7 @@ pub fn parse(text: &str) -> Option<Place> {
     let mut volume = None;
     let mut eq_on = None;
     let mut eq_open = None;
-    let mut visualizer_on = false;
+    let mut visualizer_mode = VisualizationMode::Cover;
     let mut preamp = None;
     let mut bands = None;
     let mut mini_x = None;
@@ -179,7 +182,13 @@ pub fn parse(text: &str) -> Option<Place> {
             }
             "eq" => eq_on = parse_bool(value),
             "eq-open" => eq_open = parse_bool(value),
-            "visualizer" => visualizer_on = parse_bool(value).unwrap_or(false),
+            "visualizer" => visualizer_mode = match value {
+                "spectrum" => VisualizationMode::Spectrum,
+                "stereo" => VisualizationMode::Stereo,
+                // Earlier versions saved the L/R toggle as a boolean.
+                _ if parse_bool(value) == Some(true) => VisualizationMode::Stereo,
+                _ => VisualizationMode::Cover,
+            },
             "preamp" => preamp = parse_f32(value).map(crate::eq::clamp_db),
             "bands" => bands = parse_bands(value),
             _ => {}
@@ -195,7 +204,7 @@ pub fn parse(text: &str) -> Option<Place> {
         volume,
         eq_on,
         eq_open,
-        visualizer_on,
+        visualizer_mode,
         preamp,
         bands,
         mini_position: mini_x.zip(mini_y),
@@ -264,12 +273,18 @@ mod tests {
             volume: None,
             eq_on: None,
             eq_open: None,
-            visualizer_on: false,
+            visualizer_mode: VisualizationMode::Cover,
             preamp: None,
             bands: None,
             mini_position: None,
             normal_position: None,
         }
+    }
+
+    #[test]
+    fn frequency_spectrum_keeps_legacy_stereo_preference() {
+        let old = parse("x=0\ny=0\nvisualizer = true").unwrap();
+        assert_eq!(old.visualizer_mode, VisualizationMode::Stereo);
     }
 
     #[test]
@@ -394,7 +409,7 @@ mod tests {
         let mut place = bare(80.0, 60.0);
         assert!(save_at(&path, place).unwrap());
         assert!(!save_at(&path, place).unwrap());
-        for change in 0..14 {
+        for change in 0..15 {
             match change {
                 0 => place.x = 100.0,
                 1 => place.mode = Some(0),
@@ -408,8 +423,9 @@ mod tests {
                 9 => place.mini_position = Some((100.0, 60.0)),
                 10 => place.normal_position = Some((-1200.0, 80.0)),
                 11 => place.large_queue_width = Some(375.5),
-                12 => place.visualizer_on = true,
-                _ => place.visualizer_on = false,
+                12 => place.visualizer_mode = VisualizationMode::Stereo,
+                13 => place.visualizer_mode = VisualizationMode::Spectrum,
+                _ => place.visualizer_mode = VisualizationMode::Cover,
             }
             assert!(save_at(&path, place).unwrap(), "change {change}");
             assert!(!save_at(&path, place).unwrap(), "unchanged {change}");

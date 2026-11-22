@@ -1,4 +1,4 @@
-import { CatalogRow, NowPlayingArt, StereoLevels, EmptyNote, EqButton, Glyph, Heading, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
+import { CatalogRow, NowPlayingArt, StereoLevels, VisualizationMode, EmptyNote, EqButton, Glyph, Heading, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
 import { QueueView } from "queue.slint";
 import { AlbumSections, CatalogHit, QueueItem } from "types.slint";
@@ -10,7 +10,8 @@ export component Medium inherits Rectangle {
     in property <string> track-meta;
     in property <image> cover;
     in property <bool> has-cover;
-    in-out property <bool> visualizer-on;
+    in-out property <VisualizationMode> visualizer-mode;
+    in property <[float]> spectrum-levels;
     in property <StereoLevels> levels;
     in property <string> time-label;
     in property <string> duration-label;
@@ -100,7 +101,8 @@ export component Medium inherits Rectangle {
                     cross-axis-alignment: center;
 
                     NowPlayingArt {
-                        visualizer-on: root.visualizer-on;
+                        visualizer-mode: root.visualizer-mode;
+                        spectrum-levels: root.spectrum-levels;
                         levels: root.levels;
                         width: 112px;
                         height: 112px;
@@ -155,7 +157,7 @@ export component Medium inherits Rectangle {
                         liked: root.liked;
                         disliked: root.disliked;
                         eq-on: root.eq-on;
-                        visualizer-on <=> root.visualizer-on;
+                        visualizer-mode <=> root.visualizer-mode;
                         toggle-like => { root.toggle-like(); }
                         toggle-dislike => { root.toggle-dislike(); }
                         toggle-eq => { root.toggle-eq(); }

@@ -13,6 +13,8 @@ export global Theme {
     out property <color> dim: #8a8a8a;
 }
 
+export enum VisualizationMode { cover, stereo, spectrum }
+
 
 export component Glyph inherits Rectangle {
     in property <string> kind;
@@ -143,6 +145,15 @@ export component Glyph inherits Rectangle {
         stroke: root.tint;
         stroke-width: 2px;
     }
+    if root.kind == "spectrum" : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M2 14V7 M5 14V3 M8 14V6 M11 14V9 M14 14V11";
+        stroke: root.tint;
+        stroke-width: 2px;
+    }
     if root.kind == "settings" : Path {
         width: 100%;
         height: 100%;
@@ -198,7 +209,7 @@ export component PlaybackActions inherits HorizontalLayout {
     in property <bool> liked;
     in property <bool> disliked;
     in property <bool> eq-on;
-    in-out property <bool> visualizer-on;
+    in-out property <VisualizationMode> visualizer-mode;
     in property <color> surface: Theme.panel;
     callback toggle-like();
     callback toggle-dislike();
@@ -211,14 +222,16 @@ export component PlaybackActions inherits HorizontalLayout {
     Rectangle { width: 4px; }
     ActionButton { icon: "equalizer"; tip: "Эквалайзер"; surface: root.surface; active: root.eq-on; clicked => { root.toggle-eq(); } }
     ActionButton {
-        icon: "visualizer";
-        tip: root.visualizer-on ? "Визуализация: вернуть обложку" : "Визуализация: показать уровни L/R";
-        accessible-label: "Визуализация";
-        accessible-checkable: true;
-        accessible-checked: root.visualizer-on;
+        icon: root.visualizer-mode == VisualizationMode.spectrum ? "spectrum" : "visualizer";
+        tip: root.visualizer-mode == VisualizationMode.cover ? "Визуализация: обложка. Показать уровни L/R"
+            : root.visualizer-mode == VisualizationMode.stereo ? "Визуализация: уровни L/R. Показать спектр"
+            : "Визуализация: спектр. Показать обложку";
         surface: root.surface;
-        active: root.visualizer-on;
-        clicked => { root.visualizer-on = !root.visualizer-on; }
+        active: root.visualizer-mode != VisualizationMode.cover;
+        clicked => {
+            root.visualizer-mode = root.visualizer-mode == VisualizationMode.cover ? VisualizationMode.stereo
+                : root.visualizer-mode == VisualizationMode.stereo ? VisualizationMode.spectrum : VisualizationMode.cover;
+        }
     }
 }
 
@@ -1131,23 +1144,24 @@ component MeterChannel inherits Rectangle {
 
 // Only the now-playing artwork switches; library and album covers keep using CoverArt.
 export component NowPlayingArt inherits Rectangle {
-    in property <bool> visualizer-on;
+    in property <VisualizationMode> visualizer-mode;
+    in property <[float]> spectrum-levels;
     in property <StereoLevels> levels;
     in property <image> cover;
     in property <bool> has-cover;
     in property <length> mark: 56px;
 
-    if !root.visualizer-on : CoverArt {
+    if root.visualizer-mode == VisualizationMode.cover : CoverArt {
         cover: root.cover;
         has-cover: root.has-cover;
         mark: root.mark;
     }
-    if root.visualizer-on : Rectangle {
+    if root.visualizer-mode != VisualizationMode.cover : Rectangle {
         background: Theme.bg;
         border-radius: 6px;
         border-width: 1px;
         border-color: Theme.line;
-        HorizontalLayout {
+        if root.visualizer-mode == VisualizationMode.stereo : HorizontalLayout {
             padding-left: root.width * 0.17;
             padding-right: root.width * 0.17;
             padding-top: root.height * 0.10;
@@ -1155,6 +1169,23 @@ export component NowPlayingArt inherits Rectangle {
             spacing: root.width * 0.08;
             MeterChannel { label: "L"; level: root.levels.left; peak: root.levels.peak-left; }
             MeterChannel { label: "R"; level: root.levels.right; peak: root.levels.peak-right; }
+        }
+        if root.visualizer-mode == VisualizationMode.spectrum : HorizontalLayout {
+            padding-left: root.width * 0.06;
+            padding-right: root.width * 0.06;
+            padding-top: root.height * 0.10;
+            padding-bottom: root.height * 0.10;
+            spacing: max(1px, root.width * 0.015);
+            for level in root.spectrum-levels : Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.line;
+                Rectangle {
+                    width: 100%;
+                    height: parent.height * clamp(level, 0, 1);
+                    y: parent.height - self.height;
+                    background: Theme.orange;
+                }
+            }
         }
     }
 }

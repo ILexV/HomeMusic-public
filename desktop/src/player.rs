@@ -10,6 +10,13 @@ use crate::eq::{self, Settings};
 pub(crate) mod analysis;
 pub use analysis::{AudioTrack, Normalization};
 
+#[path = "spectrum.rs"]
+mod spectrum;
+use spectrum::SpectrumTap;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MeterMode { #[default] Off, Stereo, Spectrum }
+
 // Use mpv's direct lavfi bridge so it rejects a missing astats even while idle.
 // reset=1 measures the latest decoded frame, not the entire track.
 const METER_FILTER: &str =
@@ -70,7 +77,9 @@ pub struct Player {
     volume: f32,
     eq: Settings,
     eq_filter_active: bool,
-    meter_enabled: bool,
+    meter_mode: MeterMode,
+    spectrum_tap: Option<Box<SpectrumTap>>,
+    spectrum_pending: bool,
     notice: Option<String>,
     phase: PlaybackPhase,
     /// Ignore the replaced file's trailing events until the next StartFile.
@@ -181,7 +190,7 @@ impl Player {
                     mpv: Some(mpv),
                     volume: 0.8,
                     eq: Settings::default(),
-                    eq_filter_active: false, meter_enabled: false,
+                    eq_filter_active: false, meter_mode: MeterMode::Off, spectrum_tap: None, spectrum_pending: false,
                     notice: None,
                     phase: PlaybackPhase::Idle,
                     awaiting_start: false,
@@ -203,7 +212,7 @@ impl Player {
                 mpv: None,
                 volume: 0.8,
                 eq: Settings::default(),
-                eq_filter_active: false, meter_enabled: false,
+                eq_filter_active: false, meter_mode: MeterMode::Off, spectrum_tap: None, spectrum_pending: false,
                 notice: Some(open_error(&err)),
                 phase: PlaybackPhase::Error,
                 awaiting_start: false,
@@ -250,7 +259,7 @@ impl Player {
             let mut next = Box::new(Self::open(PlayerOptions { null_audio: self.null_audio }));
             next.volume = self.volume;
             next.restore_eq(self.eq);
-            next.set_meter_enabled(self.meter_enabled);
+            next.set_meter_mode(self.meter_mode);
             next.load_cookie_at(target, cookie, 0.0, true)?;
             if same_album && self.normalization == Normalization::Album {
                 next.gain_db = self.gain_db;
@@ -346,10 +355,12 @@ impl Player {
 
     /// 20 ms envelope tick. Never consumes foreground EOF/promotion notifications.
     pub fn audio_tick(&mut self) {
+        if self.spectrum_pending { self.attach_spectrum(); }
         if let Some(prepared) = &mut self.prepared {
             if let Some(deck) = &mut prepared.deck { deck.take_natural_end(); }
         }
         if let Some(fade) = &mut self.fade {
+            if fade.outgoing.spectrum_pending { fade.outgoing.attach_spectrum(); }
             let position = self.mpv.as_ref().and_then(|m| prop_f64(m, "time-pos")).unwrap_or(0.0);
             let progress = (position / fade.seconds).clamp(0.0, 1.0);
             self.fade_factor = progress;
@@ -393,6 +404,8 @@ impl Player {
         next.set_paused(false);
         std::mem::swap(&mut self.mpv, &mut next.mpv);
         std::mem::swap(&mut self.eq_filter_active, &mut next.eq_filter_active);
+        std::mem::swap(&mut self.spectrum_tap, &mut next.spectrum_tap);
+        std::mem::swap(&mut self.spectrum_pending, &mut next.spectrum_pending);
         std::mem::swap(&mut self.entry_id, &mut next.entry_id);
         std::mem::swap(&mut self.hub_source, &mut next.hub_source);
         next.phase = PlaybackPhase::Playing;
@@ -475,6 +488,7 @@ impl Player {
                 .and_then(|_| mpv.set_property("start", start.as_str()))
                 .and_then(|_| mpv.command("loadfile", &[target, "replace"]))
         };
+        if let Some(tap) = &self.spectrum_tap { tap.clear(); }
         if loaded.is_err() {
             let text = "Не удалось открыть файл".to_string();
             self.notice = Some(text.clone());
@@ -516,6 +530,7 @@ impl Player {
         if let Some(mpv) = self.mpv.as_ref() {
             let _ = mpv.set_property("pause", paused);
         }
+        if let Some(tap) = &self.spectrum_tap { tap.clear(); }
         if let Some(fade) = &mut self.fade {
             fade.outgoing.set_paused(paused);
         }
@@ -578,6 +593,7 @@ impl Player {
                         self.native_ending = false;
                     }
                     self.entry_id = Some(entry);
+                    if let Some(tap) = &self.spectrum_tap { tap.clear(); }
                     self.awaiting_start = false;
                     self.phase = PlaybackPhase::Loading;
                     eof = false;
@@ -676,6 +692,7 @@ impl Player {
         }
         let target = format!("{target:.9}");
         let _ = mpv.command("seek", &[&target, "absolute+exact"]);
+        if let Some(tap) = &self.spectrum_tap { tap.clear(); }
     }
 
     /// Native timestamp and seekability; unseekable streams still have a playhead.
@@ -695,25 +712,64 @@ impl Player {
     }
 
     /// Attach/detach just our labeled tap without loading, seeking or changing gain.
-    pub fn set_meter_enabled(&mut self, enabled: bool) {
-        if self.meter_enabled == enabled { return; }
-        self.meter_enabled = enabled;
-        if let Some(mpv) = &self.mpv {
-            let args = if enabled { ["add", METER_FILTER] } else { ["remove", "@meter"] };
-            let _ = mpv.command("af", &args);
+    pub(crate) fn set_meter_mode(&mut self, mode: MeterMode) {
+        if self.meter_mode == mode { return; }
+        self.spectrum_pending = mode == MeterMode::Spectrum;
+        let attached = match mode {
+            MeterMode::Off => false,
+            MeterMode::Stereo => self.mpv.as_ref().is_some_and(|m| m.command("af", &["add", METER_FILTER]).is_ok()),
+            MeterMode::Spectrum => self.attach_spectrum(),
+        };
+        if !attached && self.meter_mode != MeterMode::Off {
+            if let Some(mpv) = &self.mpv { let _ = mpv.command("af", &["remove", "@meter"]); }
         }
+        if mode != MeterMode::Spectrum {
+            self.spectrum_tap = None;
+        }
+        self.meter_mode = mode;
         if let Some(deck) = self.prepared.as_mut().and_then(|p| p.deck.as_mut()) {
-            deck.set_meter_enabled(enabled);
+            deck.set_meter_mode(mode);
         }
-        if let Some(fade) = &mut self.fade { fade.outgoing.set_meter_enabled(enabled); }
+        if let Some(fade) = &mut self.fade { fade.outgoing.set_meter_mode(mode); }
+    }
+
+    fn attach_spectrum(&mut self) -> bool {
+        // An idle mpv accepts even an invalid lavfi graph and can subsequently
+        // fail the file open. On a live filter chain `af add` validates the
+        // graph (including the UDP protocol) and rolls back an unsupported tap.
+        let Some(mpv) = &self.mpv else { return false; };
+        if self.phase != PlaybackPhase::Playing || mpv.get_property::<i64>("audio-out-params/channel-count").is_err() {
+            return false;
+        }
+        self.spectrum_pending = false;
+        let Ok((tap, filter)) = SpectrumTap::open() else { return false; };
+        if mpv.command("af", &["add", &filter]).is_err() { return false; }
+        self.spectrum_tap = Some(Box::new(tap));
+        true
     }
 
     /// Post-EQ peak envelope, scaled to the same -60..0 dB range on both channels.
     pub fn meter_levels(&self) -> [f32; 2] {
-        if !self.meter_enabled { return [0.0; 2]; }
-        let mut db = self.deck_peak_db();
+        self.mixed_levels(MeterMode::Stereo, |_, mpv| {
+            let Ok(tags) = mpv.get_property::<analysis::Metadata>("af-metadata/meter") else {
+                return [f64::NEG_INFINITY; 2];
+            };
+            let left = tags.raw_number("lavfi.astats.1.Peak_level").unwrap_or(f64::NEG_INFINITY);
+            [left, tags.raw_number("lavfi.astats.2.Peak_level").unwrap_or(left)] // mono
+        })
+    }
+
+    pub(crate) fn spectrum_levels(&self) -> [f32; 10] {
+        self.mixed_levels(MeterMode::Spectrum, |deck, _| {
+            deck.spectrum_tap.as_deref().map_or([f64::NEG_INFINITY; 10], SpectrumTap::peaks)
+        })
+    }
+
+    fn mixed_levels<const N: usize>(&self, mode: MeterMode, peaks: fn(&Self, &Mpv) -> [f64; N]) -> [f32; N] {
+        if self.meter_mode != mode { return [0.0; N]; }
+        let mut db = self.deck_peak_db(peaks);
         if let Some(fade) = &self.fade {
-            let outgoing = fade.outgoing.deck_peak_db();
+            let outgoing = fade.outgoing.deck_peak_db(peaks);
             for (current, previous) in db.iter_mut().zip(outgoing) {
                 // Independent outputs expose peaks, not phase-aligned PCM. Sum their
                 // weighted peak amplitudes (an upper bound on the mixed peak).
@@ -724,23 +780,17 @@ impl Player {
         db.map(|value| ((value + 60.0) / 60.0).clamp(0.0, 1.0) as f32)
     }
 
-    fn deck_peak_db(&self) -> [f64; 2] {
-        const SILENCE: [f64; 2] = [f64::NEG_INFINITY; 2];
-        if self.phase != PlaybackPhase::Playing || self.volume <= 0.0 || self.fade_factor <= 0.0 {
-            return SILENCE;
-        }
-        let Some(mpv) = &self.mpv else { return SILENCE; };
+    fn deck_peak_db<const N: usize>(&self, peaks: fn(&Self, &Mpv) -> [f64; N]) -> [f64; N] {
+        let audible = self.phase == PlaybackPhase::Playing && self.volume > 0.0 && self.fade_factor > 0.0;
         // core-idle includes explicit pause, cache underruns, seeking and EOF;
-        // af-metadata alone retains the last frame in those states.
-        if flag(mpv, "core-idle") != Some(false) { return SILENCE; }
-        let Ok(tags) = mpv.get_property::<analysis::Metadata>("af-metadata/meter") else {
-            return SILENCE;
+        // the last decoded measurement alone doesn't reflect those states.
+        let Some(mpv) = self.mpv.as_ref().filter(|m| audible && flag(m, "core-idle") == Some(false)) else {
+            if let Some(tap) = &self.spectrum_tap { tap.clear(); }
+            return [f64::NEG_INFINITY; N];
         };
-        let left = tags.raw_number("lavfi.astats.1.Peak_level").unwrap_or(f64::NEG_INFINITY);
-        let right = tags.raw_number("lavfi.astats.2.Peak_level").unwrap_or(left); // mono
         // mpv applies its cubic volume curve, normalization and fade after user filters.
         let gain_db = self.gain_db + 20.0 * (f64::from(self.volume).powi(3) * self.fade_factor).log10();
-        [left, right].map(|db| if db.is_finite() { db + gain_db } else { f64::NEG_INFINITY })
+        peaks(self, mpv).map(|db| if db.is_finite() { db + gain_db } else { f64::NEG_INFINITY })
     }
 
     pub fn eq(&self) -> Settings {
@@ -1120,12 +1170,14 @@ mod tests {
         }
     }
 
-    fn wait_for_levels(player: &mut Player, matches: impl Fn([f32; 2]) -> bool) -> [f32; 2] {
+    fn wait_for_levels<const N: usize>(
+        player: &mut Player, read: fn(&Player) -> [f32; N], matches: impl Fn([f32; N]) -> bool,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             assert!(!player.take_natural_end(), "ended before expected meter levels");
-            let levels = player.meter_levels();
-            if matches(levels) { return levels; }
+            let levels = read(player);
+            if matches(levels) { return; }
             assert!(Instant::now() < deadline, "last levels: {levels:?}, af: {}", player.audio_filter());
             std::thread::sleep(Duration::from_millis(15));
         }
@@ -1141,15 +1193,15 @@ mod tests {
         assert!(!player.audio_filter().contains("astats"));
         assert_eq!(player.meter_levels(), [0.0; 2]);
 
-        player.set_meter_enabled(true);
+        player.set_meter_mode(MeterMode::Stereo);
         // Peaks at -12 and -24 dBFS on the common -60..0 scale.
-        wait_for_levels(&mut player, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.6).abs() < 0.02);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.6).abs() < 0.02);
         player.set_eq_enabled(true);
         player.set_preamp(-6.0);
-        wait_for_levels(&mut player, |[l, r]| (l - 0.7).abs() < 0.02 && (r - 0.5).abs() < 0.02);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.7).abs() < 0.02 && (r - 0.5).abs() < 0.02);
         player.set_paused(true);
         assert_eq!(player.meter_levels(), [0.0; 2]);
-        player.set_meter_enabled(false);
+        player.set_meter_mode(MeterMode::Off);
         player.set_paused(false);
         let filters = player.audio_filter();
         assert!(!filters.contains("astats") && filters.contains("volume=-6.0dB"), "{filters}");
@@ -1168,14 +1220,43 @@ mod tests {
         player.load(&left_only).unwrap();
         wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
         player.prepare_next(&mono, "", "mono", false).unwrap();
-        player.set_meter_enabled(true); // Include the already prepared, paused deck.
-        wait_for_levels(&mut player, |[l, r]| (l - 0.8).abs() < 0.02 && r == 0.0);
+        player.set_meter_mode(MeterMode::Stereo); // Include the already prepared, paused deck.
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.8).abs() < 0.02 && r == 0.0);
         // Left stays at full source level while both decks contribute;
         // right is silent on the outgoing track and rises with the mono deck.
-        wait_for_levels(&mut player, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.7).abs() < 0.02);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| (l - 0.8).abs() < 0.02 && (r - 0.7).abs() < 0.02);
         assert!(player.fade.is_some());
         player.stop();
         assert_eq!(player.meter_levels(), [0.0; 2]);
+    }
+
+    #[test]
+    fn frequency_spectrum_separates_mono_bass_and_right_only_treble_across_decks() {
+        let low = serve_wav(frequency_wav(4.0, 8000, 62.5, &[16384.0]));
+        let high = serve_wav(frequency_wav(6.0, 48000, 8000.0, &[0.0, 16384.0]));
+        let mut player = open_null();
+        player.set_volume(1.0);
+        player.set_crossfade(1.5, false);
+        player.load(&low).unwrap();
+        wait_until(&mut player, |s| s.phase == PlaybackPhase::Playing);
+        assert_eq!(player.spectrum_levels(), [0.0; 10]);
+        player.prepare_next(&high, "", "treble", false).unwrap();
+        player.set_meter_mode(MeterMode::Spectrum);
+        assert_eq!(player.meter_levels(), [0.0; 2]);
+        wait_for_levels(&mut player, Player::spectrum_levels, |v| v[1] > 0.65 && v[8] < 0.05);
+        wait_for_levels(&mut player, Player::spectrum_levels, |v| v[1] > 0.45 && v[8] > 0.45);
+        assert!(player.fade.is_some());
+        wait_for_levels(&mut player, Player::spectrum_levels, |v| v[8] > 0.65 && v[1] < 0.05);
+        player.set_paused(true);
+        assert_eq!(player.spectrum_levels(), [0.0; 10]);
+        player.set_meter_mode(MeterMode::Stereo);
+        player.set_paused(false);
+        wait_for_levels(&mut player, Player::meter_levels, |[l, r]| l == 0.0 && r > 0.85);
+        assert_eq!(player.spectrum_levels(), [0.0; 10]);
+        player.set_meter_mode(MeterMode::Off);
+        assert!(!player.audio_filter().contains("astats"));
+        assert!(player.spectrum_tap.is_none());
+        player.stop();
     }
 
     fn tone_wav(seconds: f32) -> Vec<u8> {
@@ -1187,6 +1268,10 @@ mod tests {
     }
 
     fn tone_channels_wav(seconds: f32, rate: u32, amplitudes: &[f32]) -> Vec<u8> {
+        frequency_wav(seconds, rate, 440.0, amplitudes)
+    }
+
+    fn frequency_wav(seconds: f32, rate: u32, hz: f32, amplitudes: &[f32]) -> Vec<u8> {
         let channels = amplitudes.len() as u16;
         let stride = channels * 2;
         let samples = (rate as f32 * seconds) as u32;
@@ -1206,7 +1291,7 @@ mod tests {
         bytes.extend(data_bytes.to_le_bytes());
         for i in 0..samples {
             let t = i as f32 / rate as f32;
-            let sample = (t * 440.0 * std::f32::consts::TAU).sin();
+            let sample = (t * hz * std::f32::consts::TAU).sin();
             for amplitude in amplitudes {
                 bytes.extend(((sample * amplitude) as i16).to_le_bytes());
             }
