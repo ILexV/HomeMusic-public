@@ -379,7 +379,13 @@ impl State {
                         crate::append_playables(&self.ctx.queue, &batch.tracks);
                         self.ctx.refresh_queue();
                         if let Some(ui) = self.ctx.ui.upgrade() { crate::record_playback(&ui, &self.ctx.hub, &self.ctx.queue.borrow(), &self.ctx.player.borrow().snapshot(), true); }
-                        self.status(if batch.tracks.is_empty() { "Настройки применены. Полные записи ещё готовятся; текущая песня сохранена." } else { "Настройки применены к следующим песням; текущая не перезапущена." });
+                        self.status(if !batch.tracks.is_empty() {
+                            "Настройки применены к следующим песням; текущая не перезапущена."
+                        } else if batch.pending {
+                            "Настройки применены. Полные записи ещё готовятся; текущая песня сохранена."
+                        } else {
+                            "Настройки применены. Нет доступных полных записей; текущая песня сохранена."
+                        });
                     }
                 }
             }

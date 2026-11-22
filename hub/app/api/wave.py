@@ -61,7 +61,7 @@ async def similar(ref: str = Query(min_length=4, max_length=64, pattern=r"^(nd|d
 @router.post("/start", response_model=WaveOut)
 async def start(body: WaveStartIn | None = None, user: User = Depends(current_user),
                 s: AsyncSession = Depends(get_session, scope="function")):
-    """A new wave: the user's own, or from a track / an artist. The first 5 tracks (the seed first)."""
+    """Start a personal, genre, track or artist wave. Only ready full recordings are handed out."""
     body = body or WaveStartIn()
     try:
         b = await wave.start(user, body.seed.model_dump(exclude_none=True) if body.seed else None, body.mode,

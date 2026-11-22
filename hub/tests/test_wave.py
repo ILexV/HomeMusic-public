@@ -8,6 +8,7 @@ test_mix_sources.py); Navidrome is the mock of test_mixes.py.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -270,6 +271,132 @@ async def test_nothing_to_start_from(env) -> None:
     r = await env["client"].post("/api/wave/start", json={})
 
     assert r.status_code == 409, r.text
+
+
+@pytest.mark.parametrize("model", ["v1", "v2"])
+async def test_genre_wave_feedback_and_refills_survive_restart(env, monkeypatch, model):
+    from app import listen
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings().cfg.mixes, "taste_model", model)
+    c = env["client"]
+    stray = fake_sources(monkeypatch, [tr(9999)], radio=[tr(9998)])
+    calls = []
+    first_page = [tr(i) for i in range(5000, 5004)]
+
+    async def genre_tracks(genre, page):
+        calls.append((genre, page))
+        return [first_page, first_page, [tr(6000), tr(6001)], []][page]
+
+    async def prepare(uid, refs, *, timeout_s):
+        return {ref: "unavailable" if ref == "dz:5002" else "ready" for ref in refs}
+
+    monkeypatch.setattr(wave, "genre_tracks", genre_tracks)
+    monkeypatch.setattr(listen, "prepare_full", prepare)
+    assert (await c.post("/api/dislikes", json={"ref": "dz:5003"})).status_code == 200
+    seed = {"genre": "classical"}
+    response = await c.post("/api/wave/start", json={"seed": seed})
+    assert response.status_code == 200, response.text
+    first = response.json()
+    sid = first["session_id"]
+    assert (first["seed"], first["title"]) == (seed, "Моя волна: Классика")
+    assert [t["ref"] for t in first["tracks"]] == ["dz:5000", "dz:5001"]
+    assert {t["generator"] for t in first["tracks"]} == {"genre"}
+    assert first["preparation"]["unavailable"] == 1
+    await wave.settle(sid)  # the next station only had duplicates; it does not mean EOF
+    await wave.reset()
+
+    played = [ev("start", "dz:5000"), ev("like", "dz:5000"), ev("finish", "dz:5000", 200),
+              ev("start", "dz:5001"), ev("skip", "dz:5001", 10)]
+    response = await c.post(f"/api/wave/{sid}/next", json={"played": played})
+    assert response.status_code == 200, response.text
+    assert response.json()["recorded"]["accepted"] == len(played) and response.json()["pending"]
+    await wave.settle(sid)
+    rt = wave._rt[sid]
+    assert "dz:5000" in rt.state.pos and "dz:5001" in rt.state.neg and not rt.state.radios
+    response = await c.post(f"/api/wave/{sid}/next", json={})
+    assert response.status_code == 200, response.text
+    more = response.json()
+    assert (more["seed"], more["title"]) == (seed, first["title"])
+    assert {t["ref"] for t in more["tracks"]} == {"dz:6000", "dz:6001"}
+    assert {t["generator"] for t in more["tracks"]} == {"genre"}
+    await wave.settle(sid)
+    await wave.reset()
+    end = await c.post(f"/api/wave/{sid}/next", json={"played": [ev("start", t["ref"]) for t in more["tracks"]]})
+    assert end.status_code == 200, end.text
+    assert not end.json()["tracks"] and not end.json()["pending"]
+    assert set(wave._rt[sid].state.gens) == {"genre"}
+    assert calls == [("classical", i) for i in range(4)] and stray == {"seed": [], "radio": []}
+
+
+async def test_genre_wave_late_page_stays_in_its_own_session(env, monkeypatch):
+    from app.config import get_settings
+
+    gate = asyncio.Event()
+    calls = []
+
+    async def delayed(genre, page):
+        calls.append((genre, page))
+        if page:
+            return []
+        if genre == "jazz":
+            await gate.wait()
+        return [tr(6000 if genre == "jazz" else 5000)]
+
+    monkeypatch.setattr(wave, "genre_tracks", delayed)
+    monkeypatch.setattr(get_settings(), "wave_wait_s", 0.02)
+    c = env["client"]
+    jazz = (await c.post("/api/wave/start", json={"seed": {"genre": "jazz"}})).json()
+    rock = (await c.post("/api/wave/start", json={"seed": {"genre": "rock"}})).json()
+    assert jazz["session_id"] != rock["session_id"] and jazz["pending"] and not jazz["tracks"]
+    assert [t["ref"] for t in rock["tracks"]] == ["dz:5000"]
+    jazz_url = f"/api/wave/{jazz['session_id']}/next"
+    assert (await c.post(jazz_url, json={})).json()["pending"]
+    gate.set()
+    await wave.settle(jazz["session_id"])
+    resumed = (await c.post(jazz_url, json={})).json()
+    assert resumed["title"] == "Моя волна: Джаз" and [t["ref"] for t in resumed["tracks"]] == ["dz:6000"]
+    await wave.settle(jazz["session_id"])
+    await wave.settle(rock["session_id"])
+    assert sorted(calls) == [("jazz", 0), ("jazz", 1), ("rock", 0), ("rock", 1)]
+
+
+@pytest.mark.parametrize("source", ["empty", "unavailable", "error"])
+async def test_genre_wave_empty_batches_stop_polling(env, monkeypatch, source):
+    from app import listen
+
+    pages = []
+    stray = fake_sources(monkeypatch, [tr(9999)])
+
+    async def genre_tracks(genre, page):
+        pages.append(page)
+        if source == "error":
+            raise OSError("catalog unavailable")
+        return [] if source == "empty" else [tr(5000 + page)]
+
+    async def unavailable(uid, refs, *, timeout_s):
+        return dict.fromkeys(refs, "unavailable")
+
+    monkeypatch.setattr(wave, "genre_tracks", genre_tracks)
+    monkeypatch.setattr(listen, "prepare_full", unavailable)
+    c = env["client"]
+    response = await c.post("/api/wave/start", json={"seed": {"genre": "pop"}})
+    assert response.status_code == 200, response.text
+    batch = response.json()
+    sid = batch["session_id"]
+    for _ in range(wave.REFILL_SEEDS + 2):
+        assert not batch["tracks"]
+        if not batch["pending"]:
+            break
+        await wave.settle(sid)
+        batch = (await c.post(f"/api/wave/{sid}/next", json={})).json()
+    assert not batch["pending"]
+    await wave.reset()
+    end = (await c.post(f"/api/wave/{sid}/next", json={})).json()
+    assert not end["tracks"] and not end["pending"]
+    attempts = wave.REFILL_SEEDS + 1
+    assert pages == {"empty": [0], "error": [0] * attempts, "unavailable": list(range(attempts))}[source]
+    assert stray == {"seed": [], "radio": []}
 
 
 async def test_a_wave_hands_out_five_and_learns_from_what_was_played(env, monkeypatch) -> None:

@@ -1,10 +1,11 @@
-"""Real Hub/SQLite for browser regressions; only the external Navidrome API is simulated.
+"""Real Hub/SQLite for browser regressions; only external providers are simulated.
 
 Run from hub/. Every invocation owns a temporary library and never reads the deployment's .env.
 The server binds loopback only. No test-only routes are installed in the production application.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import sys
@@ -20,7 +21,8 @@ from cryptography.fernet import Fernet
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ACCOUNTS = ("offline", "expiry", "alice", "bob", "handoff", "listener", "recovery", "seek", "pagination", "operator")
+ACCOUNTS = ("offline", "expiry", "alice", "bob", "handoff", "listener", "recovery", "seek", "pagination", "operator",
+            "genre", "genre-embedded")
 PASSWORD = "browser-test-password"
 ND = "http://navidrome.browser.test"
 
@@ -47,6 +49,14 @@ def navidrome(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"subsonic-response": {"status": "ok", **responses[endpoint]}})
 
 
+async def genre_radios(request: httpx.Request) -> httpx.Response:
+    # A slow catalog with no local matches gives the real Hub a pending classical/jazz session.
+    if request.url.path in {"/genre/98/radios", "/genre/129/radios"}:
+        await asyncio.sleep(5)
+        return httpx.Response(404)  # A later test run must get a new slow lookup, not a cached empty catalog.
+    return httpx.Response(200, json={"data": []})
+
+
 def run(root: Path) -> None:
     os.environ.update({
         "MUSIC_ROOT": str(root / "music"), "DATA_DIR": str(root / "data"),
@@ -54,6 +64,7 @@ def run(root: Path) -> None:
         "NAVIDROME_URL": ND, "NAVIDROME_ADMIN_USER": "alice", "NAVIDROME_ADMIN_PASSWORD": PASSWORD,
         "HUB_SECRET_KEY": Fernet.generate_key().decode(), "DISABLE_BACKGROUND": "true",
         "LLM_API_KEY": "", "EMBEDDER_URL": "", "LASTFM_API_KEY": "", "SMTP_HOST": "",
+        "WAVE_WAIT_S": "0.5",
         "OUTBOUND_PROXY": "", "OUTBOUND_PROXY_HOSTS": "", "PUBLIC_HUB_URL": "", "PUBLIC_MUSIC_URL": "",
     })
     from app import db
@@ -68,11 +79,13 @@ def run(root: Path) -> None:
     async def lifespan(application):
         with respx.mock(assert_all_called=False, assert_all_mocked=True) as external:
             external.route(host="navidrome.browser.test").mock(side_effect=navidrome)
+            external.get(host="api.deezer.com", path__regex=r"^/genre/\d+/radios$").mock(side_effect=genre_radios)
             async with original_lifespan(application):
                 library = root / "music" / "library"
                 with wave.open(str(library / "tone.wav"), "wb") as audio:
                     audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
                     audio.writeframes(b"\0\0" * 8000 * 120)
+                (library / "rock.wav").hardlink_to(library / "tone.wav")
                 async with db.session_scope() as session:
                     users = {}
                     for name in ACCOUNTS:
@@ -83,6 +96,9 @@ def run(root: Path) -> None:
                     session.add(Track(uid="browser-tone", path="tone.wav", nd_song_id="browser-tone",
                                       artist="HomeMusic test", title="Browser tone", duration_s=120,
                                       fingerprint="homemusic test|browser tone", codec="wav", source="upload"))
+                    session.add(Track(uid="browser-rock", path="rock.wav", nd_song_id="browser-rock",
+                                      artist="Genre test", title="Browser rock", genre="Rock", duration_s=120,
+                                      fingerprint="genre test|browser rock", codec="wav", source="upload"))
                     for name, user in users.items():
                         batch = DownloadBatch(user_id=user.id, origin="search")
                         session.add(batch)

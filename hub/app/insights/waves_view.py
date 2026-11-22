@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.insights import launches, names
 from app.insights.launches import History, Launch
+from app.mixes.genre_wave import GENRE_TITLES
 from app.mixes.wave import generator_title
 from app.models import WaveSession
 
@@ -17,7 +18,7 @@ NOT_RECORDED = "not_recorded"
 
 
 def seed_kind(w: WaveSession | None) -> str:
-    """`own` / `track` / `track_artist` / `artist` / `library_artist` / `file` (INSIGHTS.md 5); `unknown` for a
+    """`own` / `genre` / `track` / `track_artist` / `artist` / `library_artist` / `file`; `unknown` for a
     session known only by its events."""
     if w is None:
         return "unknown"
@@ -38,6 +39,8 @@ def seed_kind(w: WaveSession | None) -> str:
     seed = w.seed_json or {}
     if not seed:
         return "own"
+    if seed.get("genre"):
+        return "genre"
     if (seed.get("ref") or "").startswith("file:"):
         return "file"
     if seed.get("ref"):
@@ -53,6 +56,8 @@ def _seed(w: WaveSession | None) -> dict[str, Any] | None:
     if w is None or not w.seed_json:
         return None
     seed, req = w.seed_json, (w.request_json or {}).get("seed") or {}
+    if genre := seed.get("genre"):
+        return {"genre": genre, "title": GENRE_TITLES.get(genre, genre)}
     ref = seed.get("ref")
     return {"title": seed.get("title"), "artist": seed.get("artist"), "ref": ref,
             "nd_song_id": req.get("nd_song_id") or (ref[3:] if ref and ref.startswith("nd:") else None),

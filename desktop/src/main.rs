@@ -792,6 +792,19 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.set_wave_genres(hub::WAVE_GENRES.map(|(_, label)| label.into()).into());
+    let ui_genre = ui.as_weak();
+    let hub_genre = hub_state.clone();
+    ui.on_start_genre_wave(move |index| {
+        let Some(&(slug, _)) = hub::WAVE_GENRES.get(index as usize) else { return };
+        if let Some(ui) = ui_genre.upgrade() {
+            if !hub_genre.wave_busy.get() {
+                begin_wave(&ui, &hub_genre, Some(hub::WaveSeed::Genre(slug)), "home_card");
+                refresh_home(&ui, &hub_genre, hub_genre.was_playing.get());
+            }
+        }
+    });
+
     let ui_pick = ui.as_weak();
     let hub_pick = hub_state.clone();
     let player_pick = player.clone();
@@ -2224,10 +2237,8 @@ fn apply_hub_events(
                     continue;
                 }
                 hub.wave_busy.set(false);
-                if batch.tracks.is_empty() || batch.session_id.is_empty() {
-                    *hub.hub_note.borrow_mut() = format!("Волна пока не готова: попробуйте чуть позже. {}", batch.notice);
-                } else {
-                    *hub.hub_note.borrow_mut() = batch.notice.clone();
+                *hub.hub_note.borrow_mut() = batch.notice.clone();
+                if !batch.tracks.is_empty() && !batch.session_id.is_empty() {
                     cancel_queue_load(ui, hub);
                     *hub.wave.borrow_mut() = hub::WaveLive {
                         id: batch.session_id.clone(),
@@ -2235,18 +2246,13 @@ fn apply_hub_events(
                         origin,
                         pending: Vec::new(),
                         asking: false,
-                        preferences: batch.preferences.clone(),
-                        notice: batch.notice.clone(),
+                        preferences: batch.preferences,
+                        notice: batch.notice,
                         retry_at: None,
                         exhausted: false,
                     };
                     *hub.album_id.borrow_mut() = String::new();
-                    let name = if batch.title.is_empty() {
-                        "Моя волна".into()
-                    } else {
-                        batch.title.clone()
-                    };
-                    let mut next = queue_from_playables(&name, &batch.tracks);
+                    let mut next = queue_from_playables(&batch.title, &batch.tracks);
                     next.set_context(format!("wave:{}", batch.session_id));
                     let moved = next.select(0);
                     next.inherit_preferences(&queue.borrow());
@@ -2259,8 +2265,11 @@ fn apply_hub_events(
                     continue;
                 }
                 hub.wave.borrow_mut().asking = false;
-                hub.wave.borrow_mut().preferences = batch.preferences.clone();
-                hub.wave.borrow_mut().notice = batch.notice.clone();
+                if batch.tracks.is_empty() && !hub.wave_busy.get() {
+                    hub.hub_note.borrow_mut().clone_from(&batch.notice);
+                }
+                hub.wave.borrow_mut().preferences = batch.preferences;
+                hub.wave.borrow_mut().notice = batch.notice;
                 hub.wave.borrow_mut().retry_at = Some(Instant::now() + Duration::from_secs(3));
                 hub.wave.borrow_mut().exhausted = batch.tracks.is_empty() && !batch.pending;
                 let at_end = {
@@ -2278,7 +2287,6 @@ fn apply_hub_events(
             }
             HubEvent::WaveFailed { message, played, session } => {
                 if hub.wave.borrow().id != session { continue; }
-                hub.wave_busy.set(false);
                 hub.wave.borrow_mut().asking = false;
                 hub.wave.borrow_mut().retry_at = Some(Instant::now() + Duration::from_secs(15));
                 hub.wave.borrow_mut().pending.extend(played);
@@ -2466,6 +2474,7 @@ fn show_library_pane(ui: &AppWindow, hub: &HubState) {
 }
 
 fn refresh_home(ui: &AppWindow, hub: &HubState, playing: bool) {
+    ui.set_wave_start_busy(hub.wave_busy.get());
     let pane = hub.pane.get();
     if pane == home::Pane::Library {
         ui.set_home_open(false);
@@ -2653,6 +2662,7 @@ fn begin_wave(ui: &AppWindow, hub: &HubState, seed: Option<hub::WaveSeed>, origi
     cancel_queue_load(ui, hub);
     let ticket = hub.queue_generation.get();
     hub.wave_busy.set(true);
+    ui.set_wave_start_busy(true);
     let client = Arc::clone(&hub.hub);
     let events = Arc::clone(&hub.events);
     let personal = seed.is_none();
@@ -3159,6 +3169,7 @@ fn row_duration(item: &queue::Item) -> String {
 fn cancel_queue_load(ui: &AppWindow, hub: &HubState) {
     hub.queue_generation.set(hub.queue_generation.get().wrapping_add(1));
     hub.wave_busy.set(false);
+    ui.set_wave_start_busy(false);
     ui.set_queue_busy(false);
     ui.set_queue_error(String::new().into());
 }

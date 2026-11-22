@@ -6,6 +6,7 @@ after every action.
   session's own skips and likes. Started from a track or an artist («Волна по треку») the pool comes from that
   seed's radios and the seed plays first; without one — from the taste profile, as a mix. A wave by a Navidrome
   artist (the app's «Радиостанции») adds the artist's library songs to its Deezer radios; its artist plays once in 3.
+  A genre seed needs no listening history; only pages of that genre enter its pool, including after feedback.
 - Every `next` brings the events since the previous one and picks again: an early skip (< 30 s) or «Не нравится»
   lowers the artist and what sounds like the track (the embedder's vectors); a ♥ or a track played to its end adds
   its YouTube Music radio to the pool (`session_radio`) and raises what sounds like it. An artist plays at most once
@@ -46,6 +47,7 @@ from app.jobs.queue import enqueue, notify
 from app.library.owned import ACTIVE_STATUSES
 from app.matching.normalize import fingerprint
 from app.mixes import build, embedder, recent_offers, sources
+from app.mixes.genre_wave import GENRE_TITLES, genre_tracks
 from app.mixes.resolve import catalog_track, library_track
 from app.mixes.taste import Profile, TasteTrack, artist_key, build_profile, skip_weight
 from app.mixes.taste_math import V2Profile, saturation
@@ -66,11 +68,12 @@ SOUND_WEIGHT = 1.0  # × (closeness to the session's likes − to its skips)
 QUEUED_BONUS = 0.3  # a track the client has queued already is not swapped for a hair better one
 SESSION_RADIO = "session_radio"
 ARTIST_SONGS = "artist_songs"
+GENRE = "genre"
 ARTIST_SONGS_MAX = 60  # the seed artist's library songs put in the pool
 ARTIST_ALBUMS_MAX = 30  # ... read from this many of their albums
-SESSION_WEIGHTS = {"seed": 10.0, SESSION_RADIO: 1.2, ARTIST_SONGS: 1.2}
+SESSION_WEIGHTS = {"seed": 10.0, SESSION_RADIO: 1.2, ARTIST_SONGS: 1.2, GENRE: 1.0}
 TITLES = {"seed": "С чего началась волна", SESSION_RADIO: "Похоже на понравившееся",
-          ARTIST_SONGS: "Песни исполнителя"}
+          ARTIST_SONGS: "Песни исполнителя", GENRE: "Из выбранного жанра"}
 IDLE = timedelta(hours=24)  # a session not asked for this long is over
 KEEP = timedelta(days=7)  # ... and this long: its state is cleared to a summary (`CLEARED_KEYS`), the row stays
 CLEARED_KEYS = ("version", "taste_model", "gens", "started", "started_familiar", "skips", "seeds_used", "downloads")
@@ -155,6 +158,7 @@ class State:
     unavailable: set[str] = field(default_factory=set)
     refills_since_play: int = 0
     more_to_prepare: bool = False
+    genre_page: int | None = None  # next 0-based source page; None when exhausted or not a genre wave
 
     def dump(self) -> dict[str, Any]:
         return {"version": self.version, "taste_model": self.taste_model, "seen": sorted(self.seen),
@@ -166,7 +170,8 @@ class State:
                 "gens": self.gens, "seed_artist": self.seed_artist, "preferences": self.preferences,
                 "preferences_status": self.preferences_status, "preparation": self.preparation,
                 "awaiting_seed": self.awaiting_seed, "unavailable": sorted(self.unavailable),
-                "refills_since_play": self.refills_since_play, "more_to_prepare": self.more_to_prepare}
+                "refills_since_play": self.refills_since_play, "more_to_prepare": self.more_to_prepare,
+                "genre_page": self.genre_page}
 
     @classmethod
     def load(cls, d: dict[str, Any]) -> State:
@@ -184,7 +189,7 @@ class State:
                  preparation=d.get("preparation") or {"ready": 0, "pending": 0, "unavailable": 0},
                  awaiting_seed=d.get("awaiting_seed"), unavailable=set(d.get("unavailable") or []),
                  refills_since_play=int(d.get("refills_since_play") or 0),
-                 more_to_prepare=bool(d.get("more_to_prepare")))
+                 more_to_prepare=bool(d.get("more_to_prepare")), genre_page=d.get("genre_page"))
         st.pool = {c.track.ref: c for c in map(cand_of, d.get("pool") or [])}
         st.out = {c.track.ref: c for c in map(cand_of, d.get("out") or [])}
         st.played = [Played(**p) for p in d.get("played") or []]
@@ -212,6 +217,7 @@ class Runtime:
     save: Callable[[str, Runtime], Awaitable[None]] | None = None
     download_finished: bool = True
     blocked: Callable[[build.Cand], bool] | None = None  # candidates the session never takes (its own songs...)
+    genre: str | None = None  # immutable session seed, restored from WaveSession.seed_json
 
 
 _rt: dict[str, Runtime] = {}
@@ -231,7 +237,8 @@ async def _runtime(sid: str, user: User) -> Runtime:
             row = await s.get(WaveSession, sid)
             if row is None or row.user_id != user.id or row.updated_at < utcnow() - IDLE:
                 raise WaveError(404, "Волна закончилась: запустите новую")
-            rt = Runtime(user_id=user.id, mode=row.mode, state=State.load(row.state_json or {}))
+            rt = Runtime(user_id=user.id, mode=row.mode, state=State.load(row.state_json or {}),
+                         genre=(row.seed_json or {}).get("genre"))
             if "seen" not in (row.state_json or {}):
                 # Legacy state has no event ledger. Preserve its already-saved learning
                 # rather than applying the old journal again when an offline client retries.
@@ -303,6 +310,10 @@ def generators(p: Profile, seed: CatalogTrack | None, seed_artist: dict[str, Any
     return build.generators(p, seeds)
 
 
+def _genre_generators(genre: str, page: int) -> dict[str, build.Gen]:
+    return {GENRE: lambda: genre_tracks(genre, page)}
+
+
 def refill_generators(p: Profile, st: State) -> dict[str, build.Gen]:
     """More of the pool: the radios of the next profile seeds the session has not used (round and round)."""
     cfg = get_settings().cfg.mixes
@@ -333,6 +344,9 @@ async def absorb(rt: Runtime, results: list[build.GenResult]) -> int:
     st = rt.state
     for r in results:
         g = st.gens.setdefault(r.name, {"tracks": 0, "seconds": 0.0})
+        if r.name == GENRE and st.genre_page is not None and r.error is None:
+            # A cancelled or failed request is not EOF: retry this page within the no-play refill budget.
+            st.genre_page = st.genre_page + 1 if r.tracks else None
         g["tracks"] += len(r.tracks)
         g["seconds"] = round(g["seconds"] + r.seconds, 2)
         if r.error:
@@ -420,20 +434,27 @@ async def _late(sid: str, rt: Runtime, task: asyncio.Task) -> None:
 
 
 def _refill(sid: str, rt: Runtime) -> None:
-    """The pool runs low: the radios of the next seeds, in the background."""
-    if rt.refilling or rt.profile is None:
+    """Fetch the next genre page or the radios of the next profile seeds in the background."""
+    if rt.refilling or rt.profile is None or rt.state.refills_since_play >= REFILL_SEEDS:
         return
-    v2 = isinstance(rt.profile, V2Profile)
     profile = rt.profile
+    v2 = rt.genre is None and isinstance(profile, V2Profile)
     chosen = []
-    if v2:
+    if rt.genre is not None:
+        if rt.state.genre_page is None or rt.tasks:
+            return  # exhausted, or an initial page is still answering
+        gens = _genre_generators(rt.genre, rt.state.genre_page)
+    elif v2:
+        gens = {}
         pool = [t for t in profile.seeds(get_settings().cfg.mixes.seeds * 4) if t.key not in rt.state.seeds_used]
         if not pool:
             rt.state.seeds_used.clear()
             pool = profile.seeds(get_settings().cfg.mixes.seeds * 4)
         chosen = pool[:REFILL_SEEDS]
         rt.state.seeds_used.extend(t.key for t in chosen)
-    gens = {} if v2 else refill_generators(rt.profile, rt.state)
+    else:
+        gens = refill_generators(profile, rt.state)
+    rt.state.refills_since_play += 1
     if not gens and not v2:
         return
     rt.refilling = True
@@ -881,7 +902,7 @@ async def learn(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
             x = Played(ref, data.get("handed_nd") or data.get("nd_song_id"), data["key"], data["artist"],
                        bool(data.get("familiar")), track=data["track"])
             await _download(sid, rt, x)
-        if ref not in st.radios:
+        if rt.genre is None and ref not in st.radios:
             st.radios.append(ref)
             t = CatalogTrack.model_validate(data["track"])
             radios.append((SESSION_RADIO, lambda t=t: radio_of(t)))
@@ -961,6 +982,8 @@ async def record(s: AsyncSession, sid: str, user_id: int, raw: list[Any]):
 def title_of(seed: dict[str, Any] | None) -> str:
     if not seed:
         return "Моя волна"
+    if genre := seed.get("genre"):
+        return f"Моя волна: {GENRE_TITLES[genre]}"
     return f"Волна по треку «{seed.get('title')}»" if seed.get("ref") else f"Волна: {seed.get('artist')}"
 
 
@@ -1171,14 +1194,15 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
     async with session_scope() as s:
         await clear_old(s)
         mode = mode or (await settings_of(s, user.id)).mode
-    seed_track, seed_artist = await _seed(seed, user) if seed else (None, None)
+    genre = seed.get("genre") if seed else None
+    seed_track, seed_artist = await _seed(seed, user) if seed and genre is None else (None, None)
     async with session_scope() as s:
         profile = await build_profile(s, user, model=cfg.taste_model)
     if isinstance(profile, V2Profile):
         from app.mixes.taste_select import prepare
         await prepare(profile)
     seeds: list[TasteTrack] = []
-    if seed_track is None and seed_artist is None:
+    if genre is None and seed_track is None and seed_artist is None:
         if isinstance(profile, V2Profile):
             from app.mixes.taste_select import seeds as select_seeds
             seeds = await select_seeds(profile, cfg.seeds)
@@ -1187,17 +1211,24 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
         if profile.empty or not seeds:
             raise WaveError(409, "Волне не от чего оттолкнуться: послушайте что-нибудь или выберите исполнителей")
     sid = uuid.uuid4().hex[:16]
-    rt = Runtime(user_id=user.id, mode=mode, state=State(taste_model=cfg.taste_model,
-                 preferences=WavePreferences.model_validate(preferences or {}).model_dump()), profile=profile)
+    rt = Runtime(user_id=user.id, mode=mode, genre=genre, profile=profile,
+                 state=State(taste_model=cfg.taste_model, genre_page=0 if genre is not None else None,
+                             preferences=WavePreferences.model_validate(preferences or {}).model_dump()))
     rt.state.seeds_used = [t.key for t in seeds]
     rt.state.seed_artist = artist_key(seed_artist["name"]) if seed_artist else None
-    seed_json = ({"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title} if seed_track
-                 else {k: v for k, v in (("artist_ref", seed_artist.get("ref")), ("artist", seed_artist["name"]),
-                                         ("nd_artist_id", seed_artist.get("nd_artist_id"))) if v}
-                 if seed_artist else None)
+    if genre is not None:
+        seed_json = {"genre": genre}
+    elif seed_track:
+        seed_json = {"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title}
+    elif seed_artist:
+        seed_json = {k: v for k, v in (("artist_ref", seed_artist.get("ref")), ("artist", seed_artist["name"]),
+                                       ("nd_artist_id", seed_artist.get("nd_artist_id"))) if v}
+    else:
+        seed_json = None
     async with session_scope() as s:
-        s.add(WaveSession(id=sid, user_id=user.id, mode=mode, seed_json=seed_json, state_json={}, origin=origin,
-                          client=client, restart_of=restart_of, taste_model=cfg.taste_model, request_json=request))
+        s.add(WaveSession(id=sid, user_id=user.id, mode=mode, seed_json=seed_json, state_json=rt.state.dump(),
+                          origin=origin, client=client, restart_of=restart_of, taste_model=cfg.taste_model,
+                          request_json=request))
     _rt[sid] = rt
     async with rt.lock:
         first = None
@@ -1210,8 +1241,9 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
             first.score = build.score(first, weights(), profile)
         if first is not None:
             rt.state.heard.add(fp_of(first))  # the radios' copies of the seed stay out
-        await _gather(sid, rt, list(generators(profile, seed_track, seed_artist, seeds).items()),
-                      lambda: len(rt.state.pool) >= 4 * BATCH)
+        gens = (_genre_generators(genre, 0) if genre is not None else
+                generators(profile, seed_track, seed_artist, seeds))
+        await _gather(sid, rt, list(gens.items()), lambda: len(rt.state.pool) >= 4 * BATCH)
         tracks = await _hand_out(sid, rt, set(), first)
         pending = bool(rt.tasks) or rt.state.preparation["pending"] > 0 or rt.state.more_to_prepare
     return Batch(sid, title_of(seed_json), mode, seed_json, tracks, pending,
@@ -1242,9 +1274,8 @@ async def next_batch(user: User, sid: str, played: list[Any], queued: list[str],
             st.preferences = WavePreferences.model_validate(preferences).model_dump()
         # No actual playback between calls: try only a bounded number of new source batches.
         # Repeated empty/all-unavailable results must not keep clients polling forever.
-        if len(st.pool) < POOL_LOW and not rt.refilling and st.refills_since_play < REFILL_SEEDS:
+        if rt.genre is None and len(st.pool) < POOL_LOW:
             _refill(sid, rt)
-            st.refills_since_play += 1
         tracks = await _hand_out(sid, rt, {q for q in queued if q in st.out})
         pending = bool(rt.tasks) or st.preparation["pending"] > 0 or st.more_to_prepare
     return Batch(sid, title_of(seed_json), rt.mode, seed_json, tracks, pending, recorded,
@@ -1392,6 +1423,9 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
             c.explanation.append("Приоритет исполнителя временно снижен на 30 дней")
         st.pool.pop(c.track.ref, None)
         st.out[c.track.ref] = c
+    # Use the result of the eligibility and full-recording checks: even a large page may have no playable tracks.
+    if rt.genre is not None and (not tracks or len(st.pool) < POOL_LOW):
+        _refill(sid, rt)
     await _save(sid, rt)
     try:
         async with session_scope() as s:

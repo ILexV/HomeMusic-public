@@ -48,7 +48,7 @@ export function PlayerPage() {
   const canPrev = useListen(hasPrev);
   const [scrub, setScrub] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
-  const { starting } = useWave();
+  const { starting, id: waveId, title: waveTitle } = useWave();
 
   if (!track)
     return (
@@ -84,7 +84,7 @@ export function PlayerPage() {
     <div className="pt-safe mx-auto flex min-h-dvh max-w-2xl flex-col">
       <div className="flex min-h-14 items-center gap-1 px-2">
         <IconButton icon="down" label="Свернуть" onClick={() => goBack('/home')} />
-        <div className="min-w-0 flex-1 text-center text-xs uppercase tracking-wide text-muted">{contextLabel(context)}</div>
+        <div className="min-w-0 flex-1 text-center text-xs uppercase tracking-wide text-muted">{waveTitle && context === `wave:${waveId}` ? waveTitle : contextLabel(context)}</div>
         <TrackMenuButton track={{ ...track, nd_song_id: info?.nd_song_id }} inPlayer />
       </div>
       <PlaybackDevices />

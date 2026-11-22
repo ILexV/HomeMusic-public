@@ -1,4 +1,4 @@
-import { Button } from "std-widgets.slint";
+import { Button, ComboBox } from "std-widgets.slint";
 import { AlbumMenu, TrackList } from "item-menus.slint";
 import { CatalogRow, CoverArt, NowPlayingArt, StereoLevels, VisualizationMode, EmptyNote, EqButton, Glyph, PlaybackActions, PlaybackStatus, ScrollPort, SearchField, SeekBar, Theme, TrackActions, TransportButton, VolumeBar } from "theme.slint";
 import { AlbumDetail } from "album.slint";
@@ -249,6 +249,8 @@ export component Large inherits Rectangle {
     in property <[HomeRow]> home-rows;
     in property <[HomeRow]> home-features;
     in property <[HomeSection]> home-sections;
+    in property <[string]> wave-genres;
+    in property <bool> wave-start-busy;
     in property <[QueueItem]> queue;
     in property <int> current-queue-row: -1;
     in property <string> queue-title;
@@ -313,6 +315,7 @@ export component Large inherits Rectangle {
     callback open-album(int);
     callback navigate(string);
     callback pick-home(int);
+    callback start-genre-wave(int);
 
     private property <bool> newest-expanded;
     private property <length> home-scroll-y;
@@ -467,6 +470,17 @@ export component Large inherits Rectangle {
                                     width: (features.width - 12px) / 2;
                                     item: item;
                                     clicked => { root.pick-home(item.source); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+                                Text { text: "Волна по жанру"; color: Theme.text; font-size: 13px; }
+                                genre := ComboBox { model: root.wave-genres; horizontal-stretch: 1; }
+                                Button {
+                                    text: "Запустить";
+                                    enabled: !root.wave-start-busy && genre.current-index >= 0;
+                                    clicked => { root.start-genre-wave(genre.current-index); }
                                 }
                             }
                             for section in root.home-sections : VerticalLayout {

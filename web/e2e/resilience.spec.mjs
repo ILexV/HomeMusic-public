@@ -23,6 +23,67 @@ async function playLibrary(page, user) {
   await expect.poll(async () => Number(await page.getByRole('slider', { name: 'Перемотка', exact: true }).inputValue())).toBeGreaterThan(0);
 }
 
+test('genre wave starts distinct sessions, retries only its own pending session and keeps playing until ready', async ({ page }) => {
+  await playLibrary(page, 'genre');
+  await page.evaluate(() => { location.hash = '/home'; });
+  await expect(page.getByRole('heading', { name: 'Моя волна', exact: true })).toBeVisible();
+  const player = page.getByRole('region', { name: 'Прослушивание' });
+  const position = player.getByRole('slider', { name: 'Перемотка' });
+  const startPosition = Number(await position.inputValue());
+  const genre = page.getByRole('combobox', { name: 'Жанр волны' });
+  await expect(genre.locator('option')).toHaveText(['Без ограничения', 'Классика', 'Поп', 'Рок', 'Джаз', 'Электроника', 'Хип-хоп']);
+
+  const launch = async (slug, label, path) => {
+    await genre.selectOption(slug);
+    const [r] = await Promise.all([
+      page.waitForResponse((r) => new URL(r.url()).pathname === path && r.request().method() === 'POST'),
+      page.getByRole('button', { name: `Моя волна: ${label}: слушать`, exact: true }).click(),
+    ]);
+    expect(r.status()).toBe(200);
+    const body = r.request().postDataJSON();
+    if (path.endsWith('/start')) expect(body.seed).toEqual({ genre: slug });
+    else expect(body).not.toHaveProperty('seed');
+    const wave = await r.json();
+    expect(wave).toMatchObject({ seed: { genre: slug }, title: `Моя волна: ${label}` });
+    return wave;
+  };
+  const start = '/api/wave/start';
+  const classical = await launch('classical', 'Классика', start);
+  expect(classical).toMatchObject({ tracks: [], pending: true });
+  await expect(player.getByText('Browser tone', { exact: true })).toBeVisible();
+
+  // Switching surfaces must not carry the classical pending id into the jazz start.
+  await page.evaluate(() => { location.hash = '/search'; });
+  const jazz = await launch('jazz', 'Джаз', start);
+  expect(jazz.session_id).not.toBe(classical.session_id);
+  expect(jazz).toMatchObject({ tracks: [], pending: true });
+  expect((await launch('jazz', 'Джаз', `/api/wave/${jazz.session_id}/next`)).session_id).toBe(jazz.session_id);
+  await expect(player.getByText('Browser tone', { exact: true })).toBeVisible();
+  await expect.poll(async () => Number(await position.inputValue())).toBeGreaterThan(startPosition);
+
+  const rock = await launch('rock', 'Рок', start);
+  expect(rock.session_id).not.toBe(jazz.session_id);
+  expect(rock.tracks[0].ref).toBe('nd:browser-rock');
+  await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
+  await openPlayer(page);
+  await expect(page.getByText('Моя волна: Рок', { exact: true })).toBeVisible();
+});
+
+test('embedded genre wave sends the catalog choice to the Hub and plays a ready track', async ({ page }) => {
+  await login(page, 'genre-embedded', '/search');
+  await page.goto('/?embedded=1#/search');
+  await page.getByRole('combobox', { name: 'Жанр волны' }).selectOption('rock');
+  const [response] = await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/wave/start'),
+    page.getByRole('button', { name: 'Моя волна: Рок: слушать' }).click(),
+  ]);
+  expect(response.request().postDataJSON()).toMatchObject({ seed: { genre: 'rock' }, client: 'pwa-app', origin: 'catalog_card' });
+  expect(response.status()).toBe(200);
+  const player = page.getByRole('region', { name: 'Прослушивание' });
+  await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
+  await expect.poll(async () => Number(await player.getByRole('slider', { name: 'Перемотка' }).inputValue())).toBeGreaterThan(0);
+});
+
 test('an automatic update waits for an unsent screenshot even without message text', async ({ page }) => {
   await login(page, 'alice', '/assistant');
   await page.locator('input[type=file][accept="image/*"]').setInputFiles({

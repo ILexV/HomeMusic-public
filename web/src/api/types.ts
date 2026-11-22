@@ -1,5 +1,6 @@
 // Mirrors hub/app/api/schemas.py, hub/app/catalog/models.py and hub/app/providers/base.py.
 // Dates arrive as ISO strings ("YYYY-MM-DD" for date, ISO 8601 for datetime).
+import type { WaveGenre } from './waveGenres';
 
 export type ISODate = string;
 export type ISODateTime = string;
@@ -1027,6 +1028,7 @@ export interface TasteOnboardingOut {
 
 /** What a wave starts from («Волна по треку»): one of them. */
 export interface WaveSeedIn {
+  genre?: WaveGenre;
   ref?: string | null;
   nd_song_id?: string | null;
   artist_ref?: string | null;
@@ -1123,7 +1125,7 @@ export interface WaveOut {
   session_id: string;
   title: string;
   mode: MixMode;
-  seed?: { ref?: string; artist_ref?: string; nd_artist_id?: string; artist?: string; title?: string } | null;
+  seed?: { genre?: WaveGenre; ref?: string; artist_ref?: string; nd_artist_id?: string; artist?: string; title?: string } | null;
   /** up to 5: they replace `queued` */
   tracks: WaveTrackOut[];
   /** sources still answer: an empty `tracks` — ask again in a few seconds */

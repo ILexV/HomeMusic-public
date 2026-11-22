@@ -148,7 +148,8 @@ export function useWave() {
   return useSyncExternalStore(subscribe, () => snapshot);
 }
 
-export const seedKey = (seed?: WaveSeedIn | null) => (seed?.by_artist ? 'artist:' : '') + (seed?.ref ?? seed?.nd_song_id ?? seed?.artist_ref ?? seed?.nd_artist_id ?? '');
+export const seedKey = (seed?: WaveSeedIn | null) => seed?.genre ? `genre:${seed.genre}` :
+  (seed?.by_artist ? 'artist:' : '') + (seed?.ref ?? seed?.nd_song_id ?? seed?.artist_ref ?? seed?.nd_artist_id ?? '');
 
 type SeedTrack = { ref?: string | null; nd_song_id?: string | null; artist_ref?: string | null };
 export function trackSeed(t: SeedTrack): WaveSeedIn | null {
@@ -193,7 +194,7 @@ function remember(s: Session, w: WaveOut) {
   }
 }
 
-/** Starts the user's own wave, or one from a track or an artist («Волна по треку»). `origin` — where it was started
+/** Starts the user's own wave, or one from a genre, track or artist. `origin` — where it was started
  * (INSIGHTS.md 6.3: analytics only, the Hub keeps it with the session). */
 export async function startWave(seed: WaveSeedIn | null | undefined, origin: WaveOrigin): Promise<boolean> {
   if (starting !== null) return false;

@@ -1,8 +1,9 @@
 import { toggle, useListen } from '../lib/listen';
-import { canWave, startWave, useWave } from '../lib/wave';
+import { canWave, startWave } from '../lib/wave';
 import { Icon } from './Icon';
 import { Spinner } from './ui';
 import { WaveGlow } from './WaveGlow';
+import { useWaveGenre, WaveGenreSelect } from './WaveGenre';
 import { WavePreferenceControls } from './WavePreferences';
 
 /** «Моя волна» as the hero of «Главная» on a computer (`useDesktop()`): no card, a living soft blob glows right on the
@@ -10,13 +11,11 @@ import { WavePreferenceControls } from './WavePreferences';
  * button sit on top of it. The blob's colors come from the current track's cover; it is bigger while the wave plays and
  * shrinks (slowly) on pause. Everywhere else `WaveCard` is used instead. */
 export function WaveHero() {
-  const { title, starting } = useWave();
-  const wave = useListen((s) => !!s.track && s.context.startsWith('wave:'));
+  const choice = useWaveGenre();
   const phase = useListen((s) => s.phase);
   const cover = useListen((s) => s.track?.cover_small_url ?? s.track?.cover_url ?? null);
   if (!canWave()) return null;
-  const busy = starting === '';
-  const on = wave && title === 'Моя волна';
+  const { busy, active: on } = choice;
   const playing = on && phase === 'playing';
   // wanted to play (loading the next track counts): the button then offers a pause
   const running = on && (playing || phase === 'loading' || phase === 'resolving');
@@ -29,7 +28,7 @@ export function WaveHero() {
     ['playing', 'Играет — подстраивается под каждый пропуск и ♥'],
     ['paused', 'На паузе — продолжим с того же места'],
   ];
-  const label = busy ? 'Моя волна: запускаем' : running ? 'Моя волна: пауза' : on ? 'Моя волна: продолжить' : 'Моя волна: слушать';
+  const label = `${choice.label}: ${busy ? 'запускаем' : running ? 'пауза' : on ? 'продолжить' : 'слушать'}`;
 
   return (
     <>
@@ -43,7 +42,7 @@ export function WaveHero() {
         style={{ maskImage: fade, WebkitMaskImage: fade }}
       />
       <div className="relative flex flex-col items-center text-center text-white" style={{ textShadow: '0 1px 14px rgba(0,0,0,.6)' }}>
-        <h2 className="text-2xl font-bold">Моя волна</h2>
+        <h2 className="text-2xl font-bold">{choice.label}</h2>
         {/* A fixed-size slot: the captions cross-fade in place, so neither the title nor the button ever moves. */}
         <div className="relative mt-1 h-10 w-80 max-w-full text-sm leading-snug text-white/80">
           {captions.map(([key, text]) => (
@@ -52,10 +51,11 @@ export function WaveHero() {
             </p>
           ))}
         </div>
+        <WaveGenreSelect {...choice} />
         <button
           type="button"
-          onClick={() => (on ? toggle() : void startWave(null, 'home_card'))}
-          disabled={starting !== null}
+          onClick={() => (on ? toggle() : void startWave(choice.seed, 'home_card'))}
+          disabled={choice.disabled}
           aria-label={label}
           className="mt-3 inline-flex h-14 w-14 items-center justify-center rounded-full bg-fg text-bg shadow-lg transition hover:scale-105 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white disabled:opacity-90"
           style={{ textShadow: 'none' }}

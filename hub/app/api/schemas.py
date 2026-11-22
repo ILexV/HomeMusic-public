@@ -961,19 +961,24 @@ class TasteArtistsIn(BaseModel):
 
 
 class WaveSeedIn(BaseModel):
-    """What a wave starts from: a catalog track, a known search file, a library song or an artist."""
+    """A wave can start from a track, an artist, or one genre (never combined)."""
 
     ref: str | None = Field(default=None, max_length=64)  # "dz:…", "nd:<song>" or "file:<provider>:<id>"
     nd_song_id: str | None = Field(default=None, max_length=64)
     artist_ref: str | None = Field(default=None, max_length=64)  # "dz:…"
     nd_artist_id: str | None = Field(default=None, max_length=64)  # a Navidrome artist (the app's «Радиостанции»)
+    genre: Literal["classical", "pop", "rock", "jazz", "electronic", "hiphop"] | None = None
 
     by_artist: bool = False  # resolve the artist of the supplied track
 
     @model_validator(mode="after")
     def _names_one(self) -> WaveSeedIn:
+        if self.genre is not None:
+            if self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id or self.by_artist:
+                raise ValueError("genre cannot be combined with a track or artist seed")
+            return self
         if not (self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id):
-            raise ValueError("ref, nd_song_id, artist_ref or nd_artist_id is required")
+            raise ValueError("ref, nd_song_id, artist_ref, nd_artist_id or genre is required")
         return self
 
 

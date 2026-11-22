@@ -73,9 +73,15 @@ impl Availability {
     }
 }
 
+pub(super) const WAVE_GENRES: [(&str, &str); 6] = [
+    ("classical", "Классика"), ("pop", "Поп"), ("rock", "Рок"),
+    ("jazz", "Джаз"), ("electronic", "Электроника"), ("hiphop", "Хип-хоп"),
+];
+
 pub(super) enum WaveSeed {
     Track(String),  // stable catalog, provider-file, or nd:<song> ref
     Artist(String), // Navidrome artist id
+    Genre(&'static str),
 }
 
 impl WaveSeed {
@@ -83,6 +89,7 @@ impl WaveSeed {
         match self {
             Self::Track(reference) => serde_json::json!({ "ref": reference }),
             Self::Artist(id) => serde_json::json!({ "nd_artist_id": id }),
+            Self::Genre(slug) => serde_json::json!({ "genre": slug }),
         }
     }
 }
@@ -926,16 +933,21 @@ pub fn parse_mix_today(value: &Value) -> MixSnapshot {
 }
 
 pub fn parse_wave(value: &Value) -> WaveBatch {
+    let title = value["title"].as_str().filter(|s| !s.is_empty()).unwrap_or("Моя волна");
+    let tracks = playables(value.get("tracks"));
+    let pending = value["pending"].as_bool().unwrap_or(false);
+    let availability = if !tracks.is_empty() { "" } else if pending {
+        " — записи ещё готовятся"
+    } else {
+        " — нет доступных полных записей"
+    };
     WaveBatch {
         session_id: text(value, "session_id"),
-        title: text(value, "title"),
-        tracks: playables(value.get("tracks")),
+        title: title.into(),
+        tracks,
         preferences: value.get("preferences").cloned().unwrap_or_else(neutral_preferences),
-        notice: wave_notice(value),
-        pending: value
-            .get("pending")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        notice: wave_notice(value, title, availability),
+        pending,
     }
 }
 
@@ -943,9 +955,9 @@ pub fn neutral_preferences() -> Value {
     serde_json::json!({"energy": "any", "vocals": "any", "discovery": "balanced"})
 }
 
-fn wave_notice(value: &Value) -> String {
+fn wave_notice(value: &Value, title: &str, availability: &str) -> String {
     let p = &value["preparation"];
-    format!("Полные записи: готово {}, ожидают {}, недоступны {}. {}",
+    format!("{title}{availability}. Полные записи: готово {}, ожидают {}, недоступны {}. {}",
         p["ready"].as_u64().unwrap_or(0), p["pending"].as_u64().unwrap_or(0),
         p["unavailable"].as_u64().unwrap_or(0), value["preferences_status"].as_str().unwrap_or(""))
 }
@@ -1199,6 +1211,21 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn genre_wave_sends_only_the_selected_genre_and_keeps_the_empty_response_title() {
+        for (slug, label) in WAVE_GENRES {
+            let seed = WaveSeed::Genre(slug).json();
+            assert_eq!(seed, serde_json::json!({"genre": slug}));
+            let title = format!("Моя волна: {label}");
+            let empty = parse_wave(&serde_json::json!({
+                "title": title, "session_id": "selected", "seed": seed, "tracks": [], "pending": false,
+            }));
+            assert!(empty.tracks.is_empty() && !empty.pending);
+            assert_eq!(empty.title, title);
+            assert!(empty.notice.starts_with(&format!("{title} — нет доступных полных записей.")));
+        }
+    }
 
     #[test]
     fn similar_track_wave_sends_a_recording_seed_not_an_artist_or_a_personal_seed() {

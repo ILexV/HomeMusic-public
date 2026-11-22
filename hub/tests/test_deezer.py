@@ -125,6 +125,41 @@ async def test_search_page_without_next_uses_reported_total(dz, respx_mock, coun
     assert next_offset == expected
 
 
+async def test_genre_wave_uses_only_radios_of_requested_genre(dz, respx_mock, monkeypatch):
+    from app.mixes.genre_wave import genre_tracks
+    from app.services import svc
+
+    items = load("search_track")["data"]
+    respx_mock.get(f"{BASE_URL}/genre/98/radios").respond(json={"data": [
+        {"id": 10, "title": "Opera"}, {"id": 20, "title": "Classical"}]})
+    respx_mock.get(f"{BASE_URL}/radio/10/tracks").respond(json={"data": items[1:2]})
+    respx_mock.get(f"{BASE_URL}/radio/20/tracks").respond(json={"data": items[:1]})
+    monkeypatch.setattr(svc, "deezer", dz)
+    assert [t.id for t in await genre_tracks("classical", 0)] == [str(items[0]["id"])]
+    assert [t.id for t in await genre_tracks("classical", 1)] == [str(items[1]["id"])]
+    assert await genre_tracks("classical", 2) == []
+
+
+async def test_genre_wave_library_song_overrides_album_even_when_catalog_is_down(dz, respx_mock, monkeypatch):
+    from app.db import session_scope
+    from app.mixes.genre_wave import genre_tracks
+    from app.models import Album, Track
+    from app.services import svc
+
+    async with session_scope() as s:
+        album = Album(uid="compilation", title="Сборник", album_artist="Разные", genre="КЛАССИКА")
+        s.add(album)
+        await s.flush()
+        for name, tag in (("sonata", None), ("pop-song", "Pop"), ("untagged", None)):
+            s.add(Track(uid=name, path=f"{name}.flac", nd_song_id=name, artist="Artist", title=name, genre=tag,
+                        album_id=None if name == "untagged" else album.id, fingerprint=f"artist|{name}"))
+    monkeypatch.setattr(svc, "deezer", dz)
+    for genre_id in (98, 132):
+        respx_mock.get(f"{BASE_URL}/genre/{genre_id}/radios").respond(json={"error": {"code": 800}})
+    assert [t.ref for t in await genre_tracks("classical", 0)] == ["nd:sonata"]
+    assert [t.ref for t in await genre_tracks("pop", 0)] == ["nd:pop-song"]
+
+
 async def test_search_tracks_falls_back_to_plain_query(dz: DeezerClient, respx_mock: respx.Router):
     queries: list[str] = []
 

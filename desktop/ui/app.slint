@@ -124,6 +124,8 @@ export component AppWindow inherits Window {
     in-out property <string> home-notice;
     in-out property <[HomeRow]> home-features;
     in-out property <[HomeSection]> home-sections;
+    in-out property <[string]> wave-genres;
+    in-out property <bool> wave-start-busy;
 
     callback play-pause();
     callback stop();
@@ -162,6 +164,7 @@ export component AppWindow inherits Window {
     callback check-source(int);
     callback star-album(int);
     callback pick-home(int);
+    callback start-genre-wave(int);
     callback navigate(string);
     callback minimize();
     callback close-window();
@@ -446,6 +449,9 @@ export component AppWindow inherits Window {
                         home-notice: root.home-notice;
                         home-features: root.home-features;
                         home-sections: root.home-sections;
+                        wave-genres: root.wave-genres;
+                        wave-start-busy: root.wave-start-busy;
+                        start-genre-wave(index) => { root.start-genre-wave(index); }
                         navigate(page) => { root.navigate(page); }
                         pick-home(index) => { root.pick-home(index); }
                     }

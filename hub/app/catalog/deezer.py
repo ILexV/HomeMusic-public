@@ -372,6 +372,31 @@ class DeezerClient:
 
         return await self._cached_list(f"dz:artist_related:{id_}", self.cfg.ttl_artist_s, CatalogArtist, produce)
 
+    async def genre_radio_tracks(self, genre_id: int, page: int) -> list[CatalogTrack]:
+        """One editorial radio per page. Unlike the chart, even small genres have full radio batches."""
+        async def stations() -> list[int]:
+            data = await self._get(f"genre/{genre_id}/radios")
+            radios = data["data"]
+            # Rank the main station before themed stations, keeping Deezer's order otherwise.
+            primary = {"classical", "pop", "rock", "jazz", "electronic", "hip-hop"}
+            ordered = sorted(radios, key=lambda r: (r.get("title") or "").strip().casefold() not in primary)
+            return list(dict.fromkeys(r["id"] for r in ordered if r.get("id")))
+
+        ids = await cached(f"dz:genre_radios:{genre_id}", self.cfg.ttl_search_s, stations)
+        for radio_id in ids[page:]:
+            async def batch(radio_id: int = radio_id) -> list[CatalogTrack]:
+                data = await self._get(f"radio/{radio_id}/tracks", {"limit": 40})
+                return [map_track(t) for t in data["data"]]
+
+            try:
+                tracks = await self._cached_list(f"dz:radio_tracks:{radio_id}:40", self.cfg.ttl_search_s,
+                                                 CatalogTrack, batch)
+            except CatalogNotFound:
+                continue
+            if tracks:
+                return tracks
+        return []
+
     async def chart_artists(self, limit: int = 30) -> list[CatalogArtist]:
         """The chart's artists (Deezer picks the country by the caller's address): onboarding of a new user."""
 

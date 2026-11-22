@@ -292,7 +292,7 @@ export const launchOriginLabel = codeLabel({
 
 /** What a wave was started from (`seed_kind`). */
 export const seedKindLabel = codeLabel({
-  own: 'Своя волна', track: 'По треку', track_artist: 'По исполнителю трека', artist: 'По исполнителю',
+  own: 'Своя волна', genre: 'По жанру', track: 'По треку', track_artist: 'По исполнителю трека', artist: 'По исполнителю',
   library_artist: 'Радиостанция', file: 'По файлу', unknown: 'неизвестно',
 });
 
