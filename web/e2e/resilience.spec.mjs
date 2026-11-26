@@ -110,6 +110,37 @@ test('embedded genre wave sends both genres and their balance without restarting
   expect(starts).toHaveLength(1);
 });
 
+test('assistant search results play, like and download separately, including after reopening the chat', async ({ page }) => {
+  await login(page, 'alice', '/assistant');
+  await page.getByRole('textbox', { name: 'Сообщение ассистенту' }).fill('Найди песни Browser');
+  await page.getByRole('button', { name: 'Отправить' }).click();
+  const list = page.getByRole('list', { name: 'Найденные песни' });
+  await expect(list.getByRole('listitem')).toHaveCount(3);
+  await page.reload();
+  await list.getByRole('button', { name: 'Слушать «Browser rock»', exact: true }).click();
+  const player = page.getByRole('region', { name: 'Прослушивание' });
+  await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
+  await expect.poll(async () => Number(await player.getByRole('slider', { name: 'Перемотка' }).inputValue())).toBeGreaterThan(0);
+
+  const [like] = await Promise.all([
+    page.waitForResponse(r => r.url().endsWith('/api/star') && r.request().method() === 'POST'),
+    list.getByRole('button', { name: '«Browser single» — в понравившиеся' }).click(),
+  ]);
+  expect(like.ok()).toBeTruthy();
+  expect(like.request().postDataJSON().targets[0].ref).toBe('dz:710');
+  await expect(list.getByRole('button', { name: 'Убрать «Browser single» из понравившихся' })).toHaveAttribute('aria-pressed', 'true');
+
+  const demo = list.getByRole('listitem').filter({ hasText: 'Browser demo' });
+  const [download] = await Promise.all([
+    page.waitForResponse(r => r.url().endsWith('/api/downloads') && r.request().method() === 'POST'),
+    demo.getByRole('button', { name: 'Скачать трек' }).click(),
+  ]);
+  expect(download.ok()).toBeTruthy();
+  expect(download.request().postDataJSON()).toEqual({ track_refs: ['dz:711'] });
+  await expect(demo.getByText('качается')).toBeVisible();
+  await expect(demo.getByRole('button', { name: '«Browser demo» — в понравившиеся' })).toHaveAttribute('aria-pressed', 'false');
+});
+
 test('an automatic update waits for an unsent screenshot even without message text', async ({ page }) => {
   await login(page, 'alice', '/assistant');
   await page.locator('input[type=file][accept="image/*"]').setInputFiles({

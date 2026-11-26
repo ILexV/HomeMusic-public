@@ -21,7 +21,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import DownloadIn, RetryIn
+from app.api.schemas import DownloadIn, RetryIn, TrackOut
 from app.catalog.models import split_ref
 from app.ai.llm import completion_limit
 from app.config import get_settings
@@ -40,10 +40,12 @@ from app.models import (
     User,
     utcnow,
 )
+from app.providers.base import file_ref
 
 log = logging.getLogger(__name__)
 
 MAX_STEPS = 12
+MAX_RESULT_TRACKS = 30
 CHUNK = 200  # song ids per Navidrome call: a longer URL may be refused
 CONFIRM_TOOLS = {"delete_playlist", "delete_library_tracks"}
 SONGS_FROM = ("starred", "starred_from_imports", "playlist:<id>", "import_collection:<id>")
@@ -54,6 +56,10 @@ playlists, downloads. Do what the user asks right away with the tools, then say 
 don't ask for permission. Deleting a playlist or files of the library needs the user's confirmation: call the tool,
 the app shows a button — never say it is deleted.
 Start with `account_overview` when you need context. Never guess ids: take them from tool results.
+For song discovery use search_catalog for official recordings and search_files for internet searches, missing songs,
+alternate recordings or reuploads. Try another spelling or the other source when nothing matches. For recommendations,
+look up the recordings rather than inventing titles. Found songs appear below your reply with play, like and download
+buttons: briefly explain the results, don't repeat the list. A search request alone is NOT a request to download or like.
 Tables come as {"cols": [...], "rows": [[...]]}. Songs are Navidrome song ids; catalog tracks/albums are refs like dz:1.
 For many songs pass `songs_from` instead of listing ids: "starred", "starred_from_imports" (♥ an import from
 another service such as Yandex Music set), "playlist:<id>", "import_collection:<id>" (the songs of an imported
@@ -81,6 +87,9 @@ TOOLS = [
     _fn("search_catalog", "Search the music catalog (Deezer). Returns refs like dz:123 with ownership flags.",
         {"q": STR, "kind": {"type": "string", "enum": ["track", "album", "artist"]},
          "limit": {"type": "integer", "default": 5}}, ["q", "kind"]),
+    _fn("search_files", "Search internet audio providers for playable files. Prefer 'Artist - Title' when known. "
+        "Use reuploads for alternate uploads, live or uncensored versions.",
+        {"q": STR, "group": {"type": "string", "enum": ["sources", "reuploads"]}}, ["q"]),
     _fn("get_artist_discography", "Releases of an artist, newest first.",
         {"artist_ref": STR,
          "types": {"type": "array", "items": {"type": "string", "enum": ["album", "single", "ep", "compile"]}},
@@ -171,6 +180,7 @@ class ChatTools:
         self.user = user
         self.done: list[str] = []  # what the tools changed, in Russian, for the answer
         self.proposal: list[dict] = []  # changes waiting for the user's confirmation
+        self.tracks: dict[str, TrackOut] = {}  # trusted, ordered results of this turn only
         self._nd = None
 
     def nd(self):
@@ -250,6 +260,25 @@ class ChatTools:
         out["ai_spent_30d_usd"] = round(float(spent), 4)
         return out
 
+    def _show_tracks(self, tracks: list[TrackOut]) -> None:
+        for t in tracks:
+            if len(self.tracks) >= MAX_RESULT_TRACKS:
+                break
+            self.tracks[t.ref] = t
+
+    async def search_files(self, q: str, group: str = "sources") -> Any:
+        from app.api.search import find_provider_files
+
+        if not q.strip() or len(q) > 512 or group not in ("sources", "reuploads"):
+            raise ValueError("Нужен поисковый запрос и группа sources или reuploads")
+        found = await find_provider_files(q.strip(), group=group, limit=10)
+        tracks = [TrackOut(ref=file_ref(c.provider, c.provider_id), source="file", id=c.provider_id,
+                           artist=c.artist, title=c.title, album_title=c.album, duration_s=c.duration_s,
+                           explicit=c.explicit, cover_url=c.cover_url) for c in found.candidates]
+        # An exact upload is not interchangeable with a similarly named library track.
+        self._show_tracks(tracks)
+        return {**_tracks(tracks), "errors": found.errors}
+
     async def search_catalog(self, q: str, kind: str = "track", limit: int = 5) -> Any:
         from app.services import svc
 
@@ -258,7 +287,9 @@ class ChatTools:
             return table(["ref", "name", "fans"], [[a.ref, a.name, a.nb_fans] for a in res.artists])
         if kind == "album":
             return _albums(await annotate_albums(self.s, res.albums))
-        return _tracks(await annotate_tracks(self.s, res.tracks))
+        tracks = await annotate_tracks(self.s, res.tracks, self.user.id)
+        self._show_tracks(tracks)
+        return _tracks(tracks)
 
     async def get_artist_discography(self, artist_ref: str, types: list[str] | None = None, limit: int = 20) -> Any:
         from app.services import svc
@@ -271,15 +302,19 @@ class ChatTools:
     async def get_album(self, album_ref: str) -> Any:
         from app.api.catalog import get_album
 
-        a = (await annotate_albums(self.s, [await get_album(album_ref)]))[0]
+        a = (await annotate_albums(self.s, [await get_album(album_ref)], self.user.id))[0]
+        self._show_tracks(a.tracks or [])
         return {"ref": a.ref, "title": a.title, "artist": a.artist, "year": a.year, "in_library": a.owned_status,
                 "tracks": _tracks(a.tracks or [])}
 
     async def list_library(self, q: str, limit: int = 20) -> Any:
         from app.api.search import search_library
+        from app.mixes.resolve import library_track
 
-        return table(["track_id", "song_id", "track", "album"], [
-            [t.id, t.nd_song_id, label(t), t.album] for t in await search_library(self.s, q, limit=min(limit, 50))])
+        rows = await search_library(self.s, q, limit=min(limit, 50))
+        self._show_tracks([TrackOut(**library_track(t).model_dump(), owned=True, library_track_id=t.id,
+                                    nd_song_id=t.nd_song_id) for t in rows if t.nd_song_id or t.deezer_track_id])
+        return table(["track_id", "song_id", "track", "album"], [[t.id, t.nd_song_id, label(t), t.album] for t in rows])
 
     async def check_owned(self, refs: list[str]) -> Any:
         from app.services import svc
@@ -584,7 +619,7 @@ async def run_chat(s: AsyncSession, user: User, messages: list[dict[str, str]],
                                                             tool_choice="auto", extra_body=extra_body,
                                                             **completion_limit(settings.llm_base_url, 2500))
             except Exception as e:
-                if not tools.done and not tools.proposal:
+                if not tools.done and not tools.proposal and not tools.tracks:
                     raise
                 # the changes made so far stay: say what they are rather than fail the whole turn
                 log.warning("chat turn cut short: %r", e, extra={"user_id": user.id})
@@ -621,6 +656,8 @@ async def run_chat(s: AsyncSession, user: User, messages: list[dict[str, str]],
     if tokens_in or tokens_out or cost:
         s.add(AiUsage(user_id=user.id, kind="chat", tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost))
     out: dict[str, Any] = {"reply": reply, "done": tools.done, "actions": [], "cost_usd": round(cost, 6)}
+    if tools.tracks:
+        out["tracks"] = [t.model_dump(mode="json", exclude_none=True, exclude={"preview_url"}) for t in tools.tracks.values()]
     if tools.proposal:
         summary = "; ".join(describe(a) for a in tools.proposal)
         task = AssistantTask(user_id=user.id, input_kind="chat", input_ref={"messages": messages[-20:]},

@@ -138,6 +138,35 @@ async def chat(env, text: str, *script: dict) -> dict:
     return r.json()
 
 
+async def test_found_files_are_playable_saved_and_download_only_on_request(env, monkeypatch):
+    from app.services import svc
+    from tests.support import FakeDeezer, FakeProvider, cand
+
+    live = cand("live", "https://cdn.test/live.mp3", title="Группа крови (Live)")
+    offline = FakeProvider("unavailable")
+    offline.down = True
+    monkeypatch.setattr(svc, "providers", {"hitmoz": FakeProvider(cands=[live, live]), "unavailable": offline})
+    monkeypatch.setattr(svc, "deezer", FakeDeezer())
+    out = await chat(env, "Найди студийную и концертную версии Группы крови",
+                     completion(calls=[tool_call("search_catalog", q="Группа крови", kind="track"),
+                                       tool_call("search_files", q="Группа крови")]), completion("Нашёл две версии."))
+    c = env["client"]
+    tracks = out["tracks"]
+    assert [(t["ref"], t["title"]) for t in tracks] == [
+        ("dz:100", "Группа крови"), ("file:hitmoz:live", live.title)]
+    assert live.download_url not in json.dumps(tracks) and out["done"] == []
+    assert (await c.get("/api/downloads")).json() == []
+    history = (await c.get(f"/api/assistant/chats/{out['chat_id']}")).json()
+    assert history["messages"][-1]["tracks"] == tracks
+    ref = tracks[1]["ref"]
+    playback = await c.get("/api/listen", params={"ref": ref})
+    assert playback.status_code == 200 and playback.json()["page_url"] == live.page_url
+    queued = await c.post("/api/downloads", json={"track_refs": [ref]})
+    assert queued.status_code == 200 and queued.json()["queued"] == 1
+    item, = (await c.get("/api/downloads", params={"ref": ref})).json()
+    assert not item["star"] and item["title"] == live.title
+
+
 async def test_daily_limit_covers_all_chats_images_and_legacy_tasks(env):
     # One shared app for the full quota lifecycle avoids rebuilding it for each HTTP boundary.
     from sqlalchemy import update

@@ -715,6 +715,11 @@ Saved chats (`assistant_chats`) keep the messages as the PWA shows them; screens
 count. The title is the first message (up to 80 characters) or «Скриншот(ы)». The client still sends the whole
 visible history in `messages`.
 
+Song searches can return `tracks: TrackOut[]` on the assistant reply and its saved message (up to 30 distinct
+refs per turn, in display order). Rows come from Hub search results, not model prose. `search_files` searches the
+configured audio sources or reuploads and registers exact `file:<provider>:<id>` refs for the standard listen,
+star and download APIs; no upstream audio URL is needed from the client. Search itself does not enqueue downloads.
+
 Only deleting needs a confirmation. Action objects: `{type: "delete_playlist", playlist_id, name}` /
 `{type: "delete_library_tracks", track_ids, titles}` (files go to the trash, for everyone).
 

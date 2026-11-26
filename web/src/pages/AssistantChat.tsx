@@ -4,10 +4,11 @@
 // and in a store here, so a reply that comes after leaving the screen is not lost.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { api, errorMessage } from '../api/client';
-import type { ChatAction, ChatMessage, SavedChatMessage } from '../api/types';
+import type { ChatAction, ChatMessage, SavedChatMessage, TrackOut } from '../api/types';
+import { TrackRow } from '../components/catalog';
 import { Icon } from '../components/Icon';
 import { Button, ErrorState, IconButton, Loading, Spinner, cx } from '../components/ui';
-import { tracksWord } from '../lib/format';
+import { providerLabel, tracksWord } from '../lib/format';
 import { navigate, parseHash } from '../lib/router';
 import { attempt, toast } from '../lib/ui';
 import { holdAutoUpdate } from '../lib/update';
@@ -41,6 +42,7 @@ interface Entry {
   error?: boolean;
   /** what the assistant changed this turn */
   done?: string[];
+  tracks?: TrackOut[];
   proposal?: Proposal;
   /** screenshots sent from this screen (object URLs) */
   images?: string[];
@@ -99,6 +101,7 @@ const fromSaved = (m: SavedChatMessage): Entry => ({
   content: m.content,
   cost: m.cost,
   done: m.done,
+  tracks: m.tracks,
   imageCount: m.images,
   proposal: m.proposal && {
     taskId: m.proposal.task_id,
@@ -170,10 +173,12 @@ function describe(a: ChatAction): string {
   }
 }
 
-/** The model sees what it did on earlier turns: the Hub's list goes after its words. */
-const historyContent = (e: Entry) => (e.done?.length ? `${e.content}
-
-[Сделано: ${e.done.join('; ')}]` : e.content);
+/** Preserve the displayed order and exact refs for follow-ups like «скачай второй». */
+const historyContent = (e: Entry) => [
+  e.content,
+  e.done?.length && `[Сделано: ${e.done.join('; ')}]`,
+  e.tracks?.length && `[Найдено: ${e.tracks.map(t => `${t.ref} ${t.artist} — ${t.title}`).join('; ')}]`,
+].filter(Boolean).join('\n\n');
 
 const shotsWord = (n: number) => (n === 1 ? 'Скриншот' : `Скриншоты: ${n}`);
 
@@ -198,7 +203,7 @@ async function send(content: string, attached: File[]) {
       actions.length && r.task_id && r.confirm_token
         ? { taskId: r.task_id, token: r.confirm_token, summary: r.summary ?? '', actions, state: 'pending' }
         : undefined;
-    update((s) => ({ entries: [...s.entries, { id: ++seq, role: 'assistant', content: r.reply || '', cost: r.cost_usd, done: r.done ?? [], proposal }] }));
+    update((s) => ({ entries: [...s.entries, { id: ++seq, role: 'assistant', content: r.reply || '', cost: r.cost_usd, done: r.done ?? [], tracks: r.tracks, proposal }] }));
   } catch (e) {
     if (g === gen) update((s) => ({ entries: [...s.entries, { id: ++seq, role: 'assistant', content: errorMessage(e), error: true }] }));
   } finally {
@@ -296,7 +301,7 @@ function Conversation({ id, entries, loading, error, sending }: ChatState) {
           <Icon name="sparkle" size={32} className="mx-auto mb-3 text-accent" />
           <p className="mb-4">Спросите что угодно о музыке и своём аккаунте или пришлите скриншот плейлиста. Ассистент сам ставит ♥, собирает плейлисты и качает музыку, а удалить что-то — только после вашего подтверждения.</p>
           <div className="flex flex-col items-center gap-2">
-            {['Скачай последний альбом Земфиры', 'Что пришло из Яндекс Музыки?', 'Собери плейлист из лучших песен Сплина'].map((s) => (
+            {['Найди концертные версии «Группы крови» в интернете', 'Скачай последний альбом Земфиры', 'Что пришло из Яндекс Музыки?'].map((s) => (
               <button key={s} type="button" className="rounded-full bg-raised px-4 py-2 text-fg hover:bg-hover" onClick={() => setText(s)}>
                 {s}
               </button>
@@ -325,6 +330,16 @@ function Conversation({ id, entries, loading, error, sending }: ChatState) {
               >
                 {e.content}
               </div>
+            )}
+            {!!e.tracks?.length && (
+              <ol aria-label="Найденные песни" className="mt-2 w-full divide-y divide-line rounded-2xl border border-line bg-surface">
+                {e.tracks.map((t, i) => (
+                  <li key={t.ref}>
+                    {t.source === 'file' && <div className="px-4 pt-2 text-xs text-muted">{providerLabel(t.ref.split(':', 3)[1])}</div>}
+                    <TrackRow track={t} number={i + 1} showAlbum link={false} queue={e.tracks} />
+                  </li>
+                ))}
+              </ol>
             )}
             {!!e.done?.length && (
               <ul className="mt-1.5 max-w-[85%] space-y-1 px-1" aria-label="Сделано">

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable
+from itertools import zip_longest
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -171,6 +172,12 @@ async def search_providers(q: str = Query(min_length=1), provider: str | None = 
     """Raw downloadable files. "Artist - Title" is split for ranking; otherwise results keep provider order.
     `group`: only the regular sources, or only re-uploads by small channels (slower: SoundCloud takes seconds).
     Each file can then be listened to and downloaded by its ref "file:<provider>:<provider_id>" (`app.listen`)."""
+    return await find_provider_files(q, provider=provider, group=group)
+
+
+async def find_provider_files(q: str, *, provider: str | None = None,
+                              group: Literal["sources", "reuploads"] | None = None,
+                              limit: int | None = None) -> ProviderSearchOut:
     artist, _, title = q.partition(" - ")
     tq = TrackQuery(artist=artist.strip() if title else q.strip(), title=title.strip() if title else "")
     reuploads = {p.name for p in svc.reupload_providers()}
@@ -184,7 +191,7 @@ async def search_providers(q: str = Query(min_length=1), provider: str | None = 
         if p is None:
             return []
         try:
-            raw = await p.search(TrackQuery(artist=tq.artist, title=tq.title or ""), limit=15)
+            raw = await p.search(TrackQuery(artist=tq.artist, title=tq.title or ""), limit=min(limit or 15, 15))
         except Exception as e:
             out.errors.append(f"{name}: {e}")
             return []
@@ -193,7 +200,21 @@ async def search_providers(q: str = Query(min_length=1), provider: str | None = 
             return ranked or raw
         return raw
 
-    for lst in await asyncio.gather(*(one(n) for n in names)):
-        out.candidates.extend(lst)
+    batches = await asyncio.gather(*(one(n) for n in names))
+    if limit is None:
+        out.candidates = [c for batch in batches for c in batch]
+    else:
+        # A short chat list should include top hits from each source, not just the fastest/first source.
+        seen = set()
+        for rank in zip_longest(*batches):
+            for c in rank:
+                if c is None or (c.provider, c.provider_id) in seen:
+                    continue
+                seen.add((c.provider, c.provider_id))
+                out.candidates.append(c)
+                if len(out.candidates) == limit:
+                    break
+            if len(out.candidates) == limit:
+                break
     await listen.remember_files(out.candidates)
     return out

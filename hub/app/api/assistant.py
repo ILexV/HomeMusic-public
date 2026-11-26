@@ -13,9 +13,11 @@ from app.ai.limits import reserve_message, validate_message_text
 from app.ai.pipeline import confirm_task, task_dir, task_out
 from app.api.schemas import AssistantConfirmIn, AssistantTaskOut, AssistantTextIn
 from app.auth import current_user
+from app.catalog.models import CatalogTrack
 from app.db import get_session
 from app.events import bus
 from app.jobs.queue import enqueue, notify
+from app.library.owned import annotate_tracks
 from app.models import AssistantChat, AssistantTask, User, utcnow
 from app.upload_ingress import ASSISTANT_LIMITS, bounded_form
 
@@ -152,6 +154,8 @@ async def _save_turn(s: AsyncSession, user: User, chat_id: int | None, text: str
         mine["images"] = images
     reply: dict = {"role": "assistant", "content": out.get("reply") or "", "cost": out.get("cost_usd") or 0,
                    "done": out.get("done") or []}
+    if out.get("tracks"):
+        reply["tracks"] = out["tracks"]
     if out.get("task_id"):
         reply["proposal"] = {"task_id": out["task_id"], "token": out["confirm_token"], "summary": out.get("summary", ""),
                              "actions": out.get("actions") or [], "state": "pending"}
@@ -191,7 +195,16 @@ async def list_chats(user: User = Depends(current_user), s: AsyncSession = Depen
 @router.get("/chats/{chat_id}")
 async def get_chat(chat_id: int, user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
     c = await _own_chat(s, user, chat_id)
-    return {**_chat_brief(c), "messages": c.messages or []}
+    messages = c.messages or []
+    # Reopening a chat must not freeze a catalog track at «скачивается» or replay an obsolete pending like.
+    catalog = {t["ref"]: CatalogTrack.model_validate(t) for m in messages for t in m.get("tracks", [])
+               if t["source"] not in ("file", "nd")}
+    if catalog:
+        current = {t.ref: t.model_dump(mode="json", exclude_none=True)
+                   for t in await annotate_tracks(s, catalog.values(), user.id)}
+        messages = [{**m, "tracks": [current.get(t["ref"], t) for t in m["tracks"]]} if m.get("tracks") else m
+                    for m in messages]
+    return {**_chat_brief(c), "messages": messages}
 
 
 @router.delete("/chats/{chat_id}")

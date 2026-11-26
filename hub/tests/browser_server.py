@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -63,7 +64,8 @@ def run(root: Path) -> None:
         "CONFIG_FILE": str(root / "config.yaml"), "STATIC_DIR": str(root / "no-static"),
         "NAVIDROME_URL": ND, "NAVIDROME_ADMIN_USER": "alice", "NAVIDROME_ADMIN_PASSWORD": PASSWORD,
         "HUB_SECRET_KEY": Fernet.generate_key().decode(), "DISABLE_BACKGROUND": "true",
-        "LLM_API_KEY": "", "EMBEDDER_URL": "", "LASTFM_API_KEY": "", "SMTP_HOST": "",
+        "LLM_API_KEY": "browser-test", "LLM_BASE_URL": "https://llm.browser.test/v1",
+        "EMBEDDER_URL": "", "LASTFM_API_KEY": "", "SMTP_HOST": "",
         "WAVE_WAIT_S": "0.5",
         "OUTBOUND_PROXY": "", "OUTBOUND_PROXY_HOSTS": "", "PUBLIC_HUB_URL": "", "PUBLIC_MUSIC_URL": "",
     })
@@ -80,6 +82,23 @@ def run(root: Path) -> None:
         with respx.mock(assert_all_called=False, assert_all_mocked=True) as external:
             external.route(host="navidrome.browser.test").mock(side_effect=navidrome)
             external.get(host="api.deezer.com", path__regex=r"^/genre/\d+/radios$").mock(side_effect=genre_radios)
+            # Only the external language model/catalog are scripted; chat history, player and actions use the Hub.
+            from tests.test_ai_agent import completion, tool_call
+
+            def assistant(request: httpx.Request) -> httpx.Response:
+                turn = json.loads(request.content)["messages"][-1]
+                result = (completion("Нашёл записи.") if turn["role"] == "tool" else completion(calls=[
+                    tool_call("list_library", q="Browser rock"),
+                    tool_call("search_catalog", q="Browser finds", kind="track"),
+                ]))
+                return httpx.Response(200, json=result)
+
+            external.post("https://llm.browser.test/v1/chat/completions").mock(side_effect=assistant)
+            external.get(host="api.deezer.com", path="/search/track", params__contains={"q": "Browser finds"}).mock(
+                return_value=httpx.Response(200, json={"data": [
+                    {"id": 710, "title": "Browser single", "artist": {"name": "Browser band"}},
+                    {"id": 711, "title": "Browser demo", "artist": {"name": "Browser band"}},
+                ]}))
             async with original_lifespan(application):
                 library = root / "music" / "library"
                 with wave.open(str(library / "tone.wav"), "wb") as audio:

@@ -701,6 +701,7 @@ export interface ChatOut {
   cost_usd?: number;
   /** changes the assistant made this turn, written by the Hub */
   done?: string[];
+  tracks?: TrackOut[];
   actions?: ChatAction[];
   task_id?: number | null;
   confirm_token?: string | null;
@@ -732,6 +733,7 @@ export interface SavedChatMessage {
   images?: number;
   cost?: number;
   done?: string[];
+  tracks?: TrackOut[];
   proposal?: {
     task_id: number;
     token: string;
