@@ -27,6 +27,8 @@ import { localPlaybackAllowed, startSharedPlayback, stopSharedPlayback } from '.
 
 export interface ListenTrack {
   ref: string;
+  /** Never substitute a catalog preview, including when queued or restored later. */
+  fullOnly?: boolean;
   /** the library song, when the track is one: the Hub knows a playlist's song by this id (`idOf`) */
   nd_song_id?: string | null;
   /** a recommendation of the smart shuffle (`lib/smartShuffle.ts`): ✨ in the player and the queue; `label` — «Рекомендация
@@ -377,7 +379,7 @@ function play(a: HTMLAudioElement) {
     if (name === 'NotAllowedError') set({ phase: 'paused' });
     else if (name !== 'AbortError') {
       reportEnd(false, true);
-      set({ phase: 'error', error: errorMessage(e) });
+      set({ phase: 'error', error: state.error ?? errorMessage(e) });
     }
   });
 }
@@ -402,14 +404,16 @@ function start(queue: readonly ListenTrack[], index: number, trigger: PlayTrigge
   }, 20_000);
   pendingSeek = position;
   set({ track, queue, index, context: listContext, phase: autoplay ? 'resolving' : 'paused', info: null, error: null, position, duration: track.duration_s ?? 0 });
-  a.src = listenStreamUrl(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref, onWave());
+  const ref = track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref;
+  const full = !!track.fullOnly || onWave();
+  a.src = listenStreamUrl(ref, full);
   if (autoplay) play(a);
   else a.load();
   mediaSession(track);
   // the prefetch of this very track (it was next) is the request to wait for: don't abort it
   if (prefetching?.ref !== track.ref) prefetching?.ctl.abort();
   prefetching = null;
-  api.listen(track.nd_song_id ? `nd:${track.nd_song_id}` : track.ref, ctl.signal, onWave()).then(
+  api.listen(ref, ctl.signal, full).then(
     (info) => {
       if (resolving !== ctl) return;
       set({ info, duration: info.kind === 'preview' ? (info.duration_s ?? 30) : state.duration });
@@ -435,7 +439,7 @@ function refreshInfo() {
   refreshed = ref;
   const ctl = new AbortController();
   const timeout = setTimeout(() => ctl.abort(), 8000);
-  api.listen(ref, ctl.signal, onWave()).then(
+  api.listen(ref, ctl.signal, !!state.track?.fullOnly || onWave()).then(
     (info) => state.track?.ref === ref && set({ info }),
     () => {},
   ).finally(() => clearTimeout(timeout));
@@ -449,7 +453,7 @@ function prefetchNext() {
   const ctl = new AbortController();
   prefetching = { ref: nextTrack.ref, ctl };
   const timeout = setTimeout(() => ctl.abort(), 20_000);
-  api.listen(nextTrack.nd_song_id ? `nd:${nextTrack.nd_song_id}` : nextTrack.ref, ctl.signal, onWave()).catch(() => {
+  api.listen(nextTrack.nd_song_id ? `nd:${nextTrack.nd_song_id}` : nextTrack.ref, ctl.signal, !!nextTrack.fullOnly || onWave()).catch(() => {
     /* the track itself will show the error when it is reached */
   }).finally(() => clearTimeout(timeout));
 }
@@ -522,7 +526,8 @@ export function touchTrack(ref: string) {
 /** Tap on a catalog track: starts it (with `queue`, the list it belongs to, playing on after it), or
  * pauses/resumes it if it is the current one. `origin` — where the list was launched (by default by `context`). */
 export function listen(track: ListenTrack, queue?: readonly ListenTrack[], context?: string, origin?: LaunchOrigin) {
-  if (state.track?.ref === track.ref && state.phase !== 'error' && state.phase !== 'ended') return toggle();
+  if (state.track?.ref === track.ref && (!track.fullOnly || state.track.fullOnly || onWave()) &&
+      state.phase !== 'error' && state.phase !== 'ended') return toggle();
   startList(track, 'manual', queue, context, origin);
 }
 

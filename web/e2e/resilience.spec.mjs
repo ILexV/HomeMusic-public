@@ -121,6 +121,16 @@ test('assistant search results play, like and download separately, including aft
   const player = page.getByRole('region', { name: 'Прослушивание' });
   await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
   await expect.poll(async () => Number(await player.getByRole('slider', { name: 'Перемотка' }).inputValue())).toBeGreaterThan(0);
+  // Browse recommendations for the selected recording without interrupting the queue.
+  await page.route('**/api/wave/similar?ref=dz%3A710', route => route.fulfill({ json: [
+    { ref: 'dz:712', id: '712', source: 'dz', artist: 'Browser band', title: 'Similar single', owned: false, downloading: false },
+  ] }));
+  await list.getByRole('button', { name: 'Ещё: «Browser single»' }).click();
+  await page.getByRole('button', { name: 'Найти похожие треки' }).click();
+  const similar = list.getByRole('region', { name: 'Похожие на «Browser single»' });
+  await expect(similar.getByRole('button', { name: 'Слушать «Similar single»', exact: true })).toBeVisible();
+  await expect(player.getByText('Browser rock', { exact: true })).toBeVisible();
+  await similar.getByRole('button', { name: 'Скрыть похожие треки' }).click();
 
   const [like] = await Promise.all([
     page.waitForResponse(r => r.url().endsWith('/api/star') && r.request().method() === 'POST'),
@@ -139,6 +149,19 @@ test('assistant search results play, like and download separately, including aft
   expect(download.request().postDataJSON()).toEqual({ track_refs: ['dz:711'] });
   await expect(demo.getByText('качается')).toBeVisible();
   await expect(demo.getByRole('button', { name: '«Browser demo» — в понравившиеся' })).toHaveAttribute('aria-pressed', 'false');
+
+  // Both the audio element and its metadata must reject a preview-only source.
+  await page.route(/\/api\/listen(?:\/stream)?\?[^/]*dz%3A711/, route =>
+    route.fulfill({ status: 503, json: { detail: 'Полная версия недоступна' } }));
+  const [stream, info] = await Promise.all([
+    ...['/api/listen/stream', '/api/listen'].map(path => page.waitForRequest(req => {
+      const u = new URL(req.url());
+      return u.pathname === path && u.searchParams.get('ref') === 'dz:711';
+    })),
+    demo.getByRole('button', { name: 'Слушать «Browser demo»', exact: true }).click(),
+  ]);
+  for (const req of [stream, info]) expect(new URL(req.url()).searchParams.get('full')).toBe('1');
+  await expect(player.getByText('Полная версия недоступна')).toBeVisible();
 });
 
 test('an automatic update waits for an unsent screenshot even without message text', async ({ page }) => {

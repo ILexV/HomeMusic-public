@@ -27,6 +27,7 @@ import type {
   InviteOut,
   LibAlbumOut,
   LibTrackOut,
+  TrackOut,
   ListenOut,
   LoginIn,
   MeOut,
@@ -344,6 +345,7 @@ export const api = {
     request<{ ok: boolean }>('POST', `/api/smart-shuffle/${encodeURIComponent(id)}/hide`, { json: body }),
   smartAdd: (id: string, body: { ref?: string | null; nd_song_id?: string | null }) =>
     request<SmartAddOut>('POST', `/api/smart-shuffle/${encodeURIComponent(id)}/add`, { json: body }),
+  similarTracks: (ref: string, signal?: AbortSignal) => request<TrackOut[]>('GET', withQuery('/api/wave/similar', { ref }), { signal }),
   waveStart: (body: WaveStartIn) => request<WaveOut>('POST', '/api/wave/start', { json: body }),
   waveNext: (id: string, body: WaveNextIn) => request<WaveOut>('POST', `/api/wave/${encodeURIComponent(id)}/next`, { json: body }),
 

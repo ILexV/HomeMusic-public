@@ -9,6 +9,7 @@ import { TrackRow } from '../components/catalog';
 import { Icon } from '../components/Icon';
 import { Button, ErrorState, IconButton, Loading, Spinner, cx } from '../components/ui';
 import { providerLabel, tracksWord } from '../lib/format';
+import { useAsync } from '../lib/hooks';
 import { navigate, parseHash } from '../lib/router';
 import { attempt, toast } from '../lib/ui';
 import { holdAutoUpdate } from '../lib/update';
@@ -230,6 +231,7 @@ export function AssistantChat({ chatId }: { chatId: number | null }) {
 }
 
 function Conversation({ id, entries, loading, error, sending }: ChatState) {
+  const [similar, setSimilar] = useState<{ entry: number; ref: string } | null>(null);
   const [text, setText] = useState('');
   const [images, setImages] = useState<File[]>([]);
   const textChars = Array.from(text).length;
@@ -336,7 +338,10 @@ function Conversation({ id, entries, loading, error, sending }: ChatState) {
                 {e.tracks.map((t, i) => (
                   <li key={t.ref}>
                     {t.source === 'file' && <div className="px-4 pt-2 text-xs text-muted">{providerLabel(t.ref.split(':', 3)[1])}</div>}
-                    <TrackRow track={t} number={i + 1} showAlbum link={false} queue={e.tracks} />
+                    <TrackRow track={t} number={i + 1} showAlbum link={false} queue={e.tracks} fullOnly
+                      menuExtra={[{ icon: 'search', label: 'Найти похожие треки', onClick: () => setSimilar({ entry: e.id, ref: t.ref }) }]} />
+                    {similar?.entry === e.id && similar.ref === t.ref &&
+                      <SimilarTracks seed={t} onClose={() => setSimilar(null)} />}
                   </li>
                 ))}
               </ol>
@@ -459,5 +464,21 @@ function Conversation({ id, entries, loading, error, sending }: ChatState) {
         <IconButton icon="send" label="Отправить" type="submit" busy={sending} disabled={textTooLong || (!text.trim() && !images.length)} className="bg-accent !text-on-accent hover:!bg-accent-strong" />
       </form>
     </div>
+  );
+}
+
+function SimilarTracks({ seed, onClose }: { seed: TrackOut; onClose: () => void }) {
+  const result = useAsync(signal => api.similarTracks(seed.ref, signal), [seed.ref]);
+  const title = `Похожие на «${seed.title}»`;
+  return (
+    <section aria-label={title} className="border-l-2 border-accent bg-raised pb-2">
+      <div className="flex items-center justify-between pl-4">
+        <h3 className="text-sm font-medium">{title}</h3>
+        <IconButton icon="x" label="Скрыть похожие треки" onClick={onClose} />
+      </div>
+      {result.loading ? <Loading /> : result.error ? <ErrorState text={result.error} onRetry={result.reload} /> :
+        !result.data?.length ? <p className="px-4 text-sm text-muted">Похожих треков не найдено.</p> :
+        <ul>{result.data.map(t => <li key={t.ref}><TrackRow track={t} queue={result.data} showAlbum link={false} fullOnly /></li>)}</ul>}
+    </section>
   );
 }

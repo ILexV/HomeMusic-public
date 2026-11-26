@@ -101,6 +101,7 @@ export function TrackRow({
   link = true,
   onPlay,
   queue,
+  fullOnly = false,
   menuExtra,
 }: {
   track: TrackOut & { nd_album_id?: string | null; nd_artist_id?: string | null };
@@ -113,6 +114,7 @@ export function TrackRow({
   onPlay?: () => void;
   /** The list this row is in: the page player plays on through it. */
   queue?: readonly TrackOut[];
+  fullOnly?: boolean;
   /** More actions of the row's ⋯ menu (a playlist's «Убрать из плейлиста»). */
   menuExtra?: MenuExtra[];
 }) {
@@ -130,13 +132,19 @@ export function TrackRow({
     await downloadRef(track.ref);
     setBusy(false);
   };
-  const all = canPlayAll();
+  // The native playQueue bridge has no full-only switch. Keep strict queues in the page player.
+  const all = canPlayAll() && !fullOnly;
+  const forPlayer = (t: TrackOut) => {
+    const item = listenTrack(t);
+    if (fullOnly) item.fullOnly = true;
+    return item;
+  };
   const listenHere = all
     ? () => playTracks(queue?.includes(track) ? queue : [track], track)
-    : () => listen(listenTrack(track), queue?.map(listenTrack));
+    : () => listen(forPlayer(track), queue?.map(forPlayer));
   const songId = track.owned && canPlay() ? track.nd_song_id : null;
   // owned: the app's player; in a browser there is none, so the page plays the library file
-  const play = all ? listenHere : songId ? (onPlay ?? (() => playSongs([songId], 0))) : track.owned && !canPlay() ? listenHere : undefined;
+  const play = all || fullOnly ? listenHere : songId ? (onPlay ?? (() => playSongs([songId], 0))) : track.owned && !canPlay() ? listenHere : undefined;
   const rowPlays = STANDALONE && (!track.owned || (!(link && track.album_ref) && !!play));
   const playLabel = playing ? `Пауза «${track.title}»` : `Слушать «${track.title}»`;
   const sub = [track.artists?.length ? track.artists.join(', ') : track.artist, showAlbum ? track.album_title : null].filter(Boolean).join(' · ');
@@ -208,7 +216,7 @@ export function TrackRow({
             album_ref: track.album_ref,
             nd_album_id: track.nd_album_id,
             nd_artist_id: track.nd_artist_id,
-            listen: listenTrack(track),
+            listen: forPlayer(track),
           }}
           extra={menuExtra}
           className="-ml-1 w-8"
